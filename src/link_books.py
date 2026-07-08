@@ -29,7 +29,7 @@ import requests
 
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, write_artifact  # noqa: E402
+from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
 
 BATCH_LINES = 100
 RSS_CAP = 1.8e9          # self-recycle above this (bytes)
@@ -103,14 +103,18 @@ def _same_location(one, others) -> bool:
     return any(o.index.title.replace("Jerusalem Talmud ", "") == base for o in others)
 
 
-def process_book(linker, bk, lines, out_path, log, skipped_log):
-    """Link one book's lines into a list of LinkRecord (unambiguous only)."""
+def process_book(linker, bk, lines, skipped_log, heartbeat):
+    """Link one book's lines into a list of LinkRecord (unambiguous only).
+
+    Calls heartbeat() once per batch so a long book keeps its claim fresh and is
+    never falsely stolen by another worker mid-processing.
+    """
     records: list[LinkRecord] = []
     words = 0
     for i in range(0, len(lines), BATCH_LINES):
         batch = [(li, c) for li, c in lines[i:i + BATCH_LINES] if c and len(c.strip()) > 1]
+        heartbeat()
         if not batch:
-            _maybe_recycle(bk, i, log)
             continue
         words += sum(len(c.split()) for _, c in batch)
         try:
@@ -128,6 +132,9 @@ def process_book(linker, bk, lines, out_path, log, skipped_log):
         for (line_index, content), doc in zip(batch, docs):
             if doc is None:
                 continue
+            # Digest the exact content the offsets index, so the build can drop this line's
+            # links if the source book changed before Phase-2 applies them (cross-cycle drift).
+            src_hash = content_hash(content)
             for rr in doc.resolved_refs:
                 try:  # a broken citation must cost one link, never the book
                     ref = _pick_ref(rr)
@@ -137,10 +144,10 @@ def process_book(linker, bk, lines, out_path, log, skipped_log):
                     records.append(LinkRecord(
                         book_key=bk, line_index=line_index,
                         start=start, end=end, target_ref=ref.normal(),
+                        source_hash=src_hash,
                     ))
                 except Exception as ce:
                     skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
-        _maybe_recycle(bk, i, log)
     return records, words
 
 
@@ -156,12 +163,6 @@ def _pick_ref(rr):
         cands = [r.ref for r in rr.resolved_raw_refs if r.ref]
         return disambiguate_bavli(cands)
     return rr.ref if rr.ref else None
-
-
-def _maybe_recycle(bk, i, log):
-    if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss > RSS_CAP:
-        log(f"recycling mid-book={bk.canonical_he_title!r} at batch {i} (book will be redone)")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def main():
@@ -189,8 +190,11 @@ def main():
         with open(os.path.join(run, "logs", "skipped_lines.log"), "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def claim_dir(cid):
+        return os.path.join(run, "claim", cid)
+
     def try_claim(cid):
-        claim = os.path.join(run, "claim", cid)
+        claim = claim_dir(cid)
         hb = os.path.join(claim, "hb")
         try:
             os.mkdir(claim)
@@ -202,9 +206,24 @@ def main():
                     return False
             except OSError:
                 pass
+            # Stale (>CLAIM_STALE_SEC): take it over. The steal is not perfectly atomic,
+            # but per-book output is idempotent (same snapshot → same artifact), so at
+            # worst two workers redo one book and write identical bytes — never wrong.
             log(f"stealing stale claim {cid}")
         open(hb, "w").close()
         return True
+
+    def heartbeat(cid):
+        # Keep the claim fresh while this worker is actively processing the book.
+        try:
+            os.utime(os.path.join(claim_dir(cid), "hb"), None)
+        except OSError:
+            open(os.path.join(claim_dir(cid), "hb"), "w").close()
+
+    def release_claim(cid):
+        # Drop ownership so the book is immediately re-claimable (not orphaned until stale).
+        import shutil
+        shutil.rmtree(claim_dir(cid), ignore_errors=True)
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     django.setup()
@@ -227,12 +246,15 @@ def main():
         t0 = time.time()
         try:
             wait_for_ner(log)
-            records, words = process_book(linker, bk, lines, out_path, log, skipped_log)
+            records, words = process_book(linker, bk, lines, skipped_log, lambda: heartbeat(cid))
         except Exception as e:
             if not ner_alive():
-                log(f"NER outage during {bk.canonical_he_title!r}; waiting then retrying")
+                # Infrastructure outage, not a book problem: release the claim so this book
+                # is retried immediately (by any worker) once NER recovers — never orphaned.
+                log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
+                release_claim(cid)
                 wait_for_ner(log)
-                continue  # claim retained; retry this book
+                continue
             log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
             with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
                 ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
@@ -240,15 +262,21 @@ def main():
             continue
 
         # Atomic per-book output: write the artifact only when the whole book is linked.
-        # A book with zero links still gets an (empty) marker via the done file — but we
-        # only write an artifact file when there is at least one record, to keep the tree clean.
+        # A book with zero links writes no file (kept clean); a previously-linked book that
+        # now yields nothing has its stale artifact removed.
         if records:
             write_artifact(out_path, records)
         elif os.path.exists(out_path):
-            os.remove(out_path)  # a previously-linked book that now yields nothing
+            os.remove(out_path)
         open(os.path.join(run, "done", cid), "w").close()
         processed += 1
         log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={len(records)} {time.time()-t0:.1f}s")
+
+        # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
+        # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
+        if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss > RSS_CAP:
+            log(f"recycling (RSS over cap) after {processed} books this life")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     log(f"no more books (processed {processed} this life); exiting")
 

@@ -45,6 +45,11 @@
     "source_path": {
       "type": "string",
       "description": "Optional, debug only. Never authoritative for identity."
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "Optional. content_hash() of the source line content the offsets index; the build drops the link if it no longer matches the current DB content (source-side drift guard)."
     }
   }
 }

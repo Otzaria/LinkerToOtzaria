@@ -11,6 +11,7 @@ from linker_artifact import (  # noqa: E402
     BookKey,
     LinkRecord,
     book_key_to_relpath,
+    content_hash,
     read_artifact,
     validate_record,
     write_artifact,
@@ -48,6 +49,22 @@ class ArtifactContractTest(unittest.TestCase):
         back = LinkRecord.from_dict(rec.to_dict())
         self.assertEqual(rec, back)
 
+    def test_roundtrip_with_source_hash(self):
+        rec = LinkRecord(BookKey("s", "t"), line_index=3, start=1, end=5,
+                         target_ref="Genesis 1:1", source_hash=content_hash("abc"))
+        back = LinkRecord.from_dict(rec.to_dict())
+        self.assertEqual(rec, back)
+        self.assertEqual(back.source_hash, content_hash("abc"))
+
+    def test_content_hash_contract(self):
+        # These constants are asserted identically in the Kotlin importer's test
+        # (GenerateLinkerLinksTest.contentHashMatchesPythonContract) — the guard only works
+        # if both sides compute the exact same digest.
+        self.assertEqual(content_hash("hello"), "aaf4c61ddcc5e8a2")
+        self.assertEqual(content_hash("שלום עולם"), "643cbc0fbf2800d7")
+        self.assertEqual(content_hash(""), "da39a3ee5e6b4b0d")
+        self.assertRegex(content_hash("anything"), r"^[0-9a-f]{16}$")
+
     def test_relpath_is_deterministic_and_safe(self):
         p = book_key_to_relpath(BookKey("MoreBooks", "חזון איש"))
         self.assertEqual(p, os.path.join("artifacts", "MoreBooks", "חזון איש.jsonl"))
@@ -62,6 +79,16 @@ class ArtifactContractTest(unittest.TestCase):
             {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 5, "end": 5, "target_ref": "R"},
             {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": ""},
             {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "line_index_base": 1, "start": 0, "end": 1, "target_ref": "R"},
+            # unknown top-level field (schema is additionalProperties: false)
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "bogus": 1},
+            # unknown book_key field
+            {"book_key": {"source_name": "s", "canonical_he_title": "x", "z": 1}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R"},
+            # source_path wrong type
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "source_path": 5},
+            # source_hash wrong length
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "source_hash": "abc"},
+            # source_hash non-hex
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "source_hash": "ZZZZZZZZZZZZZZZZ"},
         ]
         for d in bad:
             with self.assertRaises(ValueError):
