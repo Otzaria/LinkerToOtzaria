@@ -35,6 +35,12 @@ BATCH_LINES = 100
 RSS_CAP = 1.8e9          # self-recycle above this (bytes)
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
+# getrusage(ru_maxrss) unit differs by OS: bytes on macOS, KiB on Linux. Normalize to bytes.
+_RSS_TO_BYTES = 1 if sys.platform == "darwin" else 1024
+
+
+def rss_bytes() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * _RSS_TO_BYTES
 
 
 def claim_id(bk: BookKey) -> str:
@@ -171,6 +177,9 @@ def main():
     ap.add_argument("--repo", required=True, help="LinkerToOtzaria repo root (artifacts/ written here)")
     ap.add_argument("--run-dir", required=True, help="transient workdir for claim/done/logs")
     ap.add_argument("--label", default="w1")
+    ap.add_argument("--only-books", default=None,
+                    help="restrict to book_keys listed in this JSON file "
+                         "([{source_name, canonical_he_title}, …]); used by the incremental driver")
     ap.add_argument("--bavli-convention", action="store_true",
                     help="keep Bavli/Yerushalmi & Mishnah/Gemara ambiguities (prefer Bavli/Mishnah); default drops all ambiguous")
     args = ap.parse_args()
@@ -179,7 +188,7 @@ def main():
     _BAVLI_CONVENTION = args.bavli_convention
 
     run = args.run_dir
-    for d in ("done", "claim", "logs"):
+    for d in ("done", "claim", "logs", "failed"):
         os.makedirs(os.path.join(run, d), exist_ok=True)
 
     def log(msg):
@@ -232,6 +241,12 @@ def main():
 
     con = sqlite3.connect(f"file:{args.snapshot}?mode=ro", uri=True)
     books = all_book_keys(con)
+    if args.only_books:
+        import json as _json
+        with open(args.only_books, encoding="utf-8") as fh:
+            wanted = {(b["source_name"], b["canonical_he_title"]) for b in _json.load(fh)}
+        books = [bk for bk in books if (bk.source_name, bk.canonical_he_title) in wanted]
+        log(f"restricted to {len(books)}/{len(wanted)} requested books")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")
 
     processed = 0
@@ -258,7 +273,15 @@ def main():
             log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
             with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
                 ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
-            open(os.path.join(run, "done", cid), "w").close()  # don't loop forever on a poison book
+            # Record the failure so the incremental driver holds this book OUT of the baseline:
+            # a book-level crash must never be silently absorbed into a done+exit-0 that would
+            # advance the baseline past it and orphan its links. The `done` marker still stops
+            # THIS run from retrying it (poison-book loop guard); the failed marker makes it a
+            # "still changed" book next cycle. Content = the book_key (cid is not reversible).
+            import json as _json
+            with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
+                _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+            open(os.path.join(run, "done", cid), "w").close()
             continue
 
         # Atomic per-book output: write the artifact only when the whole book is linked.
@@ -274,7 +297,7 @@ def main():
 
         # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
         # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
-        if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss > RSS_CAP:
+        if rss_bytes() > RSS_CAP:
             log(f"recycling (RSS over cap) after {processed} books this life")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 

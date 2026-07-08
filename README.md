@@ -22,8 +22,7 @@ delta churn. The expensive step (NER) runs only on **source** books that changed
 
 ```
 artifacts/<source_name>/<canonical_he_title>.jsonl   # one file per source book
-baseline/sefaria_manifest.txt                        # manifest the linker last processed
-baseline/otzaria_manifest.json                       # files_manifest.json last processed
+baseline/snapshot_hashes.json                        # per-book content hash of the snapshot last linked
 meta.json                                            # lineage of the last run
 schema/artifact.schema.json                          # JSON Schema for one record
 src/linker_artifact.py                               # THE format contract (shared code)
