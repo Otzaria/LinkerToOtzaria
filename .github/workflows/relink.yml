@@ -1,0 +1,94 @@
+name: relink
+
+# Incremental re-link: re-run the linker only on source books that changed since the last
+# run, then publish ref-based artifacts as a release the SeforimLibrary build consumes.
+#
+# Self-driving: it fetches its own inputs from the latest upstream releases, so the weekly
+# pipeline (and a manual run) can trigger it with no arguments.
+#   • lines_snapshot.db.zst  ← latest SeforimLibrary release (produced by its dumpLines step).
+#     The ONLY source-change clock: the linker links this content and stamps source_hash from
+#     it, so change-detection + baseline track exactly this file (per-book content hashes).
+#   • changelog_diff.json    ← latest SefariaExport release — target_ref rewrite ONLY.
+#
+# Cross-cycle by design: the snapshot comes from the *previous* completed DB build, and the
+# zst this run publishes is consumed by the *next* build's Phase-2. So a newly-changed source
+# book's links appear one weekly cycle later — and because detection keys off the snapshot,
+# that book is re-linked exactly when its change lands in a published snapshot (never orphaned).
+#
+# Runs on a SELF-HOSTED runner: the stack is heavy (MongoDB + Sefaria dump + gpu-server NER
+# models + Django), the same reason the SeforimLibrary DB build is self-hosted.
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [relink]
+
+permissions:
+  contents: write
+
+jobs:
+  relink:
+    runs-on: [self-hosted, Linux, X64, server-2]
+    timeout-minutes: 600
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      LINKER_DUMP_URL: ${{ secrets.LINKER_DUMP_URL }}
+      SEF_PROJECT: ${{ github.workspace }}/stack/Sefaria-Project
+      RUN_DIR: ${{ github.workspace }}/run
+    steps:
+      - name: Checkout linker repo
+        uses: actions/checkout@v4
+
+      - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
+        run: bash ci/setup_stack.sh
+
+      - name: Resolve upstream tags
+        id: tags
+        run: |
+          set -euo pipefail
+          SEF_TAG=$(gh release view -R Otzaria/SefariaExport   --json tagName -q .tagName)
+          LIB_TAG=$(gh release view -R Otzaria/SeforimLibrary  --json tagName -q .tagName)
+          echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
+          echo "library_tag=$LIB_TAG" >> "$GITHUB_OUTPUT"
+          echo "Sefaria export: $SEF_TAG | SeforimLibrary: $LIB_TAG"
+
+      - name: Fetch inputs (snapshot = source clock; changelog = target-rewrite only)
+        run: |
+          set -euo pipefail
+          mkdir -p inputs
+          # changelog is used ONLY to rewrite target_ref for Sefaria en-renames — not for
+          # source-change detection (that comes solely from the snapshot below).
+          gh release download "${{ steps.tags.outputs.sefaria_tag }}" -R Otzaria/SefariaExport \
+            -p changelog_diff.json -D inputs --clobber
+          # The snapshot is the ONLY source-change clock: the linker links its content and
+          # stamps source_hash from it, so change-detection + baseline track exactly this file.
+          gh release download "${{ steps.tags.outputs.library_tag }}" -R Otzaria/SeforimLibrary \
+            -p 'lines_snapshot.db.zst' -D inputs --clobber
+          unzstd -f inputs/lines_snapshot.db.zst
+
+      - name: Incremental re-link
+        run: |
+          set -euo pipefail
+          "$SEF_PROJECT/.venv/bin/python" src/incremental.py \
+            --repo "$PWD" \
+            --snapshot inputs/lines_snapshot.db \
+            --changelog inputs/changelog_diff.json \
+            --sefaria-tag "${{ steps.tags.outputs.sefaria_tag }}" \
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --run-dir "$RUN_DIR" \
+            --sef-project "$SEF_PROJECT" \
+            --python "$SEF_PROJECT/.venv/bin/python"
+
+      - name: Commit updated artifacts + baseline + meta
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A artifacts baseline meta.json
+          git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
+          git push
+
+      - name: Pack + publish linker_links.zst
+        env:
+          SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+        run: bash ci/pack_and_publish.sh
