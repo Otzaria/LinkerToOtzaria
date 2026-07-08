@@ -1,0 +1,8 @@
+# Artifact JSONL files are UTF-8 text (Hebrew). Keep them diff-friendly and never
+# munge line endings — the build reads them byte-for-byte.
+*.jsonl text eol=lf
+*.json  text eol=lf
+*.py    text eol=lf
+
+# The packed release artifact is binary (produced by the driver / CI, not committed raw).
+*.zst   binary

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local linker inputs/outputs that are NOT committed to the repo:
+# - the lines snapshot the build produces (large, transient)
+# - packed release bundles (published as release assets, not committed)
+lines_snapshot.db
+*.zst
+*.tmp

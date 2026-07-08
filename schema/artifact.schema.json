@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Otzaria/LinkerToOtzaria/schema/artifact.schema.json",
+  "title": "LinkerToOtzaria artifact record",
+  "description": "One clickable citation link (source -> target ref), one per JSONL line. Authoritative format defined by src/linker_artifact.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["book_key", "line_index", "start", "end", "target_ref"],
+  "properties": {
+    "book_key": {
+      "type": "object",
+      "description": "Source book identity; matches the generator BookKey(sourceName, canonicalHeTitle) exactly.",
+      "additionalProperties": false,
+      "required": ["source_name", "canonical_he_title"],
+      "properties": {
+        "source_name": { "type": "string", "minLength": 1 },
+        "canonical_he_title": { "type": "string", "minLength": 1 }
+      }
+    },
+    "line_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "0-based index of the source line; equals line.lineIndex in the DB."
+    },
+    "line_index_base": {
+      "type": "integer",
+      "const": 0,
+      "description": "Base of line_index. Only 0 is supported."
+    },
+    "start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Start offset of the citation span in the stored line content (line.content), HTML included."
+    },
+    "end": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Exclusive end offset; must be > start."
+    },
+    "target_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Canonical English Sefaria ref (Ref.normal()), resolved to a line at build time."
+    },
+    "source_path": {
+      "type": "string",
+      "description": "Optional, debug only. Never authoritative for identity."
+    }
+  }
+}

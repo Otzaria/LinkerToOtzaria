@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Lineage of the last linker run. Consumed by the SeforimLibrary build to verify it links against the same sources the linker processed. Populated by the incremental driver (stage 3); null before the first bootstrap.",
+  "sefaria": {
+    "export_tag": null,
+    "note": "Sefaria release tag the linker last processed (pin is stable)."
+  },
+  "otzaria": {
+    "manifest_sha256": null,
+    "note": "sha256 of the files_manifest.json the linker last processed. Otzaria has no stable release tag (deleted each run), so the manifest itself is the lineage."
+  },
+  "engine": {
+    "ambiguity_policy": "drop",
+    "bavli_convention": false
+  },
+  "generated_at": null
+}
