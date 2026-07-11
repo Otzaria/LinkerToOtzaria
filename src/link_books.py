@@ -32,7 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
 
 BATCH_LINES = 100
-RSS_CAP = 1.8e9          # self-recycle above this (bytes)
+# Self-recycle above this many bytes. Overridable per machine: recycling costs a full
+# library reload (~8s on M-series, ~22s on Neoverse-N1), so give workers headroom when
+# RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
+RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 # getrusage(ru_maxrss) unit differs by OS: bytes on macOS, KiB on Linux. Normalize to bytes.

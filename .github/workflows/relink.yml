@@ -1,27 +1,37 @@
 name: relink
 
 # Incremental re-link: re-run the linker only on source books that changed since the last
-# run, then publish ref-based artifacts as a release the SeforimLibrary build consumes.
+# run, then hand the ref-based artifacts back to the SeforimLibrary build.
 #
-# Self-driving: it fetches its own inputs from the latest upstream releases, so the weekly
-# pipeline (and a manual run) can trigger it with no arguments.
-#   • lines_snapshot.db.zst  ← latest SeforimLibrary release (produced by its dumpLines step).
+# SERIAL MODE (the weekly pipeline): the SeforimLibrary build dispatches this workflow
+# mid-build with library_run_id = its own run id, after uploading THIS build's fresh
+# lines_snapshot.db.zst as a workflow artifact. We download that exact snapshot, re-link
+# only the books it changed (delta — minutes), publish linker_links.zst, and ALSO upload
+# it as a workflow artifact of THIS run so the waiting build fetches it deterministically
+# and injects the links into the same DB before releasing. No cross-cycle lag: every DB
+# release ships a complete link set.
+#
+# STANDALONE MODE (manual dispatch, no library_run_id): fetches the snapshot from the
+# latest SeforimLibrary release instead — useful for re-running the linker between builds.
+#
+#   • lines_snapshot.db.zst  ← the build run's artifact (serial) or latest release (manual).
 #     The ONLY source-change clock: the linker links this content and stamps source_hash from
 #     it, so change-detection + baseline track exactly this file (per-book content hashes).
 #   • changelog_diff.json    ← latest SefariaExport release — target_ref rewrite ONLY.
-#
-# Cross-cycle by design: the snapshot comes from the *previous* completed DB build, and the
-# zst this run publishes is consumed by the *next* build's Phase-2. So a newly-changed source
-# book's links appear one weekly cycle later — and because detection keys off the snapshot,
-# that book is re-linked exactly when its change lands in a published snapshot (never orphaned).
 #
 # Runs on a SELF-HOSTED runner: the stack is heavy (MongoDB + Sefaria dump + gpu-server NER
 # models + Django), the same reason the SeforimLibrary DB build is self-hosted.
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [relink]
+    inputs:
+      library_run_id:
+        description: >
+          SeforimLibrary workflow run id to take lines_snapshot.db.zst from (serial mode,
+          passed by the build). Leave empty to use the latest SeforimLibrary release.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -39,6 +49,19 @@ jobs:
       - name: Checkout linker repo
         uses: actions/checkout@v4
 
+      # The artifact store is NOT in git (see .gitignore) — the release payload IS the
+      # store. Restore the full per-book artifact set from the latest published pack, or
+      # this run would re-pack ONLY the books it just relinked and every other book would
+      # lose its links at the next build. Fails loudly if no release exists.
+      - name: Restore artifact store from the latest release
+        run: |
+          set -euo pipefail
+          rm -rf artifacts
+          gh release download -R "$GITHUB_REPOSITORY" --pattern 'linker_links.zst' -D .
+          tar --use-compress-program=unzstd -xf linker_links.zst artifacts
+          rm -f linker_links.zst
+          echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
+
       - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
         run: bash ci/setup_stack.sh
 
@@ -47,10 +70,8 @@ jobs:
         run: |
           set -euo pipefail
           SEF_TAG=$(gh release view -R Otzaria/SefariaExport   --json tagName -q .tagName)
-          LIB_TAG=$(gh release view -R Otzaria/SeforimLibrary  --json tagName -q .tagName)
           echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
-          echo "library_tag=$LIB_TAG" >> "$GITHUB_OUTPUT"
-          echo "Sefaria export: $SEF_TAG | SeforimLibrary: $LIB_TAG"
+          echo "Sefaria export: $SEF_TAG"
 
       - name: Fetch inputs (snapshot = source clock; changelog = target-rewrite only)
         run: |
@@ -60,10 +81,20 @@ jobs:
           # source-change detection (that comes solely from the snapshot below).
           gh release download "${{ steps.tags.outputs.sefaria_tag }}" -R Otzaria/SefariaExport \
             -p changelog_diff.json -D inputs --clobber
-          # The snapshot is the ONLY source-change clock: the linker links its content and
-          # stamps source_hash from it, so change-detection + baseline track exactly this file.
-          gh release download "${{ steps.tags.outputs.library_tag }}" -R Otzaria/SeforimLibrary \
-            -p 'lines_snapshot.db.zst' -D inputs --clobber
+          # The snapshot is the ONLY source-change clock. Serial mode takes it from the
+          # dispatching build run (the DB being built right now); standalone mode takes
+          # the latest published release.
+          rm -f inputs/lines_snapshot.db.zst
+          if [ -n "${{ inputs.library_run_id }}" ]; then
+            echo "Serial mode: snapshot from SeforimLibrary run ${{ inputs.library_run_id }}"
+            gh run download "${{ inputs.library_run_id }}" -R Otzaria/SeforimLibrary \
+              -n lines-snapshot -D inputs
+          else
+            LIB_TAG=$(gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName)
+            echo "Standalone mode: snapshot from SeforimLibrary release $LIB_TAG"
+            gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
+              -p 'lines_snapshot.db.zst' -D inputs --clobber
+          fi
           unzstd -f inputs/lines_snapshot.db.zst
 
       - name: Incremental re-link
@@ -79,12 +110,14 @@ jobs:
             --sef-project "$SEF_PROJECT" \
             --python "$SEF_PROJECT/.venv/bin/python"
 
-      - name: Commit updated artifacts + baseline + meta
+      # artifacts/ is gitignored (release payload only) — git tracks just the delta
+      # memory: baseline/snapshot_hashes.json (the source-change clock) + meta.json.
+      - name: Commit updated baseline + meta
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A artifacts baseline meta.json
+          git add baseline meta.json
           git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
           git push
 
@@ -92,3 +125,13 @@ jobs:
         env:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: bash ci/pack_and_publish.sh
+
+      # The waiting SeforimLibrary build (serial mode) downloads the pack from THIS run —
+      # a deterministic handshake, immune to any "latest release" race.
+      - name: Upload linker_links.zst as a run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linker-links
+          path: linker_links.zst
+          retention-days: 7
+          if-no-files-found: error
