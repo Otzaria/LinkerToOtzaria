@@ -32,7 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
 
 BATCH_LINES = 100
-RSS_CAP = 1.8e9          # self-recycle above this (bytes)
+# Self-recycle above this many bytes. Overridable per machine: recycling costs a full
+# library reload (~8s on M-series, ~22s on Neoverse-N1), so give workers headroom when
+# RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
+RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 # getrusage(ru_maxrss) unit differs by OS: bytes on macOS, KiB on Linux. Normalize to bytes.
@@ -51,7 +54,9 @@ def claim_id(bk: BookKey) -> str:
 
 def ner_alive() -> bool:
     try:
-        requests.post(NER_URL, json={"text": "בדיקה", "lang": "he"}, timeout=60)
+        # raise_for_status: an HTTP 500 means the service is NOT healthy — without it
+        # a broken NER reads as "alive" and the failure gets misattributed to the book.
+        requests.post(NER_URL, json={"text": "בדיקה", "lang": "he"}, timeout=60).raise_for_status()
         return True
     except Exception:
         return False
@@ -125,35 +130,51 @@ def process_book(linker, bk, lines, skipped_log, heartbeat):
         words += sum(len(c.split()) for _, c in batch)
         try:
             docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
+            if len(docs) != len(batch):  # a short reply would silently drop tail lines
+                raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
         except Exception:
             if not ner_alive():
                 raise
+            # Batch failed but NER is alive: replay line-by-line to pinpoint the broken
+            # line, then FAIL the book on it (logged first, for diagnosis). A swallowed
+            # line would silently drop all its citations while the book counts as linked
+            # and the baseline advances past it — the bootstrap lost 216 lines this way.
             docs = []
             for li, c in batch:
                 try:
                     docs.append(linker.bulk_link([c], type_filter="citation")[0])
                 except Exception as le:
-                    docs.append(None)
                     skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
+                    raise RuntimeError(
+                        f"line {li} failed to link: {type(le).__name__}: {le}") from le
         for (line_index, content), doc in zip(batch, docs):
-            if doc is None:
-                continue
             # Digest the exact content the offsets index, so the build can drop this line's
             # links if the source book changed before Phase-2 applies them (cross-cycle drift).
             src_hash = content_hash(content)
+            # spaCy spans are Python code-point offsets; the Kotlin consumer indexes the
+            # SAME content string in UTF-16 units. They diverge only past a non-BMP char
+            # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
+            has_non_bmp = any(ord(c) > 0xFFFF for c in content)
             for rr in doc.resolved_refs:
-                try:  # a broken citation must cost one link, never the book
+                try:
                     ref = _pick_ref(rr)
                     if ref is None:
                         continue
                     start, end = rr.raw_entity.span.range
+                    if has_non_bmp:
+                        start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
+                        end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
                     records.append(LinkRecord(
                         book_key=bk, line_index=line_index,
                         start=start, end=end, target_ref=ref.normal(),
                         source_hash=src_hash,
                     ))
                 except Exception as ce:
+                    # A broken citation is OUR bug (resolver/normal()), not corpus noise —
+                    # fail the book loudly (logged first) instead of silently losing a link.
                     skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
+                    raise RuntimeError(
+                        f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
     return records, words
 
 
@@ -252,48 +273,53 @@ def main():
     processed = 0
     for bk in books:
         cid = claim_id(bk)
-        if os.path.exists(os.path.join(run, "done", cid)):
-            continue
-        if not try_claim(cid):
-            continue
-        lines = book_lines(con, bk)
-        out_path = os.path.join(args.repo, book_key_to_relpath(bk))
-        t0 = time.time()
-        try:
-            wait_for_ner(log)
-            records, words = process_book(linker, bk, lines, skipped_log, lambda: heartbeat(cid))
-        except Exception as e:
-            if not ner_alive():
-                # Infrastructure outage, not a book problem: release the claim so this book
-                # is retried immediately (by any worker) once NER recovers — never orphaned.
-                log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
-                release_claim(cid)
+        # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
+        # next one — every other worker may already be past it, and a book with neither
+        # `done` nor `failed` would silently advance the baseline (the driver also
+        # asserts completeness, but the engine must not create the gap to begin with).
+        while True:
+            if os.path.exists(os.path.join(run, "done", cid)):
+                break
+            if not try_claim(cid):
+                break  # another live worker owns it — it will mark done/failed
+            lines = book_lines(con, bk)
+            out_path = os.path.join(args.repo, book_key_to_relpath(bk))
+            t0 = time.time()
+            try:
                 wait_for_ner(log)
-                continue
-            log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
-            with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
-                ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
-            # Record the failure so the incremental driver holds this book OUT of the baseline:
-            # a book-level crash must never be silently absorbed into a done+exit-0 that would
-            # advance the baseline past it and orphan its links. The `done` marker still stops
-            # THIS run from retrying it (poison-book loop guard); the failed marker makes it a
-            # "still changed" book next cycle. Content = the book_key (cid is not reversible).
-            import json as _json
-            with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
-                _json.dump(bk.to_dict(), ff, ensure_ascii=False)
-            open(os.path.join(run, "done", cid), "w").close()
-            continue
+                records, words = process_book(linker, bk, lines, skipped_log, lambda: heartbeat(cid))
+            except Exception as e:
+                if not ner_alive():
+                    # Infrastructure outage, not a book problem: release the claim, wait
+                    # for NER, and retry this book (any worker may pick it up meanwhile).
+                    log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
+                    release_claim(cid)
+                    wait_for_ner(log)
+                    continue
+                log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
+                with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
+                    ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
+                # Record the failure so the incremental driver FAILS the run loudly:
+                # a book-level crash must never be silently absorbed into a done+exit-0.
+                # The `done` marker still stops THIS run from retrying it (poison-book
+                # loop guard). Content = the book_key (cid is not reversible).
+                import json as _json
+                with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
+                    _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+                open(os.path.join(run, "done", cid), "w").close()
+                break
 
-        # Atomic per-book output: write the artifact only when the whole book is linked.
-        # A book with zero links writes no file (kept clean); a previously-linked book that
-        # now yields nothing has its stale artifact removed.
-        if records:
-            write_artifact(out_path, records)
-        elif os.path.exists(out_path):
-            os.remove(out_path)
-        open(os.path.join(run, "done", cid), "w").close()
-        processed += 1
-        log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={len(records)} {time.time()-t0:.1f}s")
+            # Atomic per-book output: write the artifact only when the whole book is linked.
+            # A book with zero links writes no file (kept clean); a previously-linked book
+            # that now yields nothing has its stale artifact removed.
+            if records:
+                write_artifact(out_path, records)
+            elif os.path.exists(out_path):
+                os.remove(out_path)
+            open(os.path.join(run, "done", cid), "w").close()
+            processed += 1
+            log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={len(records)} {time.time()-t0:.1f}s")
+            break
 
         # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
         # so releasing it here reclaims memory without abandoning a claimed, half-linked book.

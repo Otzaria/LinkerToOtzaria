@@ -72,7 +72,9 @@ class BookKey:
 class LinkRecord:
     book_key: BookKey
     line_index: int           # 0-based index into the source book's lines (== line.lineIndex)
-    start: int                # offset into the stored line content (line.content), HTML included
+    start: int                # offset into the stored line content (line.content), HTML included;
+                              # UTF-16 code units (the Kotlin consumer's String indexing) — the
+                              # engine converts spaCy's code-point offsets on non-BMP lines
     end: int                  # exclusive; end > start
     target_ref: str           # canonical English Sefaria ref, e.g. "Psalms 16:8" — the stable key
     line_index_base: int = 0  # only 0 is supported; explicit for forward-safety

@@ -10,3 +10,7 @@ venv/
 lines_snapshot.db
 *.zst
 *.tmp
+# Generated link artifacts are the release payload (shipped as linker_links.zst / on Oracle),
+# NOT committed. Keep the dir via .gitkeep but ignore everything the linker writes into it.
+/artifacts/*
+!/artifacts/.gitkeep
