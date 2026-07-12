@@ -96,7 +96,7 @@ if [ ! -f "$DUMP_MARKER" ]; then
   done
   mongorestore --gzip --drop "$DUMP_DIR"
   sha256sum "$CACHE/dump-dl/SHA256SUMS" | cut -c1-16 > "$CACHE/.dump-content-id"
-  rm -rf "$CACHE/dump-dl"
+  rm -rf "$CACHE/dump-dl" "$CACHE/dump-extract"
   rm -f "$CACHE"/.dump-restored-*
   touch "$DUMP_MARKER"
 fi
@@ -119,6 +119,7 @@ if [ ! -f "$MODELS/.ready" ]; then
     [ -n "$whl" ] || { echo "::error::${name} wheel missing from the $MODELS_TAG archive"; exit 1; }
     unzip -qo "$whl" -d "$MODELS/${name}_pkg"
   done
+  rm -f "$MODELS/linker_models.tar.gz"
   touch "$MODELS/.ready"
 fi
 model_path() { find "$MODELS/$1_pkg/$1" -maxdepth 1 -mindepth 1 -type d -name "$1-*" | head -1; }

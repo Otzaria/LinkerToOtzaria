@@ -201,3 +201,10 @@ jobs:
       - name: Stop NER (free RAM for the waiting build)
         if: always()
         run: pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
+
+      # The workspace persists between runs on this self-hosted runner — without this,
+      # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
+      # removed here is re-fetched deterministically by the next run.
+      - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
+        if: always()
+        run: rm -rf inputs artifacts linker_links.zst
