@@ -152,6 +152,15 @@ NER_MARKER="$CACHE/.ner-identity"
 if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
   pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
   sleep 2
+  # pkill cannot signal another user's processes and its failure is swallowed above.
+  # If :5051 STILL answers, a foreign gunicorn owns the port — adopting it would
+  # neutralize the fingerprint (this exact gap let a bootstrap-era leftover serve
+  # production CI runs). Fail loudly instead.
+  if curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
+        -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
+    echo "::error::a gunicorn we cannot kill (another user?) still owns :5051 — refusing to adopt it; clean it up manually"
+    exit 1
+  fi
 fi
 if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
