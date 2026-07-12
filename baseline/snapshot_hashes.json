@@ -1,4 +1,5 @@
-[
+{
+"books": [
 {
 "canonical_he_title": "אבן ספיר",
 "hash": "4627bbc859fc8716",
@@ -36659,4 +36660,6 @@
 "hash": "7e0f95f2aefdab54",
 "source_name": "wikisourceToOtzaria"
 }
-]
+],
+"engine_fingerprint": "dump=1157948d14f1;engine_src=8e3f462861911bd2;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
+}
