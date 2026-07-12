@@ -40,6 +40,7 @@ class IncrementalE2ETest(unittest.TestCase):
         self.fail_engine = False        # whole-process failure (engine raises)
         self.fail_books = set()         # per-book failures (engine writes a failed marker, exits 0)
         self.skip_done_books = set()    # books left with NO marker at all (the outage gap)
+        self.engine_exit_codes = [0]    # per-worker exit codes returned by the engine
         self._orig_engine = inc._run_engine
         inc._run_engine = self._fake_engine
 
@@ -69,6 +70,8 @@ class IncrementalE2ETest(unittest.TestCase):
             os.makedirs(fdir, exist_ok=True)
             with open(os.path.join(fdir, bk[1]), "w", encoding="utf-8") as ff:
                 json.dump({"source_name": bk[0], "canonical_he_title": bk[1]}, ff, ensure_ascii=False)
+        # mimic _run_engine's contract: per-worker exit codes, judged against the ledger
+        return self.engine_exit_codes
 
     def _args(self):
         return argparse.Namespace(
@@ -188,6 +191,27 @@ class IncrementalE2ETest(unittest.TestCase):
 
         self.skip_done_books = set()
         self.assertEqual(inc.run_incremental(self._args()), 3)  # clean rerun settles all
+
+    def test_dead_worker_with_complete_ledger_proceeds(self):
+        # A worker killed mid-run (kernel OOM on a huge book) whose books were finished
+        # by peers via stale-claim steal leaves a complete ledger — the run must NOT be
+        # failed over the corpse, or every such death forces a from-zero multi-hour rerun.
+        _snapshot(self.snap, self._rows())
+        self.engine_exit_codes = [0, -9, 0]
+        self.assertEqual(inc.run_incremental(self._args()), 3)
+        self.assertEqual(len(inc.read_snapshot_baseline(os.path.join(self.repo, "baseline"))), 3)
+
+    def test_dead_worker_with_incomplete_ledger_fails(self):
+        # Same death, but a book was left with no marker — the hole is fatal and the
+        # error must carry the exit codes so the death is visible in the failure.
+        _snapshot(self.snap, self._rows())
+        self.engine_exit_codes = [0, -9, 0]
+        self.skip_done_books = {self.B}
+        with self.assertRaises(RuntimeError) as ctx:
+            inc.run_incremental(self._args())
+        self.assertIn("neither done nor failed", str(ctx.exception))
+        self.assertIn("exit codes", str(ctx.exception))
+        self.assertEqual(inc.read_snapshot_baseline(os.path.join(self.repo, "baseline")), {})
 
     def test_serial_mode_forbids_fingerprint_full_relink(self):
         # Under a waiting build (serial), a real fingerprint change must fail fast with

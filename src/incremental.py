@@ -336,6 +336,7 @@ def run_incremental(args) -> int:
 
     # 4. Re-link only changed/new books, against the SAME snapshot we hashed.
     failed: set[tuple[str, str]] = set()
+    codes: list[int] = []
     if changed:
         os.makedirs(args.run_dir, exist_ok=True)
         # Fresh engine ledger for THIS invocation. done/claim/failed markers are meaningful only
@@ -350,7 +351,7 @@ def run_incremental(args) -> int:
         with open(only, "w", encoding="utf-8") as fh:
             json.dump([b.to_dict() for b in changed], fh, ensure_ascii=False)
         _log(f"re-linking {len(changed)} changed books")
-        _run_engine(args, only)  # raises on whole-process failure → baseline NOT advanced below
+        codes = _run_engine(args, only)
         failed = read_failed_books(args.run_dir)
 
         # Completeness assertion: every requested book must carry a `done` marker.
@@ -364,8 +365,10 @@ def run_incremental(args) -> int:
         if missing:
             raise RuntimeError(
                 f"{len(missing)} requested book(s) finished with neither done nor "
-                "failed marker — refusing to advance the baseline: "
+                "failed marker — refusing to advance the baseline"
+                + (f" (worker exit codes {codes})" if any(codes) else "") + ": "
                 + ", ".join(sorted(f"{b.source_name}/{b.canonical_he_title}" for b in missing)))
+
 
     # A per-book crash FAILS the whole run, loudly. In the serial pipeline the build waits
     # on this run and injects its output into the DB being released — a missing book would
@@ -374,8 +377,19 @@ def run_incremental(args) -> int:
     if failed:
         raise RuntimeError(
             f"{len(failed)} book(s) failed inside the engine — failing the run "
-            "(baseline not advanced): "
+            "(baseline not advanced"
+            + (f"; worker exit codes {codes}" if any(codes) else "") + "): "
             + ", ".join(sorted(f"{s}/{t}" for s, t in failed)))
+
+    # The ledger is the sole authority on output state: write_artifact is atomic and a
+    # done marker lands only after the book's artifact did. A worker that died (kernel
+    # OOM on a huge book) whose books were then finished by peers via stale-claim steal
+    # left no hole — failing here would only force a from-zero rerun of a multi-hour
+    # relink. Deaths with a hole are already fatal above (missing/failed carry the codes).
+    if any(codes):
+        _log(f"WARNING: {sum(1 for c in codes if c)} engine worker(s) died "
+             f"(exit codes {codes}) but every requested book carries a clean done "
+             "marker — peers covered the dead workers' books; proceeding on the ledger")
 
     # 5. Advance baseline + lineage. Any failure never reaches here (raised above), so the
     #    baseline advances to exactly the snapshot hashes that were fully linked.
@@ -397,8 +411,9 @@ def _run_engine(args, only_books_path):
     """Invoke link_books.py on the changed subset, in the Sefaria-Project venv/cwd.
 
     --engine-workers N runs N engine processes in parallel — they coordinate through the
-    run-dir claim ledger, so this is the same mechanism the bootstrap used. Any worker
-    exiting non-zero fails the run (baseline not advanced)."""
+    run-dir claim ledger, so this is the same mechanism the bootstrap used. Returns the
+    workers' exit codes; the caller judges them against the ledger (a dead worker whose
+    books were finished by peers via stale-claim steal is not a failure)."""
     import subprocess
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_books.py")
     base_cmd = [args.python, engine,
@@ -412,14 +427,14 @@ def _run_engine(args, only_books_path):
     workers = max(1, int(getattr(args, "engine_workers", 1) or 1))
     _log(f"running engine ({workers} worker(s)): " + " ".join(base_cmd))
     if workers == 1:
-        subprocess.run(base_cmd, cwd=args.sef_project, env=env, check=True)
-        return
+        return [subprocess.run(base_cmd, cwd=args.sef_project, env=env).returncode]
     procs = [subprocess.Popen(base_cmd + ["--label", f"w{n:02d}"],
                               cwd=args.sef_project, env=env)
              for n in range(1, workers + 1)]
     codes = [p.wait() for p in procs]
     if any(codes):
-        raise RuntimeError(f"engine worker(s) failed with exit codes {codes}")
+        _log(f"engine worker exit codes: {codes} — deferring judgment to the ledger")
+    return codes
 
 
 def main():

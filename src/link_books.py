@@ -272,8 +272,25 @@ def main():
         log(f"restricted to {len(books)}/{len(wanted)} requested books")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")
 
+    def pending_books():
+        # A single pass is not enough: a worker walks PAST a book whose claim a peer
+        # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
+        # one-pass world ever comes back, and the whole run fails hours later on the
+        # completeness assertion. Rescan until every book is done: try_claim steals
+        # stale claims (dead owner) and refuses fresh ones (live owner still working),
+        # so each round either shrinks the set or politely waits a live peer out.
+        remaining = books
+        while remaining:
+            for bk in remaining:
+                yield bk
+            remaining = [bk for bk in remaining
+                         if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
+            if remaining:
+                log(f"rescan: {len(remaining)} book(s) still lack a done marker; sleeping 60s")
+                time.sleep(60)
+
     processed = 0
-    for bk in books:
+    for bk in pending_books():
         cid = claim_id(bk)
         # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
         # next one — every other worker may already be past it, and a book with neither

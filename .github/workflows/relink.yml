@@ -147,8 +147,9 @@ jobs:
       # Any per-book/per-line failure fails this step (and the waiting build) loudly —
       # see incremental.py + link_books.py. The fingerprint covers everything that
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
-      # so flipping e.g. --bavli-convention also forces a full relink. 4 workers keep
-      # a deliberate full relink inside the job ceiling (~11h instead of ~43h).
+      # so flipping e.g. --bavli-convention also forces a full relink. 3 workers keep
+      # a deliberate full relink inside the job ceiling while leaving OOM headroom on
+      # the 22GB host — a single book was observed to drive one worker past 7GB anon.
       - name: Incremental re-link
         run: |
           set -euo pipefail
@@ -164,7 +165,7 @@ jobs:
             --sef-project "$SEF_PROJECT" \
             --python "$SEF_PROJECT/.venv/bin/python" \
             --engine-fingerprint "$FINGERPRINT" \
-            --engine-workers ${{ inputs.library_run_id != '' && '2' || '4' }} \
+            --engine-workers ${{ inputs.library_run_id != '' && '2' || '3' }} \
             ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }}
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
