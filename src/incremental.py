@@ -402,8 +402,10 @@ def _run_engine(args, only_books_path):
     import subprocess
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_books.py")
     base_cmd = [args.python, engine,
-                "--snapshot", args.snapshot, "--repo", os.path.abspath(args.repo),
-                "--run-dir", args.run_dir, "--only-books", only_books_path]
+                # abspath everything: workers run with cwd=sef_project, so any
+                # workspace-relative path (e.g. inputs/lines_snapshot.db) breaks there.
+                "--snapshot", os.path.abspath(args.snapshot), "--repo", os.path.abspath(args.repo),
+                "--run-dir", os.path.abspath(args.run_dir), "--only-books", os.path.abspath(only_books_path)]
     if args.bavli_convention:
         base_cmd.append("--bavli-convention")
     env = dict(os.environ, PYTHONPATH=args.sef_project + ":" + os.environ.get("PYTHONPATH", ""))
