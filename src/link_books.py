@@ -128,35 +128,51 @@ def process_book(linker, bk, lines, skipped_log, heartbeat):
         words += sum(len(c.split()) for _, c in batch)
         try:
             docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
+            if len(docs) != len(batch):  # a short reply would silently drop tail lines
+                raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
         except Exception:
             if not ner_alive():
                 raise
+            # Batch failed but NER is alive: replay line-by-line to pinpoint the broken
+            # line, then FAIL the book on it (logged first, for diagnosis). A swallowed
+            # line would silently drop all its citations while the book counts as linked
+            # and the baseline advances past it — the bootstrap lost 216 lines this way.
             docs = []
             for li, c in batch:
                 try:
                     docs.append(linker.bulk_link([c], type_filter="citation")[0])
                 except Exception as le:
-                    docs.append(None)
                     skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
+                    raise RuntimeError(
+                        f"line {li} failed to link: {type(le).__name__}: {le}") from le
         for (line_index, content), doc in zip(batch, docs):
-            if doc is None:
-                continue
             # Digest the exact content the offsets index, so the build can drop this line's
             # links if the source book changed before Phase-2 applies them (cross-cycle drift).
             src_hash = content_hash(content)
+            # spaCy spans are Python code-point offsets; the Kotlin consumer indexes the
+            # SAME content string in UTF-16 units. They diverge only past a non-BMP char
+            # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
+            has_non_bmp = any(ord(c) > 0xFFFF for c in content)
             for rr in doc.resolved_refs:
-                try:  # a broken citation must cost one link, never the book
+                try:
                     ref = _pick_ref(rr)
                     if ref is None:
                         continue
                     start, end = rr.raw_entity.span.range
+                    if has_non_bmp:
+                        start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
+                        end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
                     records.append(LinkRecord(
                         book_key=bk, line_index=line_index,
                         start=start, end=end, target_ref=ref.normal(),
                         source_hash=src_hash,
                     ))
                 except Exception as ce:
+                    # A broken citation is OUR bug (resolver/normal()), not corpus noise —
+                    # fail the book loudly (logged first) instead of silently losing a link.
                     skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
+                    raise RuntimeError(
+                        f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
     return records, words
 
 
