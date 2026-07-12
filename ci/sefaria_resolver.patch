@@ -1,0 +1,41 @@
+diff --git a/sefaria/model/linker/ref_resolver.py b/sefaria/model/linker/ref_resolver.py
+index 882da4b..5f888d6 100644
+--- a/sefaria/model/linker/ref_resolver.py
++++ b/sefaria/model/linker/ref_resolver.py
+@@ -590,7 +590,7 @@ class RefResolver:
+             if len(context_full_matches) > 0:
+                 # assumption is we don't want refs that used context at book level, then didn't get refined more when considering context free
+                 # BUT did get refined more when considering context
+-                context_free_matches = list(filter(lambda x: not (x.num_resolved(include={ContextPart}) > 0 and x.ref.normal() in refs_matched), context_free_matches))
++                context_free_matches = list(filter(lambda x: not (x.num_resolved(include={ContextPart}) > 0 and x.ref is not None and x.ref.normal() in refs_matched), context_free_matches))
+             temp_matches += context_free_matches + context_full_matches
+         return ResolvedRefPruner.prune_refined_ref_part_matches(self._thoroughness, temp_matches)
+ 
+@@ -943,6 +943,11 @@ class ResolvedRefPruner:
+         """
+         Applies some heuristics to remove false positives
+         """
++        # A match whose Ref is detached from any live Index is unusable — every
++        # downstream consumer (order_id, __hash__, normal, merge) crashes on it,
++        # taking the whole line down. Drop such matches up-front.
++        resolved_refs = [r for r in resolved_refs
++                         if r.ref is None or r.ref.index is not None]
+         resolved_refs = ResolvedRefPruner.remove_incorrect_matches(resolved_refs)
+         if len(resolved_refs) == 0:
+             return resolved_refs
+diff --git a/sefaria/model/text.py b/sefaria/model/text.py
+index 74985d0..9b7ed96 100644
+--- a/sefaria/model/text.py
++++ b/sefaria/model/text.py
+@@ -3857,6 +3857,11 @@ class Ref(object, metaclass=RefCacheType):
+         r = self
+         while not r.is_segment_level():
+             sublen = ja.sub_array_length([s-1 for s in r.toSections],until_last_nonempty=True)
++            if sublen is None:
++                # Empty section in the state JA: there IS no last segment to pad to.
++                # InputError is the linker's designed no-match path (see
++                # ResolvedRefRefiner.refine) — a TypeError here crashed whole lines.
++                raise InputError("Cannot pad to last segment of empty section: {}".format(r.normal()))
+             r = r.subref([sublen])
+ 
+         return r
