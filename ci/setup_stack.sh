@@ -69,6 +69,14 @@ fi
 if [ ! -f "$SEF/sefaria/local_settings.py" ]; then
   cp "$SEF/sefaria/local_settings_example.py" "$SEF/sefaria/local_settings.py"
 fi
+# Enforce the linker endpoint on EVERY run — the example defaults to a disabled
+# linker on :5000, and Sefaria's bulk NER calls silently target it (every book
+# then fails with connection-refused). :5051 is where setup starts gunicorn.
+LS="$SEF/sefaria/local_settings.py"
+sed -i "s|^ENABLE_LINKER = .*|ENABLE_LINKER = True|" "$LS"
+sed -i "s|^GPU_SERVER_URL = .*|GPU_SERVER_URL = 'http://localhost:5051'|" "$LS"
+grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://localhost:5051'$" "$LS" \
+  || { echo "::error::local_settings.py no longer carries ENABLE_LINKER/GPU_SERVER_URL as expected — upstream layout changed"; exit 1; }
 
 # ── 3. MongoDB + Sefaria dump (this repo's dump release, cached per tag) ────
 # Same pattern as the models: a fixed release in THIS repo (split into <2GiB parts
@@ -96,7 +104,7 @@ if [ ! -f "$DUMP_MARKER" ]; then
   done
   mongorestore --gzip --drop "$DUMP_DIR"
   sha256sum "$CACHE/dump-dl/SHA256SUMS" | cut -c1-16 > "$CACHE/.dump-content-id"
-  rm -rf "$CACHE/dump-dl"
+  rm -rf "$CACHE/dump-dl" "$CACHE/dump-extract"
   rm -f "$CACHE"/.dump-restored-*
   touch "$DUMP_MARKER"
 fi
@@ -119,6 +127,7 @@ if [ ! -f "$MODELS/.ready" ]; then
     [ -n "$whl" ] || { echo "::error::${name} wheel missing from the $MODELS_TAG archive"; exit 1; }
     unzip -qo "$whl" -d "$MODELS/${name}_pkg"
   done
+  rm -f "$MODELS/linker_models.tar.gz"
   touch "$MODELS/.ready"
 fi
 model_path() { find "$MODELS/$1_pkg/$1" -maxdepth 1 -mindepth 1 -type d -name "$1-*" | head -1; }
@@ -133,7 +142,8 @@ if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
   "$GPU/.venv/bin/pip" install --upgrade pip
-  "$GPU/.venv/bin/pip" install -r "$GPU/app/requirements.txt"
+  # gunicorn is the serving runtime, not an app dependency — requirements.txt omits it.
+  "$GPU/.venv/bin/pip" install -r "$GPU/app/requirements.txt" gunicorn
   printf '%s' "$GPU_VENV_ID" > "$GPU/.venv/.identity"
 fi
 cat > "$GPU/app/local_config.py" <<EOF
@@ -152,6 +162,15 @@ NER_MARKER="$CACHE/.ner-identity"
 if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
   pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
   sleep 2
+  # pkill cannot signal another user's processes and its failure is swallowed above.
+  # If :5051 STILL answers, a foreign gunicorn owns the port — adopting it would
+  # neutralize the fingerprint (this exact gap let a bootstrap-era leftover serve
+  # production CI runs). Fail loudly instead.
+  if curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
+        -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
+    echo "::error::a gunicorn we cannot kill (another user?) still owns :5051 — refusing to adopt it; clean it up manually"
+    exit 1
+  fi
 fi
 if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then

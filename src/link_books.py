@@ -24,8 +24,8 @@ import sqlite3
 import sys
 import time
 
-import django
-import requests
+# django/requests are imported lazily (main/ner_alive): the incremental driver imports
+# this module for claim_id alone and must not drag the whole Sefaria stack with it.
 
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +53,7 @@ def claim_id(bk: BookKey) -> str:
 
 
 def ner_alive() -> bool:
+    import requests
     try:
         # raise_for_status: an HTTP 500 means the service is NOT healthy — without it
         # a broken NER reads as "alive" and the failure gets misattributed to the book.
@@ -256,6 +257,7 @@ def main():
         shutil.rmtree(claim_dir(cid), ignore_errors=True)
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+    import django
     django.setup()
     from sefaria.model import library
     linker = library.get_linker("he")
@@ -270,8 +272,25 @@ def main():
         log(f"restricted to {len(books)}/{len(wanted)} requested books")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")
 
+    def pending_books():
+        # A single pass is not enough: a worker walks PAST a book whose claim a peer
+        # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
+        # one-pass world ever comes back, and the whole run fails hours later on the
+        # completeness assertion. Rescan until every book is done: try_claim steals
+        # stale claims (dead owner) and refuses fresh ones (live owner still working),
+        # so each round either shrinks the set or politely waits a live peer out.
+        remaining = books
+        while remaining:
+            for bk in remaining:
+                yield bk
+            remaining = [bk for bk in remaining
+                         if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
+            if remaining:
+                log(f"rescan: {len(remaining)} book(s) still lack a done marker; sleeping 60s")
+                time.sleep(60)
+
     processed = 0
-    for bk in books:
+    for bk in pending_books():
         cid = claim_id(bk)
         # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
         # next one — every other worker may already be past it, and a book with neither
