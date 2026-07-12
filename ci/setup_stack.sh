@@ -133,7 +133,8 @@ if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
   "$GPU/.venv/bin/pip" install --upgrade pip
-  "$GPU/.venv/bin/pip" install -r "$GPU/app/requirements.txt"
+  # gunicorn is the serving runtime, not an app dependency — requirements.txt omits it.
+  "$GPU/.venv/bin/pip" install -r "$GPU/app/requirements.txt" gunicorn
   printf '%s' "$GPU_VENV_ID" > "$GPU/.venv/.identity"
 fi
 cat > "$GPU/app/local_config.py" <<EOF
