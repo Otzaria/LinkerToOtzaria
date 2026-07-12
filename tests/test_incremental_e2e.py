@@ -114,22 +114,63 @@ class IncrementalE2ETest(unittest.TestCase):
         self.assertEqual(inc.run_incremental(self._args()), 3)
         self.assertEqual(self.requested[-1], {self.A, self.B, self.C})
 
-    def test_per_book_failure_is_held_out_of_baseline_and_retried(self):
-        # A book that crashes INSIDE the engine (process still exits 0) must NOT enter the
-        # baseline, or it would be orphaned. It stays "changed" and is retried next cycle.
+    def test_per_book_failure_fails_the_run_loudly(self):
+        # A book that crashes INSIDE the engine (process still exits 0) must FAIL the whole
+        # run: in the serial pipeline the build waits on this output, and a missing book
+        # would ship a silently-incomplete DB. Baseline untouched → the rerun retries all.
         _snapshot(self.snap, self._rows())
         self.fail_books = {self.B}
-        self.assertEqual(inc.run_incremental(self._args()), 3)
-        base = inc.read_snapshot_baseline(os.path.join(self.repo, "baseline"))
-        self.assertIn(self.A, base)
-        self.assertIn(self.C, base)
-        self.assertNotIn(self.B, base)  # the failed book was held out
+        with self.assertRaises(RuntimeError) as ctx:
+            inc.run_incremental(self._args())
+        self.assertIn("שמות", str(ctx.exception))
+        self.assertEqual(inc.read_snapshot_baseline(os.path.join(self.repo, "baseline")), {})
 
-        # next run, same snapshot: A and C are settled; only B is still "changed" → retried.
-        self.fail_books = set()  # B links cleanly this time
-        inc.run_incremental(self._args())
-        self.assertEqual(self.requested[-1], {self.B})
-        self.assertIn(self.B, inc.read_snapshot_baseline(os.path.join(self.repo, "baseline")))
+        # rerun with a healthy engine: everything is still "new" → all 3 linked, baseline full.
+        self.fail_books = set()
+        self.assertEqual(inc.run_incremental(self._args()), 3)
+        self.assertEqual(self.requested[-1], {self.A, self.B, self.C})
+        base = inc.read_snapshot_baseline(os.path.join(self.repo, "baseline"))
+        self.assertEqual(set(base), {self.A, self.B, self.C})
+
+    def test_engine_fingerprint_change_forces_full_relink(self):
+        # Same snapshot, new engine fingerprint → the whole baseline is invalidated so the
+        # artifact store is never a mix of two engine versions.
+        _snapshot(self.snap, self._rows())
+        args = self._args()
+        args.engine_fingerprint = "engine-v1"
+        self.assertEqual(inc.run_incremental(args), 3)
+        self.assertEqual(inc.run_incremental(args), 0)  # same engine → delta empty
+        args.engine_fingerprint = "engine-v2"
+        self.assertEqual(inc.run_incremental(args), 3)  # new engine → full relink
+        self.assertEqual(self.requested[-1], {self.A, self.B, self.C})
+        self.assertEqual(
+            inc.read_baseline_fingerprint(os.path.join(self.repo, "baseline")),
+            "engine-v2")
+
+    def test_changelog_books_en_renamed_contract(self):
+        # The real changelog_diff.json nests the diff under "books" (see SefariaExport
+        # generate_changelog.py) — the driver must read it from there, not the root.
+        import json as _json
+        _snapshot(self.snap, self._rows())
+        self.assertEqual(inc.run_incremental(self._args()), 3)
+        art = os.path.join(self.repo, "artifacts", "Sefaria", "בראשית.jsonl")
+        os.makedirs(os.path.dirname(art), exist_ok=True)
+        from linker_artifact import BookKey, LinkRecord, write_artifact
+        write_artifact(art, [LinkRecord(
+            book_key=BookKey("Sefaria", "בראשית"), line_index=0, start=0, end=4,
+            target_ref="Old Name 1:1", source_hash="0" * 16)])
+        changelog = os.path.join(self.tmp, "changelog_diff.json")
+        with open(changelog, "w", encoding="utf-8") as fh:
+            _json.dump({"new_tag": "t2", "old_tag": "t1",
+                        "books": {"en_renamed": [
+                            {"old_en": "Old Name", "new_en": "New Name"}]},
+                        "versions": {"added": []}}, fh, ensure_ascii=False)
+        args = self._args()
+        args.changelog = changelog
+        inc.run_incremental(args)
+        from linker_artifact import read_artifact
+        recs = list(read_artifact(art))
+        self.assertEqual(recs[0].target_ref, "New Name 1:1")
 
     def test_stale_run_dir_ledger_is_cleared_before_engine(self):
         # A reused run_dir must not let a stale `done` marker skip a changed book (which would

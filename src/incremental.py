@@ -13,10 +13,13 @@ those snapshot hashes.
   • changed  = books whose per-book content hash in the CURRENT snapshot differs from the
                baseline (includes books new to the snapshot) → re-link.
   • removed  = books in the baseline no longer in the snapshot → delete their artifacts.
-  • baseline advances to the current snapshot hashes ONLY after a successful engine run,
-    EXCEPT books that crashed inside the engine (recorded in the run's `failed/` ledger):
-    those are held at their prior baseline state so they stay "changed" and retry next
-    cycle — a per-book crash is never silently absorbed into the baseline (no orphaning).
+  • baseline advances to the current snapshot hashes ONLY after a fully successful engine
+    run. ANY per-book crash (the run's `failed/` ledger) fails the whole run loudly — in
+    the serial pipeline the build is waiting on this output, and a missing book would ship
+    a silently-incomplete DB. Rerun retries everything (baseline untouched).
+  • the baseline also records an ENGINE FINGERPRINT (Sefaria/gpu-server commits, model
+    versions, policy flags — assembled by the workflow). A fingerprint change invalidates
+    the whole baseline → full relink, so the artifact store is never a mix of engines.
 
 The changelog (`changelog_diff.json`) is used ONLY to rewrite `target_ref` for Sefaria
 English renames — never for source-change detection. That is best-effort (latest changelog
@@ -205,19 +208,39 @@ def read_failed_books(run_dir: str) -> set[tuple[str, str]]:
 
 
 def read_snapshot_baseline(baseline_dir: str) -> dict[tuple[str, str], str]:
+    return _read_baseline_file(baseline_dir)[0]
+
+
+def read_baseline_fingerprint(baseline_dir: str) -> str | None:
+    return _read_baseline_file(baseline_dir)[1]
+
+
+def _read_baseline_file(baseline_dir: str) -> tuple[dict[tuple[str, str], str], str | None]:
     path = os.path.join(baseline_dir, _BASELINE_NAME)
     if not os.path.exists(path):
-        return {}
+        return {}, None
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
-    return {(e["source_name"], e["canonical_he_title"]): e["hash"] for e in data}
+    # v1 (bootstrap) was a bare list with no fingerprint; v2 wraps it:
+    # {"engine_fingerprint": …, "books": […]} — a v1 file reads as fingerprint None.
+    books = data if isinstance(data, list) else data["books"]
+    fingerprint = None if isinstance(data, list) else data.get("engine_fingerprint")
+    return (
+        {(e["source_name"], e["canonical_he_title"]): e["hash"] for e in books},
+        fingerprint,
+    )
 
 
-def write_snapshot_baseline(baseline_dir: str, hashes: dict[tuple[str, str], str]) -> None:
-    data = [
+def write_snapshot_baseline(
+    baseline_dir: str,
+    hashes: dict[tuple[str, str], str],
+    engine_fingerprint: str | None = None,
+) -> None:
+    books = [
         {"source_name": s, "canonical_he_title": t, "hash": h}
         for (s, t), h in sorted(hashes.items())
     ]
+    data = {"engine_fingerprint": engine_fingerprint, "books": books}
     path = os.path.join(baseline_dir, _BASELINE_NAME)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=0, sort_keys=True)
@@ -233,13 +256,15 @@ def sha256_of_file(path: str) -> str:
 
 
 def write_meta(repo: str, *, sefaria_export_tag, snapshot_sha256, book_count,
-               ambiguity_policy="drop", bavli_convention=False, generated_at=None) -> None:
+               ambiguity_policy="drop", bavli_convention=False, generated_at=None,
+               engine_fingerprint=None) -> None:
     meta = {
         "schema_version": 2,
         "description": "Lineage of the last linker run (see stage 3). Source-change clock = snapshot.",
         "snapshot": {"sha256": snapshot_sha256, "book_count": book_count},
         "sefaria": {"export_tag": sefaria_export_tag},
-        "engine": {"ambiguity_policy": ambiguity_policy, "bavli_convention": bavli_convention},
+        "engine": {"ambiguity_policy": ambiguity_policy, "bavli_convention": bavli_convention,
+                   "fingerprint": engine_fingerprint},
         "generated_at": generated_at,
     }
     with open(os.path.join(repo, "meta.json"), "w", encoding="utf-8") as fh:
@@ -262,19 +287,30 @@ def run_incremental(args) -> int:
     os.makedirs(artifacts_dir, exist_ok=True)
 
     # 1. Diff the CURRENT snapshot's per-book content hashes against the baseline.
+    #    A changed engine fingerprint invalidates the WHOLE baseline (full relink):
+    #    the engine version shapes the output, so a partial relink under a new engine
+    #    would leave the artifact store a mix of engines.
     current = snapshot_book_hashes(args.snapshot)
-    baseline = read_snapshot_baseline(baseline_dir)
+    baseline, stored_fingerprint = _read_baseline_file(baseline_dir)
+    fingerprint = getattr(args, "engine_fingerprint", None)
+    if baseline and fingerprint is not None and stored_fingerprint != fingerprint:
+        _log("engine fingerprint changed "
+             f"({stored_fingerprint!r} -> {fingerprint!r}) — FULL relink")
+        baseline = {}
     changed, removed = plan_from_snapshot(current, baseline)
     _log(f"snapshot: {len(current)} books | changed/new={len(changed)} removed={len(removed)}")
 
     # 2. Target en-renames: rewrite target_ref across ALL artifacts (no linking). Target-only.
+    # The changelog_diff.json contract (SefariaExport generate_changelog.py) nests the book
+    # diff under "books": {"new_tag":…, "books": {"en_renamed": […], …}, "versions": …}.
     changelog = {}
     if args.changelog and os.path.exists(args.changelog):
         with open(args.changelog, encoding="utf-8") as fh:
             changelog = json.load(fh)
-    if changelog.get("en_renamed"):
-        n = apply_en_renames(artifacts_dir, changelog["en_renamed"])
-        _log(f"rewrote target_ref on {n} records for {len(changelog['en_renamed'])} en-renames")
+    en_renamed = changelog.get("books", {}).get("en_renamed")
+    if en_renamed:
+        n = apply_en_renames(artifacts_dir, en_renamed)
+        _log(f"rewrote target_ref on {n} records for {len(en_renamed)} en-renames")
 
     # 3. Drop artifacts for books that left the snapshot (deleted/renamed source).
     for bk in removed:
@@ -300,21 +336,19 @@ def run_incremental(args) -> int:
         _run_engine(args, only)  # raises on whole-process failure → baseline NOT advanced below
         failed = read_failed_books(args.run_dir)
 
-    # 5. Advance baseline + lineage. A whole-process failure never reaches here (raised above).
-    #    Books that crashed INSIDE the engine (per-book) are held at their PRIOR baseline state,
-    #    so they are re-detected as changed next cycle (retried) instead of orphaned — the engine
-    #    still marked them done to avoid a within-run poison loop, so only the baseline protects
-    #    them across cycles. Everything else advances to exactly the snapshot hashes just linked.
-    new_baseline = dict(current)
-    for key in failed:
-        if key in baseline:
-            new_baseline[key] = baseline[key]   # keep old hash → detected changed next run
-        else:
-            new_baseline.pop(key, None)          # was new → stays absent → detected added next run
+    # A per-book crash FAILS the whole run, loudly. In the serial pipeline the build waits
+    # on this run and injects its output into the DB being released — a missing book would
+    # ship a silently-incomplete link set (a NEW book leaves nothing for linkerStrict to
+    # even hash-check). Baseline/meta are NOT advanced, so a rerun retries everything.
     if failed:
-        _log(f"held {len(failed)} failed book(s) out of baseline (retry next cycle): "
-             + ", ".join(sorted(f"{s}/{t}" for s, t in failed)))
-    write_snapshot_baseline(baseline_dir, new_baseline)
+        raise RuntimeError(
+            f"{len(failed)} book(s) failed inside the engine — failing the run "
+            "(baseline not advanced): "
+            + ", ".join(sorted(f"{s}/{t}" for s, t in failed)))
+
+    # 5. Advance baseline + lineage. Any failure never reaches here (raised above), so the
+    #    baseline advances to exactly the snapshot hashes that were fully linked.
+    write_snapshot_baseline(baseline_dir, dict(current), engine_fingerprint=fingerprint)
     write_meta(
         repo,
         sefaria_export_tag=args.sefaria_tag,
@@ -322,6 +356,7 @@ def run_incremental(args) -> int:
         book_count=len(current),
         bavli_convention=args.bavli_convention,
         generated_at=args.generated_at,
+        engine_fingerprint=fingerprint,
     )
     _log("baseline + meta.json updated")
     return len(changed)
@@ -355,6 +390,8 @@ def main():
     ap.add_argument("--sef-project", required=True, help="Sefaria-Project dir (engine cwd/PYTHONPATH)")
     ap.add_argument("--python", default="python3", help="python interpreter for the engine (venv)")
     ap.add_argument("--bavli-convention", action="store_true")
+    ap.add_argument("--engine-fingerprint", default=None,
+                    help="engine identity (commits/models/policy); a change forces a FULL relink")
     args = ap.parse_args()
     n = run_incremental(args)
     _log(f"done: {n} books re-linked")

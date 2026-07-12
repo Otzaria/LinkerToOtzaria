@@ -144,12 +144,19 @@ def process_book(linker, bk, lines, skipped_log, heartbeat):
             # Digest the exact content the offsets index, so the build can drop this line's
             # links if the source book changed before Phase-2 applies them (cross-cycle drift).
             src_hash = content_hash(content)
+            # spaCy spans are Python code-point offsets; the Kotlin consumer indexes the
+            # SAME content string in UTF-16 units. They diverge only past a non-BMP char
+            # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
+            has_non_bmp = any(ord(c) > 0xFFFF for c in content)
             for rr in doc.resolved_refs:
                 try:  # a broken citation must cost one link, never the book
                     ref = _pick_ref(rr)
                     if ref is None:
                         continue
                     start, end = rr.raw_entity.span.range
+                    if has_non_bmp:
+                        start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
+                        end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
                     records.append(LinkRecord(
                         book_key=bk, line_index=line_index,
                         start=start, end=end, target_ref=ref.normal(),

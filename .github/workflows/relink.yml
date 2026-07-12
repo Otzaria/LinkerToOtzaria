@@ -1,4 +1,6 @@
 name: relink
+# מזוהה ע"י הבנייה הממתינה לפי library_run_id בכותרת — אל תשנו את התבנית.
+run-name: "relink (library_run_id=${{ inputs.library_run_id || 'standalone' }})"
 
 # Incremental re-link: re-run the linker only on source books that changed since the last
 # run, then hand the ref-based artifacts back to the SeforimLibrary build.
@@ -18,6 +20,13 @@ name: relink
 #     The ONLY source-change clock: the linker links this content and stamps source_hash from
 #     it, so change-detection + baseline track exactly this file (per-book content hashes).
 #   • changelog_diff.json    ← latest SefariaExport release — target_ref rewrite ONLY.
+#   • engine fingerprint     ← ci/setup_stack.sh (commits+models) + policy flags; a change
+#     invalidates the whole baseline → full relink (no mixed-engine artifact store).
+#
+# ATOMICITY: the payload (release + run artifact) is published BEFORE the baseline is
+# committed. If publishing fails, the baseline still points at the previous state and the
+# next run simply re-links again (idempotent). The reverse order could advance the baseline
+# over artifacts that never shipped — books would never be retried (lost links).
 #
 # Runs on a SELF-HOSTED runner: the stack is heavy (MongoDB + Sefaria dump + gpu-server NER
 # models + Django), the same reason the SeforimLibrary DB build is self-hosted.
@@ -36,6 +45,12 @@ on:
 permissions:
   contents: write
 
+# One relink at a time: two concurrent runs would race on the git baseline push and on
+# the 'latest' release pointer. Queue, never cancel — a run may be feeding a waiting build.
+concurrency:
+  group: linker-relink
+  cancel-in-progress: false
+
 jobs:
   relink:
     runs-on: [self-hosted, Linux, X64, server-2]
@@ -43,6 +58,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       LINKER_DUMP_URL: ${{ secrets.LINKER_DUMP_URL }}
+      LINKER_MODELS_URL: ${{ secrets.LINKER_MODELS_URL }}
       SEF_PROJECT: ${{ github.workspace }}/stack/Sefaria-Project
       RUN_DIR: ${{ github.workspace }}/run
     steps:
@@ -69,7 +85,7 @@ jobs:
         id: tags
         run: |
           set -euo pipefail
-          SEF_TAG=$(gh release view -R Otzaria/SefariaExport   --json tagName -q .tagName)
+          SEF_TAG=$(gh release view -R Otzaria/SefariaExport --json tagName -q .tagName)
           echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
           echo "Sefaria export: $SEF_TAG"
 
@@ -97,9 +113,14 @@ jobs:
           fi
           unzstd -f inputs/lines_snapshot.db.zst
 
+      # Any per-book failure fails this step (and the waiting build) loudly — see
+      # incremental.py. The engine fingerprint folds in the policy flags so flipping
+      # e.g. --bavli-convention also forces a full relink.
       - name: Incremental re-link
         run: |
           set -euo pipefail
+          FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
+          echo "engine fingerprint: $FINGERPRINT"
           "$SEF_PROJECT/.venv/bin/python" src/incremental.py \
             --repo "$PWD" \
             --snapshot inputs/lines_snapshot.db \
@@ -108,19 +129,10 @@ jobs:
             --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --run-dir "$RUN_DIR" \
             --sef-project "$SEF_PROJECT" \
-            --python "$SEF_PROJECT/.venv/bin/python"
+            --python "$SEF_PROJECT/.venv/bin/python" \
+            --engine-fingerprint "$FINGERPRINT"
 
-      # artifacts/ is gitignored (release payload only) — git tracks just the delta
-      # memory: baseline/snapshot_hashes.json (the source-change clock) + meta.json.
-      - name: Commit updated baseline + meta
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add baseline meta.json
-          git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
-          git push
-
+      # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
       - name: Pack + publish linker_links.zst
         env:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
@@ -135,3 +147,15 @@ jobs:
           path: linker_links.zst
           retention-days: 7
           if-no-files-found: error
+
+      # artifacts/ is gitignored (release payload only) — git tracks just the delta
+      # memory: baseline/snapshot_hashes.json (the source-change clock) + meta.json.
+      # Runs only after the payload shipped, so the baseline never gets ahead of it.
+      - name: Commit updated baseline + meta
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add baseline meta.json
+          git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
+          git push
