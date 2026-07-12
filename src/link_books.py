@@ -24,8 +24,8 @@ import sqlite3
 import sys
 import time
 
-import django
-import requests
+# django/requests are imported lazily (main/ner_alive): the incremental driver imports
+# this module for claim_id alone and must not drag the whole Sefaria stack with it.
 
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +53,7 @@ def claim_id(bk: BookKey) -> str:
 
 
 def ner_alive() -> bool:
+    import requests
     try:
         # raise_for_status: an HTTP 500 means the service is NOT healthy — without it
         # a broken NER reads as "alive" and the failure gets misattributed to the book.
@@ -256,6 +257,7 @@ def main():
         shutil.rmtree(claim_dir(cid), ignore_errors=True)
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+    import django
     django.setup()
     from sefaria.model import library
     linker = library.get_linker("he")
