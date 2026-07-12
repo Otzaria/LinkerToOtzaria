@@ -69,6 +69,14 @@ fi
 if [ ! -f "$SEF/sefaria/local_settings.py" ]; then
   cp "$SEF/sefaria/local_settings_example.py" "$SEF/sefaria/local_settings.py"
 fi
+# Enforce the linker endpoint on EVERY run — the example defaults to a disabled
+# linker on :5000, and Sefaria's bulk NER calls silently target it (every book
+# then fails with connection-refused). :5051 is where setup starts gunicorn.
+LS="$SEF/sefaria/local_settings.py"
+sed -i "s|^ENABLE_LINKER = .*|ENABLE_LINKER = True|" "$LS"
+sed -i "s|^GPU_SERVER_URL = .*|GPU_SERVER_URL = 'http://localhost:5051'|" "$LS"
+grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://localhost:5051'$" "$LS" \
+  || { echo "::error::local_settings.py no longer carries ENABLE_LINKER/GPU_SERVER_URL as expected — upstream layout changed"; exit 1; }
 
 # ── 3. MongoDB + Sefaria dump (this repo's dump release, cached per tag) ────
 # Same pattern as the models: a fixed release in THIS repo (split into <2GiB parts
