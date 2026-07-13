@@ -61,7 +61,9 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, server-2]
     # Weekly deltas take minutes; the generous ceiling is for a deliberate full relink
     # (engine-pin bump, dispatched manually off-cycle) with 4 parallel workers.
-    timeout-minutes: 4320
+    # 5 days — the self-hosted maximum. A full-corpus relink measured ~66h at 3 engine
+    # workers (NER-bound); 72h left only a ~6% margin, one monster book from a timeout.
+    timeout-minutes: 7200
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
