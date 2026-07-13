@@ -15,7 +15,12 @@ head -2 /etc/os-release; nproc; free -h; df -h /; nvidia-smi || echo "NO GPU"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq zstd unzip curl git ca-certificates procps >/dev/null
+# python3.11 + venv: NONE of the image's pythons can create a venv with pip (3.12's
+# ensurepip is broken, conda's python has ensurepip stripped) — setup_stack's
+# venv-capability probe rejects them all. Give it one that works.
+apt-get install -y -qq zstd unzip curl git ca-certificates procps \
+  python3.11 python3.11-venv >/dev/null
+python3.11 --version
 
 TOOLS=/kaggle/temp/tools; mkdir -p "$TOOLS"; cd "$TOOLS"
 
