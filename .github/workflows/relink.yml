@@ -230,6 +230,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add baseline meta.json
           git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
+          # main may have moved during a long run (unrelated commits) — replay our
+          # baseline commit on top. baseline/meta are only ever written by THIS
+          # serialized workflow, so the rebase can never hit a content conflict.
+          git pull --rebase origin main
           git push
 
       # Free the NER's RAM (~3GB of models) for the build that resumes right after us
