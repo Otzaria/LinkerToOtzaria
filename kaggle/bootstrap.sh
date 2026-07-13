@@ -15,12 +15,12 @@ head -2 /etc/os-release; nproc; free -h; df -h /; nvidia-smi || echo "NO GPU"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# python3.11 + venv: NONE of the image's pythons can create a venv with pip (3.12's
-# ensurepip is broken, conda's python has ensurepip stripped) — setup_stack's
-# venv-capability probe rejects them all. Give it one that works.
+# python3.12-venv: the image ships python3.12 with broken ensurepip (and Sefaria's
+# requirements pin django==6.0.4 which demands >=3.12, so an easier 3.11 is out) —
+# setup_stack's venv-capability probe needs a 3.12 that can actually make venvs.
 apt-get install -y -qq zstd unzip curl git ca-certificates procps \
-  python3.11 python3.11-venv >/dev/null
-python3.11 --version
+  python3.12 python3.12-venv >/dev/null
+python3.12 --version
 
 TOOLS=/kaggle/temp/tools; mkdir -p "$TOOLS"; cd "$TOOLS"
 
