@@ -45,6 +45,11 @@ RUNNER_VER=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/lat
 curl -fsSL "https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-x64-${RUNNER_VER}.tar.gz" | tar -xz
 ./bin/installdependencies.sh >/dev/null || true
 export RUNNER_ALLOW_RUNASROOT=1
+# Kaggle exports PYTHONPATH pointing into its conda stack (kaggle_gcp, wrapt...);
+# our clean 3.12 venvs inherit it and the NER workers die on those imports. The
+# runner subtree must see a pristine python environment — anything that needs
+# PYTHONPATH (the engine) sets it explicitly itself.
+unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
 echo "=== runner v${RUNNER_VER} up — waiting for the queued relink job ==="
 ./run.sh --jitconfig "$JIT_CONFIG"
 echo "=== job finished; session ends ==="
