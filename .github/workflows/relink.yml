@@ -128,8 +128,9 @@ jobs:
       - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
         env:
           # Lean under a waiting build (shared 24GB host), full when standalone.
-          # On kaggle the NER rides one CUDA device — 2 gunicorn workers share it.
-          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
+          # On kaggle ONE gunicorn worker owns the single CUDA device: two workers
+          # double the VRAM footprint and OOM'd on monster-book batches (16GB card).
+          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '1' || '3') }}
         run: bash ci/setup_stack.sh
 
       - name: Resolve upstream tags
@@ -174,6 +175,10 @@ jobs:
       # a deliberate full relink inside the job ceiling while leaving OOM headroom on
       # the 22GB host — a single book was observed to drive one worker past 7GB anon.
       - name: Incremental re-link
+        env:
+          # Smaller NER batches on the GPU host — transport granularity only (output
+          # is batch-invariant); 100-line batches of monster books OOM'd the 16GB card.
+          LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
         run: |
           set -euo pipefail
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
