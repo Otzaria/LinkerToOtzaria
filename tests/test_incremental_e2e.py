@@ -243,6 +243,29 @@ class IncrementalE2ETest(unittest.TestCase):
         args.engine_fingerprint = "engine-v2"
         self.assertEqual(inc.run_incremental(args), 3)   # real change still full-relinks
 
+    def test_operator_attested_adoption_restamps_without_relink(self):
+        # An output-neutral engine change (failure handling / logging) may be migrated
+        # by explicit operator attestation instead of a multi-day full relink — both
+        # fingerprints must be pasted exactly; any drift fails loudly.
+        _snapshot(self.snap, self._rows())
+        args = self._args()
+        args.engine_fingerprint = "engine-v1"
+        inc.run_incremental(args)                        # baseline stamped engine-v1
+
+        args.engine_fingerprint = "engine-v2"
+        args.adopt_fingerprint = "engine-WRONG::engine-v2"
+        with self.assertRaises(RuntimeError) as ctx:     # stale attestation → refuse
+            inc.run_incremental(args)
+        self.assertIn("attestation mismatch", str(ctx.exception))
+
+        args.adopt_fingerprint = "engine-v1::engine-v2"
+        self.assertEqual(inc.run_incremental(args), 0)   # re-stamp, no relink
+        self.assertEqual(
+            inc.read_baseline_fingerprint(os.path.join(self.repo, "baseline")),
+            "engine-v2")
+        args.adopt_fingerprint = None
+        self.assertEqual(inc.run_incremental(args), 0)   # now a clean no-op
+
     def test_changelog_books_en_renamed_contract(self):
         # The real changelog_diff.json nests the diff under "books" (see SefariaExport
         # generate_changelog.py) — the driver must read it from there, not the root.

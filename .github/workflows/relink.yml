@@ -58,6 +58,14 @@ on:
         required: false
         default: false
         type: boolean
+      adopt_fingerprint:
+        description: >
+          Operator-attested migration 'OLD::NEW' — re-stamp the baseline engine
+          fingerprint WITHOUT a full relink. Paste both full fingerprint strings
+          exactly; use ONLY for engine diffs reviewed as output-neutral.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -128,9 +136,7 @@ jobs:
       - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
         env:
           # Lean under a waiting build (shared 24GB host), full when standalone.
-          # On kaggle ONE gunicorn worker owns the single CUDA device: two workers
-          # double the VRAM footprint and OOM'd on monster-book batches (16GB card).
-          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '1' || '3') }}
+          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
         run: bash ci/setup_stack.sh
 
       - name: Resolve upstream tags
@@ -175,10 +181,6 @@ jobs:
       # a deliberate full relink inside the job ceiling while leaving OOM headroom on
       # the 22GB host — a single book was observed to drive one worker past 7GB anon.
       - name: Incremental re-link
-        env:
-          # Smaller NER batches on the GPU host — transport granularity only (output
-          # is batch-invariant); 100-line batches of monster books OOM'd the 16GB card.
-          LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
         run: |
           set -euo pipefail
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
@@ -194,7 +196,8 @@ jobs:
             --python "$SEF_PROJECT/.venv/bin/python" \
             --engine-fingerprint "$FINGERPRINT" \
             --engine-workers ${{ inputs.library_run_id != '' && '2' || '3' }} \
-            ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }}
+            ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }} \
+            ${{ inputs.library_run_id == '' && inputs.adopt_fingerprint != '' && format('--adopt-fingerprint "{0}"', inputs.adopt_fingerprint) || '' }}
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
       # Both are skipped on dry_run: a canary measures the engine, ships nothing.
