@@ -300,7 +300,24 @@ def run_incremental(args) -> int:
     fingerprint = getattr(args, "engine_fingerprint", None)
     changed, removed = plan_from_snapshot(current, baseline)
     if baseline and fingerprint is not None and stored_fingerprint != fingerprint:
-        if stored_fingerprint is None:
+        adopt = getattr(args, "adopt_fingerprint", None)
+        if adopt:
+            # Explicit OPERATOR-ATTESTED migration (same class as the one-time v1
+            # adoption): the store's artifacts are known-good and the engine diff was
+            # reviewed as output-neutral (failure handling / orchestration / logging /
+            # transport only). Both sides must be pasted EXACTLY — a mismatch means the
+            # operator is attesting a different migration than the one at hand.
+            exp_old, sep, exp_new = adopt.partition("::")
+            if not sep:
+                raise RuntimeError("--adopt-fingerprint must be 'OLD::NEW' (both full strings)")
+            if exp_old != stored_fingerprint or exp_new != fingerprint:
+                raise RuntimeError(
+                    "adoption attestation mismatch —\n"
+                    f"  attested old: {exp_old!r}\n  stored   old: {stored_fingerprint!r}\n"
+                    f"  attested new: {exp_new!r}\n  actual   new: {fingerprint!r}")
+            _log(f"ADOPTING fingerprint by operator attestation (no full relink): "
+                 f"{stored_fingerprint!r} -> {fingerprint!r}")
+        elif stored_fingerprint is None:
             _log(f"baseline predates fingerprinting — ADOPTING {fingerprint!r} (no full relink)")
         elif getattr(args, "forbid_full_relink", False):
             # Serial mode: a waiting DB build cannot absorb an ~11h full relink (it
@@ -457,6 +474,9 @@ def main():
                     help="parallel link_books.py processes (claim-ledger coordinated)")
     ap.add_argument("--forbid-full-relink", action="store_true",
                     help="serial mode: fail instead of a fingerprint-triggered full relink")
+    ap.add_argument("--adopt-fingerprint", default=None, metavar="OLD::NEW",
+                    help="operator-attested migration: re-stamp the baseline fingerprint "
+                         "WITHOUT a full relink; both strings must match exactly")
     args = ap.parse_args()
     n = run_incremental(args)
     _log(f"done: {n} books re-linked")

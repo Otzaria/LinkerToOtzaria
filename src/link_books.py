@@ -31,7 +31,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
 
-BATCH_LINES = 100
+# Lines per bulk NER call. Transport granularity only — per-line output is independent
+# of batching. Tunable per host: GPU serving OOMs on 100-line batches of monster books
+# (16GB VRAM), so Kaggle runs use a smaller batch via env.
+BATCH_LINES = int(os.environ.get("LINKER_BATCH_LINES", "100"))
+# Give up on a dead NER after this long (crash-looped GPU service, not a blip).
+NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 # Self-recycle above this many bytes. Overridable per machine: recycling costs a full
 # library reload (~8s on M-series, ~22s on Neoverse-N1), so give workers headroom when
 # RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
@@ -64,9 +69,16 @@ def ner_alive() -> bool:
 
 
 def wait_for_ner(log) -> None:
+    # Bounded: an NER that stays dead is broken infrastructure (e.g. a CUDA OOM
+    # crash-loop on a GPU runner), not a blip. Waiting forever burned a whole Kaggle
+    # session in silence once — fail loudly instead and let the driver report it.
+    waited = 0
     while not ner_alive():
+        if waited >= NER_MAX_WAIT_SEC:
+            raise RuntimeError(f"NER still dead after {waited}s — giving up (broken NER service)")
         log("NER unreachable; waiting 15s")
         time.sleep(15)
+        waited += 15
 
 
 def all_book_keys(con) -> list[BookKey]:
@@ -214,8 +226,12 @@ def main():
         os.makedirs(os.path.join(run, d), exist_ok=True)
 
     def log(msg):
+        line = f"{time.strftime('%H:%M:%S')} {args.label} {msg}"
         with open(os.path.join(run, "logs", "progress.log"), "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} {args.label} {msg}\n")
+            f.write(line + "\n")
+        # Also to stdout, flushed: on remote runners (Kaggle) the run dir is unreachable —
+        # the CI job log is the ONLY live window into worker progress.
+        print(line, flush=True)
 
     def skipped_log(line):
         with open(os.path.join(run, "logs", "skipped_lines.log"), "a", encoding="utf-8") as f:

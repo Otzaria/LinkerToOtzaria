@@ -1,0 +1,41 @@
+# Launch a relink on a fresh Kaggle GPU session — the cloud arm of the linker.
+#
+# Wraps scripts/dispatch_kaggle_relink.sh (the exact flow the operator runs locally):
+# register a one-job JIT runner, queue relink.yml with target=kaggle, push the private
+# kernel (GPU + internet) that boots into the runner and picks the job up. The session
+# dies with the job; nothing persists on Kaggle.
+#
+# Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
+# KAGGLE_CREDENTIALS_JSON (the operator's kaggle CLI OAuth file, stored as a secret).
+name: kaggle-relink
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Skip publish + baseline commit on the relink (canary/testing).
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kaggle CLI + credentials
+        run: |
+          set -euo pipefail
+          pip install --quiet kaggle
+          mkdir -p ~/.kaggle
+          printf '%s' '${{ secrets.KAGGLE_CREDENTIALS_JSON }}' > ~/.kaggle/credentials.json
+          chmod 600 ~/.kaggle/credentials.json
+
+      - name: Register JIT runner, queue relink, push kernel
+        run: bash scripts/dispatch_kaggle_relink.sh ${{ inputs.dry_run && '--dry-run' || '' }}

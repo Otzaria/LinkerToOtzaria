@@ -41,24 +41,52 @@ on:
         required: false
         default: ''
         type: string
+      target:
+        description: >
+          Runner to execute on. 'server' = the Oracle ARM box (always available; serial
+          builds MUST use it). 'kaggle' = an ephemeral GPU session registered as a JIT
+          runner by scripts/dispatch_kaggle_relink.sh — NER runs on CUDA, ~10-30x faster;
+          session dies after ~9h, so it fits standalone/full relinks only.
+        required: false
+        default: 'server'
+        type: choice
+        options: [server, kaggle]
+      dry_run:
+        description: >
+          Run everything but SKIP publish + baseline commit (canary/testing — safe to
+          run beside a real run; gets its own concurrency group).
+        required: false
+        default: false
+        type: boolean
+      adopt_fingerprint:
+        description: >
+          Operator-attested migration 'OLD::NEW' — re-stamp the baseline engine
+          fingerprint WITHOUT a full relink. Paste both full fingerprint strings
+          exactly; use ONLY for engine diffs reviewed as output-neutral.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
 
-# One relink at a time: two concurrent runs would race on the git baseline push and on
-# the 'latest' release pointer. Queue, never cancel — a run may be feeding a waiting build.
+# One relink at a time PER TARGET: two concurrent runs would race on the git baseline
+# push and on the 'latest' release pointer. Queue, never cancel — a run may be feeding a
+# waiting build. Cross-target overlap is the operator's call (e.g. a Kaggle migration
+# racing a doomed server run to the finish — cancel the loser before it publishes).
+# Dry-runs never publish, so each gets a group of its own and never queues.
 concurrency:
-  group: linker-relink
+  group: linker-relink-${{ inputs.dry_run && format('dry-{0}', github.run_id) || (inputs.target || 'server') }}
   cancel-in-progress: false
 
 jobs:
   relink:
-    # The Oracle ARM box — the SAME host that runs the SeforimLibrary build (it is the
-    # only machine; the bootstrap stack was validated on it). In serial mode the build
-    # is waiting on us while holding its RAM tmpfs (~8-11GB of the 24GB), so this job
-    # runs LEAN there (2 NER + 2 engine workers) and tears the NER down when done;
-    # a standalone dispatch has the box to itself and uses the full configuration.
-    runs-on: [self-hosted, Linux, ARM64, server-2]
+    # server: the Oracle ARM box — the SAME host that runs the SeforimLibrary build. In
+    # serial mode the build is waiting on us while holding its RAM tmpfs (~8-11GB of the
+    # 24GB), so this job runs LEAN there (2 NER + 2 engine workers) and tears the NER
+    # down when done; a standalone dispatch has the box to itself.
+    # kaggle: a throwaway GPU VM (see kaggle/); NER on CUDA, host RAM varies 13-29GB.
+    runs-on: ${{ inputs.target == 'kaggle' && fromJSON('["self-hosted","kaggle","gpu"]') || fromJSON('["self-hosted","Linux","ARM64","server-2"]') }}
     # Weekly deltas take minutes; the generous ceiling is for a deliberate full relink
     # (engine-pin bump, dispatched manually off-cycle) with 4 parallel workers.
     # 5 days — the self-hosted maximum. A full-corpus relink measured ~66h at 3 engine
@@ -108,7 +136,7 @@ jobs:
       - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
         env:
           # Lean under a waiting build (shared 24GB host), full when standalone.
-          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || '3' }}
+          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
         run: bash ci/setup_stack.sh
 
       - name: Resolve upstream tags
@@ -168,10 +196,14 @@ jobs:
             --python "$SEF_PROJECT/.venv/bin/python" \
             --engine-fingerprint "$FINGERPRINT" \
             --engine-workers ${{ inputs.library_run_id != '' && '2' || '3' }} \
-            ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }}
+            ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }} \
+            ${{ inputs.library_run_id == '' && inputs.adopt_fingerprint != '' && format('--adopt-fingerprint "{0}"', inputs.adopt_fingerprint) || '' }}
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
+      # Both are skipped on dry_run: a canary measures the engine, ships nothing.
+
       - name: Pack + publish linker_links.zst
+        if: ${{ !inputs.dry_run }}
         env:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: bash ci/pack_and_publish.sh
@@ -179,6 +211,7 @@ jobs:
       # The waiting SeforimLibrary build (serial mode) downloads the pack from THIS run —
       # a deterministic handshake, immune to any "latest release" race.
       - name: Upload linker_links.zst as a run artifact
+        if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
           name: linker-links
@@ -190,12 +223,17 @@ jobs:
       # memory: baseline/snapshot_hashes.json (the source-change clock) + meta.json.
       # Runs only after the payload shipped, so the baseline never gets ahead of it.
       - name: Commit updated baseline + meta
+        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add baseline meta.json
           git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
+          # main may have moved during a long run (unrelated commits) — replay our
+          # baseline commit on top. baseline/meta are only ever written by THIS
+          # serialized workflow, so the rebase can never hit a content conflict.
+          git pull --rebase origin main
           git push
 
       # Free the NER's RAM (~3GB of models) for the build that resumes right after us
