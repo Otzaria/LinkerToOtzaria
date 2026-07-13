@@ -23,15 +23,23 @@ mkdir -p "$STACK" "$CACHE"
 # default python3 may be older. Explicit discovery, loud failure — never a silent
 # fallback to an interpreter that cannot even install the requirements.
 PYBIN="${LINKER_PYTHON:-}"
+# Existence is not enough: a candidate must be able to CREATE a venv with pip —
+# Kaggle ships a python3.12 whose ensurepip is broken (no python3.12-venv), which
+# passed the old check and blew up mid-setup. Probe for real, pick the first that works.
+venv_capable() {
+  local probe; probe=$(mktemp -d)
+  "$1" -m venv "$probe/v" >/dev/null 2>&1 && [ -x "$probe/v/bin/pip" ]
+  local rc=$?; rm -rf "$probe"; return $rc
+}
 if [ -z "$PYBIN" ]; then
-  for cand in python3.12 python3.11 python3.10; do
-    command -v "$cand" >/dev/null 2>&1 && PYBIN="$cand" && break
+  for cand in python3.12 python3.11 python3.10 python3; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null || continue
+    venv_capable "$cand" && PYBIN="$cand" && break
+    echo "skipping $cand: cannot create a working venv (ensurepip broken?)"
   done
 fi
-if [ -z "$PYBIN" ] && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-  PYBIN=python3
-fi
-[ -n "$PYBIN" ] || { echo "::error::no Python >=3.10 on this runner (Sefaria requirements demand it) — install python3.11+ or set LINKER_PYTHON"; exit 1; }
+[ -n "$PYBIN" ] || { echo "::error::no venv-capable Python >=3.10 on this runner (Sefaria requirements demand it) — install python3.11+ or set LINKER_PYTHON"; exit 1; }
 echo "using $PYBIN ($($PYBIN --version))"
 
 url_key() { printf '%s' "$1" | sha256sum | cut -c1-12; }
