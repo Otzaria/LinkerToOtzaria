@@ -50,6 +50,11 @@ export RUNNER_ALLOW_RUNASROOT=1
 # runner subtree must see a pristine python environment — anything that needs
 # PYTHONPATH (the engine) sets it explicitly itself.
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
+# Kaggle also drops a sitecustomize.py into the SYSTEM python3.x that intercepts
+# every `google.cloud` import and demands kaggle_gcp (its GCP-credentials magic) —
+# gpu-server imports google.cloud.storage and the NER worker dies on it. Remove it;
+# we carry no Kaggle GCP integration.
+rm -f /usr/lib/python3.*/sitecustomize.py
 echo "=== runner v${RUNNER_VER} up — waiting for the queued relink job ==="
 ./run.sh --jitconfig "$JIT_CONFIG"
 echo "=== job finished; session ends ==="
