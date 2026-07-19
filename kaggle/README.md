@@ -22,7 +22,7 @@
 | ‏relink מלא של כל הקורפוס | אף אחד מהם ישירות — ראו למטה |
 
 הכלים הבינאריים (gh, mongod/tools/mongosh, ‏Actions runner) מגיעים מדאטה-סט
-‏Kaggle בשם `otzaria/linker-runner-tools` המוצמד לקרנל — האתחול אינו תלוי
+‏Kaggle בשם `otzaria/linker-runner-tools-v3` המוצמד לקרנל — האתחול אינו תלוי
 בהורדות מצד-שלישי. עדכון גרסה = העלאת גרסה חדשה לדאטה-סט + עדכון הפינים
 ב-bootstrap.sh.
 
