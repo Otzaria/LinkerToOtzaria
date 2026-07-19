@@ -19,6 +19,22 @@ GPU="$STACK/gpu-server"
 NER_URL="http://127.0.0.1:5051/recognize-entities"
 mkdir -p "$STACK" "$CACHE"
 
+# Kaggle chooses the mount directory for a kernel output. Discover by the pinned
+# archive filename under the fixed input root and require exactly one match;
+# never guess among duplicates or silently fall back to a network build.
+if [ -z "${LINKER_RUNTIME_ARCHIVE:-}" ] && [ -n "${LINKER_RUNTIME_ROOT:-}" ]; then
+  [ -d "$LINKER_RUNTIME_ROOT" ] || { echo "::error::runtime input root missing: $LINKER_RUNTIME_ROOT"; exit 1; }
+  RUNTIME_MATCHES=$(find "$LINKER_RUNTIME_ROOT" -mindepth 2 -maxdepth 5 -type f \
+    -name linker-python-runtime-v1.tar.zst -print)
+  RUNTIME_MATCH_COUNT=$(printf '%s\n' "$RUNTIME_MATCHES" | awk 'NF' | wc -l | tr -d ' ')
+  [ "$RUNTIME_MATCH_COUNT" -eq 1 ] || {
+    echo "::error::expected exactly one linker-python-runtime-v1.tar.zst under $LINKER_RUNTIME_ROOT; found $RUNTIME_MATCH_COUNT"
+    exit 1
+  }
+  LINKER_RUNTIME_ARCHIVE=$RUNTIME_MATCHES
+  export LINKER_RUNTIME_ARCHIVE
+fi
+
 # Sefaria's requirements need Python >=3.10 (validated locally on 3.12); the runner's
 # default python3 may be older. Explicit discovery, loud failure — never a silent
 # fallback to an interpreter that cannot even install the requirements.
@@ -31,6 +47,15 @@ venv_capable() {
   "$1" -m venv "$probe/v" >/dev/null 2>&1 && [ -x "$probe/v/bin/pip" ]
   local rc=$?; rm -rf "$probe"; return $rc
 }
+if [ -z "$PYBIN" ] && [ -n "${LINKER_RUNTIME_ARCHIVE:-}" ]; then
+  command -v python3.12 >/dev/null 2>&1 || {
+    echo "::error::the prebuilt runtime requires python3.12"; exit 1;
+  }
+  python3.12 -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3,12) else 1)' || {
+    echo "::error::the prebuilt runtime requires Python 3.12.x"; exit 1;
+  }
+  PYBIN=python3.12
+fi
 if [ -z "$PYBIN" ]; then
   for cand in python3.12 python3.11 python3.10 python3; do
     command -v "$cand" >/dev/null 2>&1 || continue
@@ -65,6 +90,22 @@ fi
 # The venv carries an identity (python + requirements hash + commit); any change
 # rebuilds it from scratch — a SEFARIA_COMMIT bump must never run on a stale venv.
 SEF_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
+GPU_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$GPU/app/requirements.txt" | cut -c1-12):${GPU_SERVER_COMMIT:-head}"
+
+# Ephemeral Kaggle sessions receive both complete venvs as one immutable kernel
+# output. Verify and install them together before either slow network fallback can
+# run. Server runners may omit these variables and keep their persistent cache.
+if [ -n "${LINKER_RUNTIME_ARCHIVE:-}${LINKER_RUNTIME_SHA256:-}" ]; then
+  [ -n "${LINKER_RUNTIME_ARCHIVE:-}" ] && [ -n "${LINKER_RUNTIME_SHA256:-}" ] || {
+    echo "::error::LINKER_RUNTIME_ARCHIVE and LINKER_RUNTIME_SHA256 must be set together"
+    exit 1
+  }
+  if [ ! -x "$SEF/.venv/bin/python" ] || [ "$(cat "$SEF/.venv/.identity" 2>/dev/null)" != "$SEF_VENV_ID" ] || \
+     [ ! -x "$GPU/.venv/bin/python" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; then
+    bash "${LINKER_REPO:-$PWD}/ci/install_prebuilt_runtime.sh" \
+      "$LINKER_RUNTIME_ARCHIVE" "$LINKER_RUNTIME_SHA256" "$STACK" "$SEF_VENV_ID" "$GPU_VENV_ID"
+  fi
+fi
 if [ ! -x "$SEF/.venv/bin/python" ] || [ "$(cat "$SEF/.venv/.identity" 2>/dev/null)" != "$SEF_VENV_ID" ]; then
   rm -rf "$SEF/.venv"
   "$PYBIN" -m venv "$SEF/.venv"
@@ -94,12 +135,21 @@ grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://loc
 # new dump, must not survive into the restored state.
 DUMP_TAG="${LINKER_DUMP_TAG:-dump-v1}"
 DUMP_REPO="${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}"
-DUMP_KEY="$(url_key "$DUMP_REPO@$DUMP_TAG")"
-DUMP_MARKER="$CACHE/.dump-restored-$DUMP_KEY"
 pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
+# Content-addressed dump identity: ALWAYS computed from the SHA256SUMS asset,
+# BEFORE any cache decision. A tag-keyed marker once let a stale server cache
+# fingerprint the same dump differently than a fresh Kaggle session (empty
+# .dump-content-id → tag-key fallback) and broke a serial build. The restore
+# marker is keyed by this content id, so re-tagged dump assets re-restore and
+# every environment mints the identical fingerprint token. No fallback.
+rm -rf "$CACHE/dump-sums" && mkdir -p "$CACHE/dump-sums"
+gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p SHA256SUMS -D "$CACHE/dump-sums"
+DUMP_CONTENT_ID="$(sha256sum "$CACHE/dump-sums/SHA256SUMS" | cut -c1-16)"
+DUMP_MARKER="$CACHE/.dump-restored-content-$DUMP_CONTENT_ID"
 if [ ! -f "$DUMP_MARKER" ]; then
   rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
-  gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -p SHA256SUMS -D "$CACHE/dump-dl"
+  gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
+  cp "$CACHE/dump-sums/SHA256SUMS" "$CACHE/dump-dl/SHA256SUMS"
   cat "$CACHE/dump-dl"/dump.tar.gz.part-* > "$CACHE/dump-dl/dump.tar.gz"
   (cd "$CACHE/dump-dl" && sha256sum -c SHA256SUMS)
   rm -rf "$CACHE/dump-extract" && mkdir -p "$CACHE/dump-extract"
@@ -111,12 +161,10 @@ if [ ! -f "$DUMP_MARKER" ]; then
     mongosh --quiet --eval "db.getSiblingDB('$dbname').dropDatabase()" >/dev/null
   done
   mongorestore --gzip --drop "$DUMP_DIR"
-  sha256sum "$CACHE/dump-dl/SHA256SUMS" | cut -c1-16 > "$CACHE/.dump-content-id"
   rm -rf "$CACHE/dump-dl" "$CACHE/dump-extract"
-  rm -f "$CACHE"/.dump-restored-*
+  rm -f "$CACHE"/.dump-restored-* "$CACHE/.dump-content-id"
   touch "$DUMP_MARKER"
 fi
-DUMP_CONTENT_ID="$(cat "$CACHE/.dump-content-id" 2>/dev/null || echo "$DUMP_KEY")"
 
 # ── 4. NER model wheels (cached per release tag) ─────────────────────────────
 # Downloaded with gh from THIS repo's models release (the repo is private, so a raw
@@ -145,7 +193,6 @@ SUBREF_MODEL=$(model_path he_subref_ner)
 
 # ── 5. gpu-server venv + generated config + gunicorn on :5051 ────────────────
 # app/local_config.py is generated here (it is machine-specific, never committed).
-GPU_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$GPU/app/requirements.txt" | cut -c1-12):${GPU_SERVER_COMMIT:-head}"
 if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; then
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
@@ -154,6 +201,28 @@ if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/
   "$GPU/.venv/bin/pip" install -r "$GPU/app/requirements.txt" gunicorn
   printf '%s' "$GPU_VENV_ID" > "$GPU/.venv/.identity"
 fi
+
+# Resolve and verify the semantic Python environment identity. The bundle SHA is
+# a supply-chain pin; the freeze hashes are the engine identity, so an equivalent
+# server cache and the Kaggle bundle fingerprint identically while package drift
+# on either target forces an explicit full/adopt decision.
+for venv in "$SEF/.venv" "$GPU/.venv"; do
+  freeze_tmp=$(mktemp)
+  "$venv/bin/python" -m pip freeze --all > "$freeze_tmp"
+  if [ -f "$venv/.freeze" ]; then
+    cmp -s "$freeze_tmp" "$venv/.freeze" || {
+      echo "::error::installed packages disagree with the verified runtime freeze: $venv"
+      rm -f "$freeze_tmp"
+      exit 1
+    }
+    rm -f "$freeze_tmp"
+  else
+    mv "$freeze_tmp" "$venv/.freeze"
+  fi
+done
+SEF_FREEZE_SHA256=$(sha256sum "$SEF/.venv/.freeze" | cut -d' ' -f1)
+GPU_FREEZE_SHA256=$(sha256sum "$GPU/.venv/.freeze" | cut -d' ' -f1)
+PYTHON_RUNTIME_ID=$(printf '%s\n%s\n' "$SEF_FREEZE_SHA256" "$GPU_FREEZE_SHA256" | sha256sum | cut -c1-16)
 cat > "$GPU/app/local_config.py" <<EOF
 MODEL_PATHS = [
     {"arch": "spacy", "lang": "he", "path": "$REF_MODEL", "type": "named_entity"},
@@ -167,10 +236,18 @@ EOF
 GUNICORN_WORKERS="${NER_WORKERS:-3}"
 NER_ID="$MODELS_TAG:$(git -C "$GPU" rev-parse HEAD):$(sha256sum "$GPU/app/local_config.py" | cut -c1-12):w$GUNICORN_WORKERS"
 NER_MARKER="$CACHE/.ner-identity"
+NER_PIDFILE="$CACHE/gunicorn.pid"
+NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
+NER_SCOPE_MODE="${LINKER_NER_SCOPE_MODE:-0600}"
+PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
 if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
-  pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
+  # Stop only an identity-bound process group.  A pre-migration gunicorn without
+  # scope state is never killed heuristically; a live port below fails loudly and
+  # requires one explicit operator cleanup.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
   sleep 2
-  # pkill cannot signal another user's processes and its failure is swallowed above.
   # If :5051 STILL answers, a foreign gunicorn owns the port — adopting it would
   # neutralize the fingerprint (this exact gap let a bootstrap-era leftover serve
   # production CI runs). Fail loudly instead.
@@ -182,8 +259,30 @@ if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
 fi
 if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
-  ( cd "$GPU/app" && APP_CONFIG=local_config.py nohup "$GPU/.venv/bin/gunicorn" -w "$GUNICORN_WORKERS" --timeout 600 \
-      -b 127.0.0.1:5051 'app:create_app()' >"$CACHE/gunicorn.log" 2>&1 & )
+  # A same-fingerprint master may have become unhealthy while descendants still
+  # exist. Reap its verified group before starting a replacement; never overlap
+  # two model stacks merely because the HTTP probe is down.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
+  # A new session makes the master and all workers one owned process group.
+  pushd "$GPU/app" >/dev/null
+  # Console-script shebangs inside a moved venv contain the builder path. Invoke
+  # gunicorn as a module through the verified interpreter so the bundle is truly
+  # relocatable rather than relying on a textual shebang rewrite.
+  setsid env APP_CONFIG=local_config.py "$GPU/.venv/bin/python" -m gunicorn.app.wsgiapp \
+      -w "$GUNICORN_WORKERS" --timeout 600 \
+      --pid "$NER_PIDFILE" -b 127.0.0.1:5051 'app:create_app()' \
+      >"$CACHE/gunicorn.log" 2>&1 &
+  NER_LAUNCH_PID=$!
+  popd >/dev/null
+  for _ in $(seq 1 50); do [ -s "$NER_PIDFILE" ] && break; sleep 0.2; done
+  [ -s "$NER_PIDFILE" ] || { echo "::error::gunicorn did not create its pidfile"; exit 1; }
+  NER_MASTER_PID="$(cat "$NER_PIDFILE")"
+  [[ "$NER_MASTER_PID" =~ ^[1-9][0-9]*$ ]]
+  [ "$NER_MASTER_PID" = "$NER_LAUNCH_PID" ] || { echo "::error::gunicorn master pid differs from session leader"; exit 1; }
+  python3 "$PROCESS_SCOPE" record --state "$NER_SCOPE" --pid "$NER_MASTER_PID" \
+      --kind ner-gunicorn --expect 'app:create_app()' --mode "$NER_SCOPE_MODE"
   for _ in $(seq 1 60); do
     curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1 && break
@@ -191,6 +290,11 @@ if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
   done
   curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
     -d '{"text":"בדיקה","lang":"he"}' >/dev/null || { echo "::error::NER did not come up"; tail -50 "$CACHE/gunicorn.log"; exit 1; }
+else
+  python3 "$PROCESS_SCOPE" check --state "$NER_SCOPE" --expect 'app:create_app()' || {
+    echo "::error::healthy :5051 service lacks valid process ownership state; refusing to adopt it"
+    exit 1
+  }
 fi
 printf '%s' "$NER_ID" > "$NER_MARKER"
 
@@ -202,6 +306,7 @@ printf '%s' "$NER_ID" > "$NER_MARKER"
   echo "sefaria=$(git -C "$SEF" rev-parse HEAD)"
   echo "sefaria_patch=$(sha256sum "$PATCH" | cut -c1-16)"
   echo "gpu-server=$(git -C "$GPU" rev-parse HEAD)"
+  echo "python_runtime=$PYTHON_RUNTIME_ID"
   echo "dump=$DUMP_CONTENT_ID"
   echo "engine_src=$(cat "${LINKER_REPO:-$PWD}/src/link_books.py" "${LINKER_REPO:-$PWD}/src/linker_artifact.py" "${LINKER_REPO:-$PWD}/src/incremental.py" | sha256sum | cut -c1-16)"
   for name in he_ref_ner he_subref_ner; do

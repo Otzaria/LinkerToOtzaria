@@ -362,7 +362,7 @@ def run_incremental(args) -> int:
         # marker → baseline would advance as if it linked → orphan. So we never depend on external
         # workspace cleanup: we clear them ourselves. (logs/ is append-only diagnostics — kept.)
         import shutil
-        for d in ("done", "claim", "failed"):
+        for d in ("done", "claim", "failed", "checkpoints"):
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         with open(only, "w", encoding="utf-8") as fh:
@@ -424,14 +424,46 @@ def run_incremental(args) -> int:
     return len(changed)
 
 
+def install_terminate_handler():
+    """Convert SIGTERM/SIGINT into SystemExit so `finally` blocks run.
+
+    Without this, a TERM (job cancel) kills the driver outright and the engine
+    worker process groups it owns become orphans — free to outlive the run (and,
+    holding the inherited lease fd, to block the next heavy phase)."""
+    import signal
+
+    def _raise(signum, frame):
+        # The first signal transfers control to the normal finally path.  A second
+        # TERM/INT (runner escalation is allowed to send more than one) must not
+        # interrupt that finally block before it reaches SIGKILL + wait().
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _raise)
+    signal.signal(signal.SIGINT, _raise)
+
+
 def _run_engine(args, only_books_path):
     """Invoke link_books.py on the changed subset, in the Sefaria-Project venv/cwd.
 
     --engine-workers N runs N engine processes in parallel — they coordinate through the
     run-dir claim ledger, so this is the same mechanism the bootstrap used. Returns the
     workers' exit codes; the caller judges them against the ledger (a dead worker whose
-    books were finished by peers via stale-claim steal is not a failure)."""
+    books were finished by peers via stale-claim steal is not a failure).
+
+    Process ownership: every worker starts in its OWN session/process group
+    (start_new_session), so on any exit path — including SIGTERM/SIGINT via
+    install_terminate_handler — the finally block signals exactly the groups this
+    driver created (TERM, bounded wait, then KILL) and nothing else on the host.
+    If the host-lease fd (9) is open it is passed through to the workers as
+    defence in depth: a worker that outlives a dying driver keeps the lease held,
+    so a new heavy phase cannot start beside it; the relink-start reaper is what
+    then clears such orphans."""
+    import signal
     import subprocess
+    import threading
+    import time
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_books.py")
     base_cmd = [args.python, engine,
                 # abspath everything: workers run with cwd=sef_project, so any
@@ -443,12 +475,122 @@ def _run_engine(args, only_books_path):
     env = dict(os.environ, PYTHONPATH=args.sef_project + ":" + os.environ.get("PYTHONPATH", ""))
     workers = max(1, int(getattr(args, "engine_workers", 1) or 1))
     _log(f"running engine ({workers} worker(s)): " + " ".join(base_cmd))
-    if workers == 1:
-        return [subprocess.run(base_cmd, cwd=args.sef_project, env=env).returncode]
-    procs = [subprocess.Popen(base_cmd + ["--label", f"w{n:02d}"],
-                              cwd=args.sef_project, env=env)
-             for n in range(1, workers + 1)]
-    codes = [p.wait() for p in procs]
+    lease_fds = ()
+    try:
+        os.fstat(9)
+        lease_fds = (9,)
+    except OSError:
+        pass
+    worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
+    labels = [["--label", label] for label in worker_labels]
+    heartbeat_dir = os.path.join(os.path.abspath(args.run_dir), "worker-heartbeats")
+    os.makedirs(heartbeat_dir, exist_ok=True)
+    for label in worker_labels:
+        try:
+            os.remove(os.path.join(heartbeat_dir, label))
+        except FileNotFoundError:
+            pass
+    procs = []
+    scope_paths = []
+    watchdog_stop = threading.Event()
+    watchdog = None
+    try:
+        # Append immediately after every successful spawn.  A list comprehension
+        # loses all already-created children if a later Popen raises before the
+        # assignment completes, leaving an unowned worker/process group behind.
+        for extra in labels:
+            procs.append(subprocess.Popen(
+                base_cmd + extra,
+                cwd=args.sef_project,
+                env=env,
+                start_new_session=True,
+                pass_fds=lease_fds,
+            ))
+        scope_dir = os.environ.get("LINKER_ENGINE_SCOPE_DIR")
+        if scope_dir:
+            os.makedirs(scope_dir, exist_ok=True)
+            scope_tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ci", "process_scope.py")
+            for p, label in zip(procs, worker_labels):
+                state = os.path.join(scope_dir, f"engine-{label}.json")
+                subprocess.run([
+                    sys.executable, scope_tool, "record", "--state", state,
+                    "--pid", str(p.pid), "--kind", f"linker-engine-{label}",
+                    "--expect", "link_books.py",
+                ], check=True)
+                scope_paths.append((state, p))
+        spawned_at = {p.pid: time.time() for p in procs}
+
+        def monitor_heartbeats():
+            stall = float(getattr(args, "worker_stall_seconds", 1800) or 1800)
+            while not watchdog_stop.wait(min(30.0, max(1.0, stall / 10))):
+                now = time.time()
+                for p, label in zip(procs, worker_labels):
+                    if p.poll() is not None:
+                        continue
+                    path = os.path.join(heartbeat_dir, label)
+                    try:
+                        last = max(spawned_at[p.pid], os.path.getmtime(path))
+                    except OSError:
+                        last = spawned_at[p.pid]
+                    if now - last <= stall:
+                        continue
+                    _log(f"worker {label} pid={p.pid} has no heartbeat for {now-last:.0f}s; terminating its group")
+                    try:
+                        os.killpg(p.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    if watchdog_stop.wait(10):
+                        return
+                    if p.poll() is None:
+                        try:
+                            os.killpg(p.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+        watchdog = threading.Thread(target=monitor_heartbeats, name="engine-heartbeat-watchdog", daemon=True)
+        watchdog.start()
+        codes = [p.wait() for p in procs]
+    finally:
+        watchdog_stop.set()
+        if watchdog is not None:
+            watchdog.join(timeout=2)
+        live = [p for p in procs if p.poll() is None]
+        for p in live:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
+        for p in live:
+            while p.poll() is None and time.time() < deadline:
+                time.sleep(0.5)
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        # Reap every child we created.  killpg() ending the process is not enough:
+        # without wait(), the leader can remain a zombie and make ownership checks
+        # report a false live group.
+        for p in live:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        for state, proc in scope_paths:
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                try:
+                    os.remove(state)
+                except FileNotFoundError:
+                    pass
+            except PermissionError:
+                _log(f"retaining process scope {state}: group {proc.pid} still exists but is not signalable")
+            else:
+                _log(f"retaining process scope {state}: group {proc.pid} still has live members")
+        if live:
+            _log(f"terminated {len(live)} live engine worker group(s) on exit")
     if any(codes):
         _log(f"engine worker exit codes: {codes} — deferring judgment to the ledger")
     return codes
@@ -472,12 +614,15 @@ def main():
                     help="engine identity (commits/models/policy); a change forces a FULL relink")
     ap.add_argument("--engine-workers", type=int, default=1,
                     help="parallel link_books.py processes (claim-ledger coordinated)")
+    ap.add_argument("--worker-stall-seconds", type=int, default=1800,
+                    help="kill only a worker whose per-batch heartbeat is stale this long")
     ap.add_argument("--forbid-full-relink", action="store_true",
                     help="serial mode: fail instead of a fingerprint-triggered full relink")
     ap.add_argument("--adopt-fingerprint", default=None, metavar="OLD::NEW",
                     help="operator-attested migration: re-stamp the baseline fingerprint "
                          "WITHOUT a full relink; both strings must match exactly")
     args = ap.parse_args()
+    install_terminate_handler()
     n = run_incremental(args)
     _log(f"done: {n} books re-linked")
 
