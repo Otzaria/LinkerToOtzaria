@@ -1,18 +1,33 @@
 #!/usr/bin/env bash
-# Dispatch a standalone relink onto a fresh Kaggle GPU session.
+# Dispatch a relink onto a fresh Kaggle GPU session.
 #
-#   scripts/dispatch_kaggle_relink.sh [--dry-run]
+#   scripts/dispatch_kaggle_relink.sh [--dry-run] [--library-run-id <id>]
+#
+# --library-run-id: serial mode — the relink takes lines_snapshot.db.zst from that
+# SeforimLibrary run and the waiting build downloads the artifacts back from it.
 #
 # Order matters: the relink job is queued FIRST (runs-on [self-hosted, kaggle, gpu] —
 # it just waits), THEN the kernel is pushed; the session boots, registers as a one-job
 # JIT runner and picks the job up. Requires: gh authenticated with repo-admin rights,
-# kaggle CLI authenticated (both true on the operator machine), nothing else — the
-# kernel is self-contained (bootstrap.sh + JIT config embedded into run.py).
+# kaggle CLI authenticated (both true on the operator machine and in kaggle-relink.yml),
+# nothing else — the kernel is self-contained (bootstrap.sh + JIT config embedded into
+# run.py) and pulls its pinned tool binaries from the output of the one-shot
+# otzaria/linker-tools-fetcher kernel (attached via kernel_sources).
 set -euo pipefail
 REPO=Otzaria/LinkerToOtzaria
 KERNEL_ID=otzaria/linker-gpu-runner
+TOOLS_KERNEL=otzaria/linker-tools-fetcher
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-DRY=${1:-}
+
+DRY=""
+LIBRARY_RUN_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --library-run-id) LIBRARY_RUN_ID="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
 
 NAME="kaggle-$(date +%Y%m%d-%H%M%S)"
 JIT=$(gh api -X POST "repos/$REPO/actions/runners/generate-jitconfig" \
@@ -21,8 +36,10 @@ JIT=$(gh api -X POST "repos/$REPO/actions/runners/generate-jitconfig" \
   -q .encoded_jit_config)
 echo "JIT runner registered: $NAME"
 
-gh workflow run relink.yml -R "$REPO" -f target=kaggle ${DRY:+-f dry_run=true}
-echo "relink queued (target=kaggle${DRY:+, dry_run})"
+gh workflow run relink.yml -R "$REPO" -f target=kaggle \
+  ${LIBRARY_RUN_ID:+-f library_run_id="$LIBRARY_RUN_ID"} \
+  ${DRY:+-f dry_run=true}
+echo "relink queued (target=kaggle${LIBRARY_RUN_ID:+, library_run_id=$LIBRARY_RUN_ID}${DRY:+, dry_run})"
 
 PUSH=$(mktemp -d)
 B64=$(base64 < "$HERE/kaggle/bootstrap.sh" | tr -d '\n')
@@ -47,7 +64,7 @@ cat > "$PUSH/kernel-metadata.json" <<JSON
   "enable_internet": true,
   "dataset_sources": [],
   "competition_sources": [],
-  "kernel_sources": [],
+  "kernel_sources": ["$TOOLS_KERNEL"],
   "model_sources": []
 }
 JSON

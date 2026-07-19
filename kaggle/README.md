@@ -16,9 +16,16 @@
 
 | תרחיש | יעד |
 |---|---|
-| ‏relink סריאלי בתוך בנייה שבועית (דלתא קטנה, הבנייה ממתינה) | שרת — זמינות דטרמיניסטית |
-| ‏relink עצמאי / עומס כבד / הרחקת עבודה מהשרת | קגל |
+| ‏relink סריאלי בתוך בנייה שבועית (החלטת בעלים 19/07/2026) | קגל — ‏manual-generate-release משגר דרך kaggle-relink.yml עם library_run_id; מרחיק את העבודה ממארח הבנייה |
+| ‏relink עצמאי / עומס כבד | קגל |
+| שיגור ידני כשקגל לא זמין | שרת (‏target=server) |
 | ‏relink מלא של כל הקורפוס | אף אחד מהם ישירות — ראו למטה |
+
+הכלים הבינאריים (gh, mongod/tools/mongosh, ‏Actions runner) מגיעים מה-output של
+הקרנל החד-פעמי `otzaria/linker-tools-fetcher` (מוצמד דרך kernel_sources) —
+הורדות נעוצות-sha256 שרצות פעם אחת ב-Kaggle. דאטה-סטים פרטיים גדולים נכשלים
+בעיבוד של Kaggle; ‏kernel outputs לא. עדכון גרסה = עדכון URL+sha256 ב-fetcher
+‏(kaggle/fetch_tools.py), הרצה מחדש שלו, ועדכון הפינים ב-bootstrap.sh.
 
 ## עובדות שנמדדו (07/2026)
 

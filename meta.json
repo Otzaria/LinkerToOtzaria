@@ -2,16 +2,16 @@
   "schema_version": 2,
   "description": "Lineage of the last linker run (see stage 3). Source-change clock = snapshot.",
   "snapshot": {
-    "sha256": "0e6ecc652ef61521b38140cb06aa46d2f5711a8817a6bb7956de8799fb2d52fb",
-    "book_count": 7332
+    "sha256": "0d55f4030cdbcdd3bef0ebeb8837b4a2093056e1d62af38c75a7505c6f0db372",
+    "book_count": 7293
   },
   "sefaria": {
-    "export_tag": "2026-07-09_20-23"
+    "export_tag": "2026-07-18_20-52-29654670616-1"
   },
   "engine": {
     "ambiguity_policy": "drop",
     "bavli_convention": false,
-    "fingerprint": "dump=1157948d14f1;engine_src=38a07dc77a379226;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
+    "fingerprint": "dump=44e55916743983b8;engine_src=38a07dc77a379226;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
   },
-  "generated_at": "2026-07-13T18:57:34Z"
+  "generated_at": "2026-07-19T19:16:58Z"
 }

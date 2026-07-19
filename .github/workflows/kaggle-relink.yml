@@ -6,12 +6,20 @@
 # dies with the job; nothing persists on Kaggle.
 #
 # Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
-# KAGGLE_CREDENTIALS_JSON (the operator's kaggle CLI OAuth file, stored as a secret).
+# KAGGLE_API_TOKEN (a Kaggle API token, KGAT_…; the OAuth credentials file breaks on
+# expiry and on dataset APIs, the token does not).
 name: kaggle-relink
 
 on:
   workflow_dispatch:
     inputs:
+      library_run_id:
+        description: >
+          SeforimLibrary run id for serial mode — forwarded to relink.yml so the
+          session takes lines_snapshot.db.zst from (and hands artifacts back to)
+          that exact waiting build. Empty = standalone relink.
+        required: false
+        default: ''
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).
         required: false
@@ -27,15 +35,20 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
     steps:
+      # permissions:{} strips GITHUB_TOKEN, so checkout of this private repo must use
+      # PIPELINE_TOKEN (Contents read) — the same PAT the dispatch step already needs.
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PIPELINE_TOKEN }}
+          persist-credentials: false
 
-      - name: Kaggle CLI + credentials
-        run: |
-          set -euo pipefail
-          pip install --quiet kaggle
-          mkdir -p ~/.kaggle
-          printf '%s' '${{ secrets.KAGGLE_CREDENTIALS_JSON }}' > ~/.kaggle/credentials.json
-          chmod 600 ~/.kaggle/credentials.json
+      - name: Kaggle CLI
+        run: pip install --quiet kaggle
 
       - name: Register JIT runner, queue relink, push kernel
-        run: bash scripts/dispatch_kaggle_relink.sh ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: >
+          bash scripts/dispatch_kaggle_relink.sh
+          ${{ inputs.dry_run && '--dry-run' || '' }}
+          ${{ inputs.library_run_id != '' && format('--library-run-id {0}', inputs.library_run_id) || '' }}
