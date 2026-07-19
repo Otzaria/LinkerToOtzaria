@@ -11,11 +11,12 @@
 # JIT runner and picks the job up. Requires: gh authenticated with repo-admin rights,
 # kaggle CLI authenticated (both true on the operator machine and in kaggle-relink.yml),
 # nothing else — the kernel is self-contained (bootstrap.sh + JIT config embedded into
-# run.py) and pulls its pinned tool binaries from the otzaria/linker-runner-tools-v3 dataset.
+# run.py) and pulls its pinned tool binaries from the output of the one-shot
+# otzaria/linker-tools-fetcher kernel (attached via kernel_sources).
 set -euo pipefail
 REPO=Otzaria/LinkerToOtzaria
 KERNEL_ID=otzaria/linker-gpu-runner
-TOOLS_DATASET=otzaria/linker-runner-tools-v3
+TOOLS_KERNEL=otzaria/linker-tools-fetcher
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 DRY=""
@@ -61,9 +62,9 @@ cat > "$PUSH/kernel-metadata.json" <<JSON
   "enable_gpu": true,
   "enable_tpu": false,
   "enable_internet": true,
-  "dataset_sources": ["$TOOLS_DATASET"],
+  "dataset_sources": [],
   "competition_sources": [],
-  "kernel_sources": [],
+  "kernel_sources": ["$TOOLS_KERNEL"],
   "model_sources": []
 }
 JSON

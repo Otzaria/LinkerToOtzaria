@@ -21,10 +21,11 @@
 | שיגור ידני כשקגל לא זמין | שרת (‏target=server) |
 | ‏relink מלא של כל הקורפוס | אף אחד מהם ישירות — ראו למטה |
 
-הכלים הבינאריים (gh, mongod/tools/mongosh, ‏Actions runner) מגיעים מדאטה-סט
-‏Kaggle בשם `otzaria/linker-runner-tools-v3` המוצמד לקרנל — האתחול אינו תלוי
-בהורדות מצד-שלישי. עדכון גרסה = העלאת גרסה חדשה לדאטה-סט + עדכון הפינים
-ב-bootstrap.sh.
+הכלים הבינאריים (gh, mongod/tools/mongosh, ‏Actions runner) מגיעים מה-output של
+הקרנל החד-פעמי `otzaria/linker-tools-fetcher` (מוצמד דרך kernel_sources) —
+הורדות נעוצות-sha256 שרצות פעם אחת ב-Kaggle. דאטה-סטים פרטיים גדולים נכשלים
+בעיבוד של Kaggle; ‏kernel outputs לא. עדכון גרסה = עדכון URL+sha256 ב-fetcher
+‏(kaggle/fetch_tools.py), הרצה מחדש שלו, ועדכון הפינים ב-bootstrap.sh.
 
 ## עובדות שנמדדו (07/2026)
 

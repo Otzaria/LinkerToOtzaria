@@ -4,9 +4,10 @@
 # Expects JIT_CONFIG in the environment — injected by scripts/dispatch_kaggle_relink.sh,
 # which base64-embeds this file into the pushed kernel's run.py (the repo is private, so
 # the kernel cannot fetch it itself). All third-party binaries (gh, mongod/mongorestore/
-# mongosh, the Actions runner) come from the attached Kaggle dataset
-# otzaria/linker-runner-tools-v3 — no fragile third-party URLs at boot time; the dataset is
-# the pinned, years-stable source. Only distro packages come from the Ubuntu archive.
+# mongosh, the Actions runner) come from the attached OUTPUT of the one-shot Kaggle
+# kernel otzaria/linker-tools-fetcher (sha256-pinned downloads; big private datasets
+# fail Kaggle's processing, kernel outputs do not). Only distro packages come from the
+# Ubuntu archive.
 # The JIT runner executes a single job and deregisters, and the session dies with it —
 # nothing here persists or needs cleanup.
 set -euxo pipefail
@@ -15,9 +16,10 @@ set -euxo pipefail
 echo "=== session resources ==="
 head -2 /etc/os-release; nproc; free -h; df -h /; nvidia-smi || echo "NO GPU"
 
-# Pinned tool bundle — attached via kernel-metadata dataset_sources. Required: the
-# whole point is that boot does not depend on mongodb.org/github.com download URLs.
-DS=/kaggle/input/linker-runner-tools-v3
+# Pinned tool bundle — attached via kernel-metadata kernel_sources (the output of
+# otzaria/linker-tools-fetcher). Required: the whole point is that boot does not
+# depend on mongodb.org/github.com download URLs.
+DS=/kaggle/input/linker-tools-fetcher
 GH_VER=2.63.2
 MONGO_VER=7.0.14
 MONGO_TOOLS_VER=100.10.0
@@ -28,7 +30,7 @@ for f in "gh_${GH_VER}_linux_amd64.tar.gz" \
          "mongodb-database-tools-ubuntu2204-x86_64-${MONGO_TOOLS_VER}.tgz" \
          "mongosh-${MONGOSH_VER}-linux-x64.tgz" \
          "actions-runner-linux-x64-${RUNNER_VER}.tar.gz"; do
-  [ -f "$DS/$f" ] || { echo "dataset asset missing: $DS/$f — attach otzaria/linker-runner-tools-v3"; exit 1; }
+  [ -f "$DS/$f" ] || { echo "dataset asset missing: $DS/$f — attach kernel_sources otzaria/linker-tools-fetcher"; exit 1; }
 done
 
 export DEBIAN_FRONTEND=noninteractive
