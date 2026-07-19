@@ -43,10 +43,11 @@ on:
         type: string
       target:
         description: >
-          Runner to execute on. 'server' = the Oracle ARM box (always available; serial
-          builds MUST use it). 'kaggle' = an ephemeral GPU session registered as a JIT
-          runner by scripts/dispatch_kaggle_relink.sh — NER runs on CUDA, ~10-30x faster;
-          session dies after ~9h, so it fits standalone/full relinks only.
+          Runner to execute on. 'kaggle' = an ephemeral GPU session registered as a JIT
+          runner by scripts/dispatch_kaggle_relink.sh; session dies after ~9h. Owner
+          decision (2026-07-19): serial builds dispatch via kaggle-relink.yml (keeps the
+          relink off the DB build's host). 'server' = the Oracle ARM box — fallback for
+          manual dispatches when a Kaggle session is unavailable.
         required: false
         default: 'server'
         type: choice

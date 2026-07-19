@@ -12,6 +12,13 @@ name: kaggle-relink
 on:
   workflow_dispatch:
     inputs:
+      library_run_id:
+        description: >
+          SeforimLibrary run id for serial mode — forwarded to relink.yml so the
+          session takes lines_snapshot.db.zst from (and hands artifacts back to)
+          that exact waiting build. Empty = standalone relink.
+        required: false
+        default: ''
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).
         required: false
@@ -38,4 +45,7 @@ jobs:
           chmod 600 ~/.kaggle/credentials.json
 
       - name: Register JIT runner, queue relink, push kernel
-        run: bash scripts/dispatch_kaggle_relink.sh ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: >
+          bash scripts/dispatch_kaggle_relink.sh
+          ${{ inputs.dry_run && '--dry-run' || '' }}
+          ${{ inputs.library_run_id != '' && format('--library-run-id {0}', inputs.library_run_id) || '' }}
