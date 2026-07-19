@@ -94,12 +94,21 @@ grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://loc
 # new dump, must not survive into the restored state.
 DUMP_TAG="${LINKER_DUMP_TAG:-dump-v1}"
 DUMP_REPO="${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}"
-DUMP_KEY="$(url_key "$DUMP_REPO@$DUMP_TAG")"
-DUMP_MARKER="$CACHE/.dump-restored-$DUMP_KEY"
 pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
+# Content-addressed dump identity: ALWAYS computed from the SHA256SUMS asset,
+# BEFORE any cache decision. A tag-keyed marker once let a stale server cache
+# fingerprint the same dump differently than a fresh Kaggle session (empty
+# .dump-content-id → tag-key fallback) and broke a serial build. The restore
+# marker is keyed by this content id, so re-tagged dump assets re-restore and
+# every environment mints the identical fingerprint token. No fallback.
+rm -rf "$CACHE/dump-sums" && mkdir -p "$CACHE/dump-sums"
+gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p SHA256SUMS -D "$CACHE/dump-sums"
+DUMP_CONTENT_ID="$(sha256sum "$CACHE/dump-sums/SHA256SUMS" | cut -c1-16)"
+DUMP_MARKER="$CACHE/.dump-restored-content-$DUMP_CONTENT_ID"
 if [ ! -f "$DUMP_MARKER" ]; then
   rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
-  gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -p SHA256SUMS -D "$CACHE/dump-dl"
+  gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
+  cp "$CACHE/dump-sums/SHA256SUMS" "$CACHE/dump-dl/SHA256SUMS"
   cat "$CACHE/dump-dl"/dump.tar.gz.part-* > "$CACHE/dump-dl/dump.tar.gz"
   (cd "$CACHE/dump-dl" && sha256sum -c SHA256SUMS)
   rm -rf "$CACHE/dump-extract" && mkdir -p "$CACHE/dump-extract"
@@ -111,12 +120,10 @@ if [ ! -f "$DUMP_MARKER" ]; then
     mongosh --quiet --eval "db.getSiblingDB('$dbname').dropDatabase()" >/dev/null
   done
   mongorestore --gzip --drop "$DUMP_DIR"
-  sha256sum "$CACHE/dump-dl/SHA256SUMS" | cut -c1-16 > "$CACHE/.dump-content-id"
   rm -rf "$CACHE/dump-dl" "$CACHE/dump-extract"
-  rm -f "$CACHE"/.dump-restored-*
+  rm -f "$CACHE"/.dump-restored-* "$CACHE/.dump-content-id"
   touch "$DUMP_MARKER"
 fi
-DUMP_CONTENT_ID="$(cat "$CACHE/.dump-content-id" 2>/dev/null || echo "$DUMP_KEY")"
 
 # ── 4. NER model wheels (cached per release tag) ─────────────────────────────
 # Downloaded with gh from THIS repo's models release (the repo is private, so a raw
