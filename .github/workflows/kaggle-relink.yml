@@ -34,7 +34,12 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
     steps:
+      # permissions:{} strips GITHUB_TOKEN, so checkout of this private repo must use
+      # PIPELINE_TOKEN (Contents read) — the same PAT the dispatch step already needs.
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PIPELINE_TOKEN }}
+          persist-credentials: false
 
       - name: Kaggle CLI + credentials
         run: |
