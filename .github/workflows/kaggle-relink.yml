@@ -6,7 +6,8 @@
 # dies with the job; nothing persists on Kaggle.
 #
 # Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
-# KAGGLE_CREDENTIALS_JSON (the operator's kaggle CLI OAuth file, stored as a secret).
+# KAGGLE_API_TOKEN (a Kaggle API token, KGAT_…; the OAuth credentials file breaks on
+# expiry and on dataset APIs, the token does not).
 name: kaggle-relink
 
 on:
@@ -41,15 +42,12 @@ jobs:
           token: ${{ secrets.PIPELINE_TOKEN }}
           persist-credentials: false
 
-      - name: Kaggle CLI + credentials
-        run: |
-          set -euo pipefail
-          pip install --quiet kaggle
-          mkdir -p ~/.kaggle
-          printf '%s' '${{ secrets.KAGGLE_CREDENTIALS_JSON }}' > ~/.kaggle/credentials.json
-          chmod 600 ~/.kaggle/credentials.json
+      - name: Kaggle CLI
+        run: pip install --quiet kaggle
 
       - name: Register JIT runner, queue relink, push kernel
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: >
           bash scripts/dispatch_kaggle_relink.sh
           ${{ inputs.dry_run && '--dry-run' || '' }}
