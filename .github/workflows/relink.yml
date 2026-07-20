@@ -104,11 +104,16 @@ jobs:
     # down when done; a standalone dispatch has the box to itself.
     # kaggle: a throwaway GPU VM (see kaggle/); NER on CUDA, host RAM varies 13-29GB.
     runs-on: ${{ inputs.target == 'kaggle' && fromJSON('["self-hosted","kaggle","gpu"]') || fromJSON('["self-hosted","Linux","ARM64","server-2"]') }}
-    # Weekly deltas take minutes; the generous ceiling is for a deliberate full relink
-    # (engine-pin bump, dispatched manually off-cycle) with 4 parallel workers.
-    # 5 days — the self-hosted maximum. A full-corpus relink measured ~66h at 3 engine
-    # workers (NER-bound); 72h left only a ~6% margin, one monster book from a timeout.
-    timeout-minutes: 7200
+    # Timeout by mode. A SERIAL relink (library_run_id set) is always a bounded delta —
+    # it runs with --forbid-full-relink, so it can never do a full corpus. Cap it at 8h:
+    # far above the worst realistic weekly delta (~285 changed books ≈ 4h at 2 workers)
+    # yet 15× below the old uniform ceiling, so a hung serial run (like the 2026-07-13
+    # one that held the host for 5 days) is bounded to hours, not days. A MANUAL full
+    # relink (no library_run_id: engine-pin bump / adopt) keeps the 5-day self-hosted
+    # ceiling — a full corpus measured ~66h at 3 workers.
+    # (Precise stall detection — a per-book heartbeat watchdog — is a follow-up; this
+    # timeout is the coarse backstop that already kills the 5-day-hostage failure mode.)
+    timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
