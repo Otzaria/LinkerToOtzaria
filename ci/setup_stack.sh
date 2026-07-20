@@ -174,10 +174,18 @@ EOF
 GUNICORN_WORKERS="${NER_WORKERS:-3}"
 NER_ID="$MODELS_TAG:$(git -C "$GPU" rev-parse HEAD):$(sha256sum "$GPU/app/local_config.py" | cut -c1-12):w$GUNICORN_WORKERS"
 NER_MARKER="$CACHE/.ner-identity"
+NER_PIDFILE="$CACHE/gunicorn.pid"
+NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
+NER_SCOPE_MODE="${LINKER_NER_SCOPE_MODE:-0600}"
+PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
 if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
-  pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
+  # Stop only an identity-bound process group.  A pre-migration gunicorn without
+  # scope state is never killed heuristically; a live port below fails loudly and
+  # requires one explicit operator cleanup.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
   sleep 2
-  # pkill cannot signal another user's processes and its failure is swallowed above.
   # If :5051 STILL answers, a foreign gunicorn owns the port — adopting it would
   # neutralize the fingerprint (this exact gap let a bootstrap-era leftover serve
   # production CI runs). Fail loudly instead.
@@ -189,8 +197,26 @@ if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
 fi
 if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
-  ( cd "$GPU/app" && APP_CONFIG=local_config.py nohup "$GPU/.venv/bin/gunicorn" -w "$GUNICORN_WORKERS" --timeout 600 \
-      -b 127.0.0.1:5051 'app:create_app()' >"$CACHE/gunicorn.log" 2>&1 & )
+  # A same-fingerprint master may have become unhealthy while descendants still
+  # exist. Reap its verified group before starting a replacement; never overlap
+  # two model stacks merely because the HTTP probe is down.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
+  # A new session makes the master and all workers one owned process group.
+  pushd "$GPU/app" >/dev/null
+  setsid env APP_CONFIG=local_config.py "$GPU/.venv/bin/gunicorn" -w "$GUNICORN_WORKERS" --timeout 600 \
+      --pid "$NER_PIDFILE" -b 127.0.0.1:5051 'app:create_app()' \
+      >"$CACHE/gunicorn.log" 2>&1 &
+  NER_LAUNCH_PID=$!
+  popd >/dev/null
+  for _ in $(seq 1 50); do [ -s "$NER_PIDFILE" ] && break; sleep 0.2; done
+  [ -s "$NER_PIDFILE" ] || { echo "::error::gunicorn did not create its pidfile"; exit 1; }
+  NER_MASTER_PID="$(cat "$NER_PIDFILE")"
+  [[ "$NER_MASTER_PID" =~ ^[1-9][0-9]*$ ]]
+  [ "$NER_MASTER_PID" = "$NER_LAUNCH_PID" ] || { echo "::error::gunicorn master pid differs from session leader"; exit 1; }
+  python3 "$PROCESS_SCOPE" record --state "$NER_SCOPE" --pid "$NER_MASTER_PID" \
+      --kind ner-gunicorn --expect 'app:create_app()' --mode "$NER_SCOPE_MODE"
   for _ in $(seq 1 60); do
     curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1 && break
@@ -198,6 +224,11 @@ if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
   done
   curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
     -d '{"text":"בדיקה","lang":"he"}' >/dev/null || { echo "::error::NER did not come up"; tail -50 "$CACHE/gunicorn.log"; exit 1; }
+else
+  python3 "$PROCESS_SCOPE" check --state "$NER_SCOPE" --expect 'app:create_app()' || {
+    echo "::error::healthy :5051 service lacks valid process ownership state; refusing to adopt it"
+    exit 1
+  }
 fi
 printf '%s' "$NER_ID" > "$NER_MARKER"
 

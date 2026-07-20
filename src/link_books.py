@@ -222,8 +222,20 @@ def main():
     _BAVLI_CONVENTION = args.bavli_convention
 
     run = args.run_dir
-    for d in ("done", "claim", "logs", "failed"):
+    for d in ("done", "claim", "logs", "failed", "worker-heartbeats"):
         os.makedirs(os.path.join(run, d), exist_ok=True)
+    heartbeat_path = os.path.join(run, "worker-heartbeats", args.label)
+
+    def worker_heartbeat():
+        # A watchdog monitors this worker-specific heartbeat, not book completion.
+        # Giant healthy books may run for hours; process_book refreshes once per
+        # batch, so only a genuinely stalled worker crosses the watchdog threshold.
+        try:
+            os.utime(heartbeat_path, None)
+        except FileNotFoundError:
+            open(heartbeat_path, "a").close()
+
+    worker_heartbeat()
 
     def log(msg):
         line = f"{time.strftime('%H:%M:%S')} {args.label} {msg}"
@@ -262,6 +274,7 @@ def main():
 
     def heartbeat(cid):
         # Keep the claim fresh while this worker is actively processing the book.
+        worker_heartbeat()
         try:
             os.utime(os.path.join(claim_dir(cid), "hb"), None)
         except OSError:
@@ -302,6 +315,7 @@ def main():
             remaining = [bk for bk in remaining
                          if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
             if remaining:
+                worker_heartbeat()
                 log(f"rescan: {len(remaining)} book(s) still lack a done marker; sleeping 60s")
                 time.sleep(60)
 
@@ -321,6 +335,7 @@ def main():
             out_path = os.path.join(args.repo, book_key_to_relpath(bk))
             t0 = time.time()
             try:
+                worker_heartbeat()
                 wait_for_ner(log)
                 records, words = process_book(linker, bk, lines, skipped_log, lambda: heartbeat(cid))
             except Exception as e:
@@ -354,6 +369,7 @@ def main():
             open(os.path.join(run, "done", cid), "w").close()
             processed += 1
             log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={len(records)} {time.time()-t0:.1f}s")
+            worker_heartbeat()
             break
 
         # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
@@ -363,6 +379,10 @@ def main():
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
     log(f"no more books (processed {processed} this life); exiting")
+    try:
+        os.remove(heartbeat_path)
+    except FileNotFoundError:
+        pass
 
 
 if __name__ == "__main__":

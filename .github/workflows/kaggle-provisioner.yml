@@ -1,0 +1,43 @@
+name: Provision pending Kaggle relink intent
+run-name: kaggle-provisioner intent-run=${{ inputs.intent_run_id || 'oldest' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      intent_run_id:
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: kaggle-provisioner
+  cancel-in-progress: false
+  # Ticks and wake-ups are interchangeable observations; the immutable intake
+  # artifacts are the queue.  Keep at most one pending scanner.
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Share the actual relink mutex from admission through child dispatch and
+    # kernel push.  The child queues behind this short job and starts only after
+    # the JIT session is ready; a server relink cannot enter the old check/use gap.
+    concurrency:
+      group: linker-relink
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      INTENT_RUN_ID: ${{ inputs.intent_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PIPELINE_TOKEN }}
+          persist-credentials: false
+      - run: pip install --quiet kaggle
+      - name: Claim at most one durable pending intent
+        run: bash scripts/provision_kaggle_intent.sh

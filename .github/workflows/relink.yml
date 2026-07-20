@@ -1,6 +1,8 @@
 name: relink
-# מזוהה ע"י הבנייה הממתינה לפי library_run_id בכותרת — אל תשנו את התבנית.
-run-name: "relink (library_run_id=${{ inputs.library_run_id || 'standalone' }})"
+# הבנייה הממתינה, ה-trap של ה-dispatcher וה-reconciler מזהים ריצה זו בהתאמה מדויקת
+# (==, לא contains) על הכותרת כולה — request= (זהות per-attempt) + parent= (קואורדינטות
+# ההורה עבור ה-reconciler). אל תשנו את התבנית בלי לעדכן את שלושת הצרכנים.
+run-name: "relink request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"
 
 # Incremental re-link: re-run the linker only on source books that changed since the last
 # run, then hand the ref-based artifacts back to the SeforimLibrary build.
@@ -41,6 +43,23 @@ on:
         required: false
         default: ''
         type: string
+      relink_request_id:
+        description: >
+          Deterministic per-attempt correlation id (64-hex sha256) computed by the
+          dispatching build from {parent repo, run id + attempt, saga correlation id,
+          pinned inputs, target}. Stamped into the run-name for EXACT-match discovery,
+          cleanup and reconciliation, and echoed in the relink manifest. Serial mode
+          requires it; a rerun of the parent produces a DIFFERENT id.
+        required: true
+        type: string
+      parent_run_attempt:
+        description: >
+          The dispatching build's run attempt. Together with library_run_id this pins
+          the exact parent attempt in the run-name and the manifest, so cleanup of one
+          attempt can never touch another. Serial mode requires it.
+        required: false
+        default: ''
+        type: string
       sefaria_tag:
         description: >
           Pinned SefariaExport release tag (serial mode, passed by the build). The
@@ -54,6 +73,15 @@ on:
           SHA-256 of the lines_snapshot.db.zst the build uploaded (serial mode). The
           downloaded snapshot is verified against it, fail-closed. Empty = skip the
           check (manual/standalone dispatch only).
+        required: false
+        default: ''
+        type: string
+      sefaria_release_metadata_sha256:
+        description: >
+          Raw SHA-256 of the pinned SefariaExport release_metadata.json (serial mode). The
+          changelog rewrites target_ref, so it is part of the build output: this content-
+          verifies changelog_diff.json against the metadata's changelog descriptor, not just
+          the tag name. Empty = skip (manual/standalone dispatch only).
         required: false
         default: ''
         type: string
@@ -87,17 +115,29 @@ on:
 permissions:
   contents: write
 
-# One relink at a time PER TARGET: two concurrent runs would race on the git baseline
-# push and on the 'latest' release pointer. Queue, never cancel — a run may be feeding a
-# waiting build. Cross-target overlap is the operator's call (e.g. a Kaggle migration
-# racing a doomed server run to the finish — cancel the loser before it publishes).
-# Dry-runs never publish, so each gets a group of its own and never queues.
+# One PUBLISHING relink at a time, across BOTH targets. server and kaggle used to have
+# separate concurrency groups, so a server run and a kaggle run could run at once and each
+# publish to the same links-<tag> release (--clobber) and `git push` the shared baseline —
+# a data race on global state, not an operator's call. A single group for every real
+# (non-dry) relink, regardless of target, serializes publishing: exactly one publisher acts
+# at a time. cancel-in-progress:false keeps the RUNNING relink safe; queue:max lifts GitHub's
+# default single-pending slot (which a third dispatch would otherwise supersede/cancel) to a
+# durable queue, so a relink feeding a waiting build is never dropped by a later dispatch.
+# (queue:max shipped 2026-05-07; actionlint 1.7.12 predates it and may flag it — no lint gate
+# runs here. Confirm at canary.) Crash cleanup is handled by the correlation-keyed scheduled
+# reconciler. Dry-runs never publish, so each keeps a unique group.
+# Every SERVER run, including a dry-run, shares this group: only after the prior
+# workflow is terminal may its identity-bound orphan reaper act on the host.
 concurrency:
-  group: linker-relink-${{ inputs.dry_run && format('dry-{0}', github.run_id) || (inputs.target || 'server') }}
+  group: ${{ inputs.target != 'kaggle' && 'linker-relink' || (inputs.dry_run && format('linker-relink-dry-kaggle-{0}', github.run_id) || 'linker-relink') }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   relink:
+    permissions:
+      contents: read
+      actions: read
     # server: the Oracle ARM box — the SAME host that runs the SeforimLibrary build. In
     # serial mode the build is waiting on us while holding its RAM tmpfs (~8-11GB of the
     # 24GB), so this job runs LEAN there (2 NER + 2 engine workers) and tears the NER
@@ -111,8 +151,8 @@ jobs:
     # one that held the host for 5 days) is bounded to hours, not days. A MANUAL full
     # relink (no library_run_id: engine-pin bump / adopt) keeps the 5-day self-hosted
     # ceiling — a full corpus measured ~66h at 3 workers.
-    # (Precise stall detection — a per-book heartbeat watchdog — is a follow-up; this
-    # timeout is the coarse backstop that already kills the 5-day-hostage failure mode.)
+    # The per-book heartbeat watchdog detects an engine that stops making progress;
+    # this timeout remains the coarse backstop for failures outside the engine loop.
     timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
@@ -150,56 +190,110 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts
-          gh release download -R "$GITHUB_REPOSITORY" --pattern 'linker_links.zst' -D .
+          latest_tag="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          # Accept the one legacy `links-*` namespace only as a migration source;
+          # every release produced by this workflow uses linker-release-sha256-*.
+          [[ "$latest_tag" =~ ^linker-release-sha256-[0-9a-f]{64}$|^linker-links-sha256-[0-9a-f]{64}$|^links-[A-Za-z0-9._-]{1,150}$ ]]
+          gh release download "$latest_tag" -R "$GITHUB_REPOSITORY" --pattern 'linker_links.zst' -D .
+          remote_digest="$(gh release view "$latest_tag" -R "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[]|select(.name=="linker_links.zst")|.digest')"
+          [[ "$remote_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(sha256sum linker_links.zst | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
           tar --use-compress-program=unzstd -xf linker_links.zst artifacts
           rm -f linker_links.zst
           echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
 
-      - name: Bring up the Sefaria linker stack (Mongo + NER + Django)
-        env:
-          # Lean under a waiting build (shared 24GB host), full when standalone.
-          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
-        run: bash ci/setup_stack.sh
-
-      - name: Resolve upstream tags
+      # Inputs reach the shell ONLY via env — never interpolated into the script body
+      # (a crafted input would otherwise become a command before validation; this job
+      # holds a PAT). Every input is shape-validated here, before any use anywhere.
+      - name: Resolve upstream tags (and validate every input)
         id: tags
+        env:
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SEFARIA_TAG_INPUT: ${{ inputs.sefaria_tag }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
         run: |
           set -euo pipefail
+          # Shape-validate EVERY dispatch input once, fail-closed, before any step
+          # embeds one in a command line or an output.
+          [ -z "$LIBRARY_RUN_ID" ] || [[ "$LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::library_run_id must be a positive integer"; exit 1; }
+          [[ "$RELINK_REQUEST_ID" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::relink_request_id must always be 64-hex"; exit 1; }
+          [ -z "$SEFARIA_TAG_INPUT" ] || [[ "$SEFARIA_TAG_INPUT" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::sefaria_tag has an invalid shape"; exit 1; }
+          [ -z "$SNAPSHOT_SHA256" ] || [[ "$SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::snapshot_sha256 must be 64-hex"; exit 1; }
+          [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
+          [ -z "$ADOPT_FINGERPRINT" ] || printf '%s' "$ADOPT_FINGERPRINT" | LC_ALL=C grep -qE '^[[:print:]]{1,8192}$' || { echo "::error::adopt_fingerprint must be single-line printable ASCII (max 8192)"; exit 1; }
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
           # rewrites) and recorded lineage have to match the exact export the build was
           # pinned to. Never let a serial relink silently pick up a newer "Latest".
-          if [ -n "${{ inputs.library_run_id }}" ] && [ -z "${{ inputs.sefaria_tag }}" ]; then
+          if [ -n "$LIBRARY_RUN_ID" ] && [ -z "$SEFARIA_TAG_INPUT" ]; then
             echo "::error::serial relink (library_run_id set) requires a pinned sefaria_tag"; exit 1
           fi
-          if [ -n "${{ inputs.sefaria_tag }}" ]; then
-            SEF_TAG="${{ inputs.sefaria_tag }}"
+          # Serial identity contract: request id + parent attempt make this run
+          # discoverable by exact title equality and bind its manifest to ONE parent
+          # attempt. Without them the waiting build could neither find nor safely
+          # cancel this run — fail before any heavy work.
+          if [ -n "$LIBRARY_RUN_ID" ]; then
+            [[ "$PARENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::serial relink requires parent_run_attempt (positive integer)"; exit 1; }
+            [ -n "$SNAPSHOT_SHA256" ] && [ -n "$SEFARIA_METADATA_SHA256" ] || {
+              echo "::error::serial relink requires snapshot and release-metadata digests"; exit 1;
+            }
+          elif [ -n "$PARENT_RUN_ATTEMPT" ]; then
+            echo "::error::standalone relink must not carry parent_run_attempt"; exit 1
+          fi
+          if [ -n "$SEFARIA_TAG_INPUT" ]; then
+            SEF_TAG="$SEFARIA_TAG_INPUT"
             echo "Sefaria export (pinned by dispatcher): $SEF_TAG"
           else
             SEF_TAG=$(gh release view -R Otzaria/SefariaExport --json tagName -q .tagName)
+            [[ "$SEF_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::resolved Latest tag has an invalid shape: $SEF_TAG"; exit 1; }
             echo "Sefaria export (resolved moving Latest — manual/standalone): $SEF_TAG"
           fi
           echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Fetch inputs (snapshot = source clock; changelog = target-rewrite only)
+        id: inputs
+        env:
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: |
           set -euo pipefail
           mkdir -p inputs
           # changelog is used ONLY to rewrite target_ref for Sefaria en-renames — not for
           # source-change detection (that comes solely from the snapshot below).
-          gh release download "${{ steps.tags.outputs.sefaria_tag }}" -R Otzaria/SefariaExport \
+          gh release download "$SEF_TAG" -R Otzaria/SefariaExport \
             -p changelog_diff.json -D inputs --clobber
+          # Content-verify the changelog against the pinned Sefaria metadata (serial mode).
+          # The changelog rewrites target_ref, so it IS part of the build output and must be
+          # the exact pinned vintage — not merely the same tag name. release_metadata.json
+          # carries changelog.sha256; verify the metadata against the build's pinned digest,
+          # then the changelog against the metadata. Fail-closed.
+          gh release download "$SEF_TAG" -R Otzaria/SefariaExport \
+            -p release_metadata.json -D inputs --clobber
+          if [ -n "$LIBRARY_RUN_ID" ]; then
+            echo "$SEFARIA_METADATA_SHA256  inputs/release_metadata.json" | sha256sum -c -
+          fi
+          CL_SHA="$(jq -r '.changelog.sha256' inputs/release_metadata.json)"
+          [[ "$CL_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::release_metadata.json has no valid changelog.sha256"; exit 1; }
+          echo "$CL_SHA  inputs/changelog_diff.json" | sha256sum -c -
           # The snapshot is the ONLY source-change clock. Serial mode takes it from the
           # dispatching build run (the DB being built right now); standalone mode takes
           # the latest published release.
           rm -f inputs/lines_snapshot.db.zst
-          if [ -n "${{ inputs.library_run_id }}" ]; then
-            echo "Serial mode: snapshot from SeforimLibrary run ${{ inputs.library_run_id }}"
-            gh run download "${{ inputs.library_run_id }}" -R Otzaria/SeforimLibrary \
-              -n lines-snapshot -D inputs
+          if [ -n "$LIBRARY_RUN_ID" ]; then
+            echo "Serial mode: snapshot from SeforimLibrary run $LIBRARY_RUN_ID"
+            gh run download "$LIBRARY_RUN_ID" -R Otzaria/SeforimLibrary \
+              -n "lines-snapshot-$PARENT_RUN_ATTEMPT" -D inputs
             # Verify the handoff against the digest the build pinned (fail-closed): a
             # serial relink must link the exact snapshot this build produced.
-            [ -n "${{ inputs.snapshot_sha256 }}" ] || { echo "::error::serial relink requires snapshot_sha256 to verify the snapshot handoff"; exit 1; }
-            echo "${{ inputs.snapshot_sha256 }}  inputs/lines_snapshot.db.zst" | sha256sum -c -
+            [ -n "$SNAPSHOT_SHA256" ] || { echo "::error::serial relink requires snapshot_sha256 to verify the snapshot handoff"; exit 1; }
+            echo "$SNAPSHOT_SHA256  inputs/lines_snapshot.db.zst" | sha256sum -c -
           else
             # Newest release INCLUDING pre-releases — `gh release view` with no tag
             # resolves the "Latest" stable only, which lags far behind the weekly
@@ -208,41 +302,104 @@ jobs:
             echo "Standalone mode: snapshot from SeforimLibrary release $LIB_TAG"
             gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
               -p 'lines_snapshot.db.zst' -D inputs --clobber
+            REMOTE_SNAPSHOT_DIGEST="$(gh release view "$LIB_TAG" -R Otzaria/SeforimLibrary --json assets \
+              --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+            [[ "$REMOTE_SNAPSHOT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_SNAPSHOT_DIGEST#sha256:}" ]]
           fi
+          ACTUAL_SNAPSHOT_SHA="$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)"
+          echo "snapshot_zst_sha256=$ACTUAL_SNAPSHOT_SHA" >> "$GITHUB_OUTPUT"
           unzstd -f inputs/lines_snapshot.db.zst
 
+      # The HEAVY phase — stack bring-up (Mongo + NER + Django) and the re-link itself —
+      # runs as ONE step under a host lease (server target): a kernel flock whose FD is
+      # held by this step's shell for the phase's whole life and released by the kernel
+      # on ANY death — crash, cancel, OOM — so there is no stale-lock state and no
+      # timestamp-based stealing, ever. The deliberately-persistent daemons setup_stack
+      # spawns (mongod --fork, nohup gunicorn) get FD 9 CLOSED (9>&-) so they can never
+      # keep the lease alive after the step; the engine workers DO inherit it — the
+      # lease is held exactly as long as heavy work is actually alive. Busy → fail
+      # loudly and immediately: re-dispatching beats squatting on a runner slot for
+      # hours. No metadata file grants delegation or lock stealing. A Kaggle session
+      # owns its whole VM — no lease there. SeforimLibrary holds the same kernel lock
+      # across its multi-step build, explicitly releases it before a serial server
+      # relink, and reacquires only after this child is terminal.
+      #
       # Any per-book/per-line failure fails this step (and the waiting build) loudly —
       # see incremental.py + link_books.py. The fingerprint covers everything that
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
       # so flipping e.g. --bavli-convention also forces a full relink. 3 workers keep
       # a deliberate full relink inside the job ceiling while leaving OOM headroom on
       # the 22GB host — a single book was observed to drive one worker past 7GB anon.
-      - name: Incremental re-link
+      # NER teardown is bound to this same step's EXIT trap — still under the lease, so
+      # it can never kill another run's fresh stack (that run needs the lease first) —
+      # freeing ~3GB of models for whatever resumes on the shared host either way.
+      - name: Bring up the stack + incremental re-link (heavy phase, host-leased)
+        env:
+          # Lean under a waiting build (shared 24GB host), full when standalone.
+          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
+          # Shared, pre-provisioned via /etc/tmpfiles.d/otzaria-pipeline.conf on the
+          # box (1777 dir, recreated on boot) — same path the SeforimLibrary build
+          # holds; never a user-owned /tmp file a cleaner could unlink mid-hold.
+          HOST_LEASE_PATH: /run/lock/otzaria/host-heavy.lock
+          TARGET: ${{ inputs.target }}
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: |
           set -euo pipefail
+          export LINKER_ENGINE_SCOPE_DIR="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/engine-scopes"
+          # All server runs (dry included) share workflow concurrency, so a prior
+          # server run is terminal before this executes. Reap only its persisted,
+          # start-time-bound process groups; never pattern-match the whole host.
+          if [ "$TARGET" != "kaggle" ]; then
+            export LINKER_NER_SCOPE=/run/lock/otzaria/linker-ner.scope.json
+            export LINKER_NER_SCOPE_MODE=0644
+            bash ci/reap_engine_scopes.sh
+          fi
+          if [ "$TARGET" != "kaggle" ]; then
+            test -e "$HOST_LEASE_PATH" && test -w "$HOST_LEASE_PATH" || {
+              echo "::error::$HOST_LEASE_PATH must be pre-provisioned mode 0666 (see ci/otzaria-pipeline.tmpfiles.conf)"
+              exit 1
+            }
+            exec 9>>"$HOST_LEASE_PATH"
+            if ! flock -n 9; then
+              echo "::error::host lease $HOST_LEASE_PATH is busy — no metadata-based delegation is permitted; re-dispatch when the real lock is free."
+              exit 1
+            else
+              echo "host lease acquired: $HOST_LEASE_PATH"
+            fi
+          fi
+          # Teardown by OWNED pid (gunicorn --pid via setup_stack), still under the
+          # lease/serialization — never a broad pkill sweep of the whole host.
+          trap 'bash ci/stop_ner.sh || true' EXIT
+          bash ci/setup_stack.sh 9>&-
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
           echo "engine fingerprint: $FINGERPRINT"
-          "$SEF_PROJECT/.venv/bin/python" src/incremental.py \
-            --repo "$PWD" \
-            --snapshot inputs/lines_snapshot.db \
-            --changelog inputs/changelog_diff.json \
-            --sefaria-tag "${{ steps.tags.outputs.sefaria_tag }}" \
-            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --run-dir "$RUN_DIR" \
-            --sef-project "$SEF_PROJECT" \
-            --python "$SEF_PROJECT/.venv/bin/python" \
-            --engine-fingerprint "$FINGERPRINT" \
-            --engine-workers ${{ inputs.library_run_id != '' && '2' || '3' }} \
-            ${{ inputs.library_run_id != '' && '--forbid-full-relink' || '' }} \
-            ${{ inputs.library_run_id == '' && inputs.adopt_fingerprint != '' && format('--adopt-fingerprint "{0}"', inputs.adopt_fingerprint) || '' }}
+          ARGS=(
+            --repo "$PWD"
+            --snapshot inputs/lines_snapshot.db
+            --changelog inputs/changelog_diff.json
+            --sefaria-tag "$SEF_TAG"
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --run-dir "$RUN_DIR"
+            --sef-project "$SEF_PROJECT"
+            --python "$SEF_PROJECT/.venv/bin/python"
+            --engine-fingerprint "$FINGERPRINT"
+          )
+          if [ -n "$LIBRARY_RUN_ID" ]; then
+            ARGS+=(--engine-workers 2 --forbid-full-relink)
+          else
+            ARGS+=(--engine-workers 3)
+            [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
+          fi
+          "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
       # Both are skipped on dry_run: a canary measures the engine, ships nothing.
 
-      - name: Pack + publish linker_links.zst
+      - name: Pack content-addressed linker_links.zst (compute only)
         if: ${{ !inputs.dry_run }}
-        env:
-          SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: bash ci/pack_and_publish.sh
 
       # Bind the payload to the exact inputs it was linked against so the waiting build
@@ -253,9 +410,12 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
-          SNAPSHOT_ZST_SHA256: ${{ inputs.snapshot_sha256 }}
+          SNAPSHOT_ZST_SHA256: ${{ steps.inputs.outputs.snapshot_zst_sha256 }}
           RELINK_RUN_ID: ${{ github.run_id }}
           RELINK_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          PARENT_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
         run: |
           set -euo pipefail
           PAYLOAD_SHA256="$(sha256sum linker_links.zst | cut -d' ' -f1)" \
@@ -263,8 +423,10 @@ jobs:
           LINKER_COMMIT="$(git rev-parse HEAD)" \
           python3 - <<'PY'
           import json, os
+          # Identity echo: standalone runs record ""/0/0 here; the serial build's
+          # validator requires exact, non-zero equality with its own coordinates.
           manifest = {
-              "schema_version": 1,
+              "schema_version": 2,
               "sefaria_tag": os.environ["SEFARIA_TAG"],
               "snapshot_zst_sha256": os.environ["SNAPSHOT_ZST_SHA256"],
               "engine_fingerprint": os.environ["ENGINE_FINGERPRINT"],
@@ -272,52 +434,201 @@ jobs:
               "linker_commit": os.environ["LINKER_COMMIT"],
               "relink_run_id": int(os.environ["RELINK_RUN_ID"]),
               "relink_run_attempt": int(os.environ["RELINK_RUN_ATTEMPT"]),
+              "relink_request_id": os.environ["RELINK_REQUEST_ID"],
+              "parent_run_id": int(os.environ["PARENT_RUN_ID"]) if os.environ["PARENT_RUN_ID"] else 0,
+              "parent_run_attempt": int(os.environ["PARENT_RUN_ATTEMPT"]) if os.environ["PARENT_RUN_ATTEMPT"] else 0,
           }
           with open("relink_manifest.json", "w", encoding="utf-8") as fh:
               fh.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
           PY
           cat relink_manifest.json
 
-      # The waiting SeforimLibrary build (serial mode) downloads the pack + manifest from
-      # THIS run — a deterministic handshake, immune to any "latest release" race.
-      - name: Upload linker_links.zst + manifest as a run artifact
+      # Transfer compute output and baseline delta to a short ubuntu publisher.
+      # The heavy/GPU runner has read-only job permissions and never publishes.
+      - name: Upload verified publisher handoff
         if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
-          name: linker-links
+          name: linker-publisher-handoff-${{ github.run_attempt }}
           path: |
             linker_links.zst
+            linker_links.zst.sha256
             relink_manifest.json
+            baseline/
+            meta.json
           retention-days: 7
           if-no-files-found: error
 
-      # artifacts/ is gitignored (release payload only) — git tracks just the delta
-      # memory: baseline/snapshot_hashes.json (the source-change clock) + meta.json.
-      # Runs only after the payload shipped, so the baseline never gets ahead of it.
-      - name: Commit updated baseline + meta
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add baseline meta.json
-          git diff --staged --quiet || git commit -m "Re-link (sefaria=${{ steps.tags.outputs.sefaria_tag }})"
-          # main may have moved during a long run (unrelated commits) — replay our
-          # baseline commit on top. baseline/meta are only ever written by THIS
-          # serialized workflow, so the rebase can never hit a content conflict.
-          git pull --rebase origin main
-          git push
-
-      # Free the NER's RAM (~3GB of models) for the build that resumes right after us
-      # on this shared host (its Phase-2 runs with a 6GB heap next to the ~8GB tmpfs).
-      # The next relink pays a ~1min model reload — setup_stack restarts it cleanly.
-      - name: Stop NER (free RAM for the waiting build)
-        if: always()
-        run: pkill -f 'gunicorn.*127.0.0.1:5051' 2>/dev/null || true
+      # (NER teardown — freeing ~3GB of models for the build that resumes on this
+      # shared host — happens in the heavy step's EXIT trap, under the lease; the next
+      # relink pays a ~1min model reload and setup_stack restarts it cleanly.)
 
       # The workspace persists between runs on this self-hosted runner — without this,
       # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
       # removed here is re-fetched deterministically by the next run.
       - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
         if: always()
-        run: rm -rf inputs artifacts linker_links.zst
+        run: rm -rf inputs artifacts linker_links.zst linker_links.zst.sha256 relink_manifest.json
+
+  publish:
+    name: Verify and publish immutable linker payload
+    needs: relink
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: linker-release-publisher
+      cancel-in-progress: false
+      queue: max
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: linker-publisher-handoff-${{ github.run_attempt }}
+          path: handoff
+      - name: Validate compute handoff strictly
+        env:
+          EXPECTED_REQUEST_ID: ${{ inputs.relink_request_id }}
+          EXPECTED_PARENT_RUN_ID: ${{ inputs.library_run_id || '0' }}
+          EXPECTED_PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt || '0' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f handoff/linker_links.zst
+          test -f handoff/linker_links.zst.sha256
+          test -f handoff/relink_manifest.json
+          expected="$(tr -d '\r\n' < handoff/linker_links.zst.sha256)"
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(sha256sum handoff/linker_links.zst | cut -d' ' -f1)" == "$expected" ]]
+          python3 ci/validate_relink_manifest.py handoff/relink_manifest.json \
+            --payload-sha256 "$expected" --linker-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --request-id "$EXPECTED_REQUEST_ID" --parent-run-id "$EXPECTED_PARENT_RUN_ID" \
+            --parent-run-attempt "$EXPECTED_PARENT_RUN_ATTEMPT"
+      - name: Publish content-addressed release without clobber
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload_digest="$(tr -d '\r\n' < handoff/linker_links.zst.sha256)"
+          release_digest="$(python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root=Path("handoff")
+          names=("linker_links.zst","meta.json","relink_manifest.json")
+          def sha(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return digest.hexdigest()
+          descriptors=[{"name":name,"size":(root/name).stat().st_size,"sha256":sha(root/name)} for name in names]
+          raw=json.dumps(descriptors,sort_keys=True,separators=(",",":")).encode()+b"\n"
+          print(hashlib.sha256(raw).hexdigest())
+          PY
+          )"
+          [[ "$release_digest" =~ ^[0-9a-f]{64}$ ]]
+          tag="linker-release-sha256-$release_digest"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            :
+          else
+            # Create the immutable namespace first, without coupling namespace
+            # creation to three uploads.  A lost response may still have created
+            # the draft, so observe the exact tag before declaring failure.
+            if ! gh release create "$tag" --draft --target "$GITHUB_SHA" \
+              --title "$tag" --notes "Immutable linker release set sha256:$release_digest (payload sha256:$payload_digest)" \
+            ; then
+              gh release view "$tag" >/dev/null 2>&1 || exit 1
+              echo "::warning::release-create response was ambiguous; adopting the exact content-addressed draft"
+            fi
+          fi
+          # Repair only a matching *draft* after an interrupted prior upload.
+          # Existing bytes are immutable: validate their descriptors and upload
+          # missing names only.  Never use --clobber.
+          gh release view "$tag" --json isDraft,targetCommitish,assets > "$RUNNER_TEMP/linker-release-before-upload.json"
+          [[ "$(jq -r .targetCommitish "$RUNNER_TEMP/linker-release-before-upload.json")" == "$GITHUB_SHA" ]]
+          if [ "$(jq -r .isDraft "$RUNNER_TEMP/linker-release-before-upload.json")" = true ]; then
+            python3 - "$RUNNER_TEMP/linker-release-before-upload.json" handoff "$RUNNER_TEMP/missing-linker-assets" <<'PY'
+          import hashlib,json,sys
+          from pathlib import Path
+          value=json.loads(Path(sys.argv[1]).read_text())
+          root=Path(sys.argv[2]); output=Path(sys.argv[3])
+          names=("linker_links.zst","meta.json","relink_manifest.json")
+          actual={item["name"]:(item["size"],item.get("digest")) for item in value["assets"]}
+          if len(actual) != len(value["assets"]):
+              raise SystemExit("duplicate asset names in immutable Linker draft")
+          unexpected=set(actual)-set(names)
+          if unexpected:
+              raise SystemExit(f"unexpected assets in immutable Linker draft: {sorted(unexpected)}")
+          def descriptor(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return path.stat().st_size,"sha256:"+digest.hexdigest()
+          expected={name:descriptor(root/name) for name in names}
+          mismatched={name:(actual[name],expected[name]) for name in actual if actual[name]!=expected[name]}
+          if mismatched:
+              raise SystemExit(f"existing immutable draft asset differs from handoff bytes: {mismatched}")
+          output.write_text("".join(name+"\n" for name in names if name not in actual),encoding="utf-8")
+          PY
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              gh release upload "$tag" "handoff/$name"
+            done < "$RUNNER_TEMP/missing-linker-assets"
+          fi
+          verify_remote() {
+            gh release view "$tag" --json isDraft,targetCommitish,assets > "$RUNNER_TEMP/linker-release.json"
+            [[ "$(jq -r .targetCommitish "$RUNNER_TEMP/linker-release.json")" == "$GITHUB_SHA" ]]
+            python3 - "$RUNNER_TEMP/linker-release.json" handoff <<'PY'
+          import hashlib,json,sys
+          from pathlib import Path
+          value=json.loads(Path(sys.argv[1]).read_text())
+          actual={item["name"]:(item["size"],item.get("digest")) for item in value["assets"]}
+          root=Path(sys.argv[2]); names=("linker_links.zst","meta.json","relink_manifest.json")
+          def file_sha256(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return digest.hexdigest()
+          expected={name:((root/name).stat().st_size,"sha256:"+file_sha256(root/name)) for name in names}
+          if actual!=expected: raise SystemExit("immutable Linker release descriptors differ from handoff bytes")
+          PY
+          }
+          verified=false
+          for _ in $(seq 1 12); do if verify_remote; then verified=true; break; fi; sleep 5; done
+          [ "$verified" = true ]
+          if [ "$(jq -r .isDraft "$RUNNER_TEMP/linker-release.json")" = true ]; then
+            gh release edit "$tag" --draft=false
+          fi
+          gh release edit "$tag" --latest
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Commit baseline only after immutable release exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf baseline
+          cp -R handoff/baseline baseline
+          cp handoff/meta.json meta.json
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add baseline meta.json
+          git diff --staged --quiet || git commit -m "Re-link (sefaria=$(jq -r .sefaria_tag handoff/relink_manifest.json))"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git pull --rebase -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" origin main
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:main
+      - name: Expose exact payload to the waiting Seforim build
+        uses: actions/upload-artifact@v4
+        with:
+          name: linker-links-${{ github.run_attempt }}
+          path: |
+            handoff/linker_links.zst
+            handoff/relink_manifest.json
+          retention-days: 7
+          if-no-files-found: error
