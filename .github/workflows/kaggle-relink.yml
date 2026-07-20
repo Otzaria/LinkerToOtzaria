@@ -20,6 +20,14 @@ on:
           that exact waiting build. Empty = standalone relink.
         required: false
         default: ''
+      sefaria_tag:
+        description: Pinned SefariaExport tag — forwarded to relink.yml (serial mode).
+        required: false
+        default: ''
+      snapshot_sha256:
+        description: SHA-256 of lines_snapshot.db.zst — forwarded to relink.yml to verify the handoff.
+        required: false
+        default: ''
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).
         required: false
@@ -52,3 +60,5 @@ jobs:
           bash scripts/dispatch_kaggle_relink.sh
           ${{ inputs.dry_run && '--dry-run' || '' }}
           ${{ inputs.library_run_id != '' && format('--library-run-id {0}', inputs.library_run_id) || '' }}
+          ${{ inputs.sefaria_tag != '' && format('--sefaria-tag {0}', inputs.sefaria_tag) || '' }}
+          ${{ inputs.snapshot_sha256 != '' && format('--snapshot-sha256 {0}', inputs.snapshot_sha256) || '' }}
