@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Dispatch a relink onto a fresh Kaggle GPU session.
 #
-#   scripts/dispatch_kaggle_relink.sh [--dry-run] [--library-run-id <id>]
+#   scripts/dispatch_kaggle_relink.sh [--dry-run] [--library-run-id <id>] \
+#       [--sefaria-tag <tag>] [--snapshot-sha256 <sha>]
 #
 # --library-run-id: serial mode — the relink takes lines_snapshot.db.zst from that
 # SeforimLibrary run and the waiting build downloads the artifacts back from it.
+# --sefaria-tag / --snapshot-sha256: the build's pinned Sefaria tag + snapshot digest,
+# forwarded to relink.yml so the relink links the exact pinned vintage + snapshot.
 #
 # Order matters: the relink job is queued FIRST (runs-on [self-hosted, kaggle, gpu] —
 # it just waits), THEN the kernel is pushed; the session boots, registers as a one-job
@@ -21,10 +24,14 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 DRY=""
 LIBRARY_RUN_ID=""
+SEFARIA_TAG=""
+SNAPSHOT_SHA256=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
     --library-run-id) LIBRARY_RUN_ID="$2"; shift 2 ;;
+    --sefaria-tag) SEFARIA_TAG="$2"; shift 2 ;;
+    --snapshot-sha256) SNAPSHOT_SHA256="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -38,6 +45,8 @@ echo "JIT runner registered: $NAME"
 
 gh workflow run relink.yml -R "$REPO" -f target=kaggle \
   ${LIBRARY_RUN_ID:+-f library_run_id="$LIBRARY_RUN_ID"} \
+  ${SEFARIA_TAG:+-f sefaria_tag="$SEFARIA_TAG"} \
+  ${SNAPSHOT_SHA256:+-f snapshot_sha256="$SNAPSHOT_SHA256"} \
   ${DRY:+-f dry_run=true}
 echo "relink queued (target=kaggle${LIBRARY_RUN_ID:+, library_run_id=$LIBRARY_RUN_ID}${DRY:+, dry_run})"
 

@@ -41,6 +41,22 @@ on:
         required: false
         default: ''
         type: string
+      sefaria_tag:
+        description: >
+          Pinned SefariaExport release tag (serial mode, passed by the build). The
+          changelog (target_ref rewrites) and recorded lineage come from exactly this
+          vintage. Empty = resolve the moving "Latest" (manual/standalone dispatch only).
+        required: false
+        default: ''
+        type: string
+      snapshot_sha256:
+        description: >
+          SHA-256 of the lines_snapshot.db.zst the build uploaded (serial mode). The
+          downloaded snapshot is verified against it, fail-closed. Empty = skip the
+          check (manual/standalone dispatch only).
+        required: false
+        default: ''
+        type: string
       target:
         description: >
           Runner to execute on. 'kaggle' = an ephemeral GPU session registered as a JIT
@@ -144,9 +160,20 @@ jobs:
         id: tags
         run: |
           set -euo pipefail
-          SEF_TAG=$(gh release view -R Otzaria/SefariaExport --json tagName -q .tagName)
+          # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
+          # rewrites) and recorded lineage have to match the exact export the build was
+          # pinned to. Never let a serial relink silently pick up a newer "Latest".
+          if [ -n "${{ inputs.library_run_id }}" ] && [ -z "${{ inputs.sefaria_tag }}" ]; then
+            echo "::error::serial relink (library_run_id set) requires a pinned sefaria_tag"; exit 1
+          fi
+          if [ -n "${{ inputs.sefaria_tag }}" ]; then
+            SEF_TAG="${{ inputs.sefaria_tag }}"
+            echo "Sefaria export (pinned by dispatcher): $SEF_TAG"
+          else
+            SEF_TAG=$(gh release view -R Otzaria/SefariaExport --json tagName -q .tagName)
+            echo "Sefaria export (resolved moving Latest — manual/standalone): $SEF_TAG"
+          fi
           echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
-          echo "Sefaria export: $SEF_TAG"
 
       - name: Fetch inputs (snapshot = source clock; changelog = target-rewrite only)
         run: |
@@ -164,6 +191,10 @@ jobs:
             echo "Serial mode: snapshot from SeforimLibrary run ${{ inputs.library_run_id }}"
             gh run download "${{ inputs.library_run_id }}" -R Otzaria/SeforimLibrary \
               -n lines-snapshot -D inputs
+            # Verify the handoff against the digest the build pinned (fail-closed): a
+            # serial relink must link the exact snapshot this build produced.
+            [ -n "${{ inputs.snapshot_sha256 }}" ] || { echo "::error::serial relink requires snapshot_sha256 to verify the snapshot handoff"; exit 1; }
+            echo "${{ inputs.snapshot_sha256 }}  inputs/lines_snapshot.db.zst" | sha256sum -c -
           else
             # Newest release INCLUDING pre-releases — `gh release view` with no tag
             # resolves the "Latest" stable only, which lags far behind the weekly
@@ -209,14 +240,49 @@ jobs:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: bash ci/pack_and_publish.sh
 
-      # The waiting SeforimLibrary build (serial mode) downloads the pack from THIS run —
-      # a deterministic handshake, immune to any "latest release" race.
-      - name: Upload linker_links.zst as a run artifact
+      # Bind the payload to the exact inputs it was linked against so the waiting build
+      # can verify the handoff (payload digest + pinned Sefaria vintage + snapshot digest
+      # + this run) before it injects the links. Everything comes from env — no
+      # interpolation into the Python source.
+      - name: Emit relink manifest
+        if: ${{ !inputs.dry_run }}
+        env:
+          SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+          SNAPSHOT_ZST_SHA256: ${{ inputs.snapshot_sha256 }}
+          RELINK_RUN_ID: ${{ github.run_id }}
+          RELINK_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          PAYLOAD_SHA256="$(sha256sum linker_links.zst | cut -d' ' -f1)" \
+          ENGINE_FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0" \
+          LINKER_COMMIT="$(git rev-parse HEAD)" \
+          python3 - <<'PY'
+          import json, os
+          manifest = {
+              "schema_version": 1,
+              "sefaria_tag": os.environ["SEFARIA_TAG"],
+              "snapshot_zst_sha256": os.environ["SNAPSHOT_ZST_SHA256"],
+              "engine_fingerprint": os.environ["ENGINE_FINGERPRINT"],
+              "payload_sha256": os.environ["PAYLOAD_SHA256"],
+              "linker_commit": os.environ["LINKER_COMMIT"],
+              "relink_run_id": int(os.environ["RELINK_RUN_ID"]),
+              "relink_run_attempt": int(os.environ["RELINK_RUN_ATTEMPT"]),
+          }
+          with open("relink_manifest.json", "w", encoding="utf-8") as fh:
+              fh.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          cat relink_manifest.json
+
+      # The waiting SeforimLibrary build (serial mode) downloads the pack + manifest from
+      # THIS run — a deterministic handshake, immune to any "latest release" race.
+      - name: Upload linker_links.zst + manifest as a run artifact
         if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
           name: linker-links
-          path: linker_links.zst
+          path: |
+            linker_links.zst
+            relink_manifest.json
           retention-days: 7
           if-no-files-found: error
 
