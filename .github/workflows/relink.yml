@@ -675,7 +675,7 @@ jobs:
           git add baseline meta.json
           git diff --staged --quiet || git commit -m "Re-link (sefaria=$(jq -r .sefaria_tag handoff/relink_manifest.json))"
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-          git pull --rebase -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" origin main
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" pull --rebase origin main
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:main
       - name: Expose exact payload to the waiting Seforim build
         uses: actions/upload-artifact@v4

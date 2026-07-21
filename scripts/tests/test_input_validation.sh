@@ -18,6 +18,10 @@ if "python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 \"$ADOPT_FINGE
     raise SystemExit("relink workflow bypasses the bounded input validator")
 if "[[:print:]]{1,8192}" in workflow:
     raise SystemExit("pathological bounded grep regex returned")
+if 'git pull --rebase -c "http.https://github.com/.extraheader=' in workflow:
+    raise SystemExit("git -c option appears after the pull subcommand")
+if 'git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" pull --rebase origin main' not in workflow:
+    raise SystemExit("authenticated baseline pull is not using global git option ordering")
 PY
 
 echo "ok   printable-ASCII validator is bounded and rejects controls/Unicode/oversize"
