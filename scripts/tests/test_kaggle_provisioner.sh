@@ -49,7 +49,7 @@ if [ "$1" = api ]; then
       printf '{"status":"completed","run_attempt":2,"conclusion":"%s"}\n' "${PARENT_CONCLUSION:-failure}"
       exit 0
     fi
-    if [[ "$joined" == *"--jq .conclusion"* ]]; then printf 'success\n'; else printf '1\n'; fi
+    if [[ "$joined" == *"--jq .conclusion"* ]]; then printf '%s\n' "${CHILD_CONCLUSION:-success}"; else printf '1\n'; fi
     exit 0
   fi
 fi
@@ -71,6 +71,15 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
 test -s "$TMP/dispatch"
 grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 b)" "$TMP/dispatch"
 echo "ok   completed oldest intent skipped; next pending intent dispatched"
+
+rm -f "$TMP/dispatch"
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" CHILD_CONCLUSION=failure \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
+test -s "$TMP/dispatch"
+grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 b)" "$TMP/dispatch"
+echo "ok   failed historical child is consumed without poisoning scheduled scans"
 
 rm -f "$TMP/dispatch"
 rc=0

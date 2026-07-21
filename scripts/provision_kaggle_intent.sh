@@ -142,7 +142,14 @@ PY
     rid=$(printf '%s\n' "$matches" | cut -f1)
     conclusion=$(gh api "repos/$REPO/actions/runs/$rid" --jq .conclusion)
     [ "$conclusion" = success ] && continue
-    echo "::error::intent $request_id has a failed terminal child $rid ($conclusion)"; exit 1
+    if [ -n "${INTENT_RUN_ID:-}" ]; then
+      echo "::error::explicit intent $request_id has a failed terminal child $rid ($conclusion)"; exit 1
+    fi
+    # A durable intent is at-most-once. A failed child consumes it just as a
+    # successful child does; recovery must mint a new correlated intent. Do not
+    # let one historical failure poison every scheduled queue scan forever.
+    echo "::warning::consumed intent $request_id has terminal child $rid ($conclusion); skipping"
+    continue
   fi
   active=$(count_runs_active "$REPO" relink.yml)
   [ "$active" -eq 0 ] || { echo "linker busy; intent $request_id remains durable for the next tick"; exit 0; }
