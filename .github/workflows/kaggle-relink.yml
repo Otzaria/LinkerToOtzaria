@@ -58,6 +58,12 @@ on:
         required: false
         default: false
         type: boolean
+      adopt_fingerprint:
+        description: >
+          Operator-attested output-neutral engine migration OLD::NEW. Forwarded
+          unchanged to relink.yml; empty for normal runs.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -99,6 +105,7 @@ jobs:
           IN_SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           IN_SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           IN_SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          IN_ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
         run: |
           set -euo pipefail
           [ -z "$IN_LIBRARY_RUN_ID" ] || [[ "$IN_LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::library_run_id must be a positive integer"; exit 1; }
@@ -107,6 +114,8 @@ jobs:
           [ -z "$IN_SEFARIA_TAG" ] || [[ "$IN_SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::sefaria_tag has an invalid shape"; exit 1; }
           [ -z "$IN_SNAPSHOT_SHA256" ] || [[ "$IN_SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::snapshot_sha256 must be 64-hex"; exit 1; }
           [ -z "$IN_SEFARIA_METADATA_SHA256" ] || [[ "$IN_SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
+          [ -z "$IN_ADOPT_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$IN_ADOPT_FINGERPRINT"
           if [ -n "$IN_LIBRARY_RUN_ID" ]; then
             [ -n "$IN_RELINK_REQUEST_ID" ] && [ -n "$IN_PARENT_RUN_ATTEMPT" ] && \
               [ -n "$IN_SEFARIA_TAG" ] && [ -n "$IN_SNAPSHOT_SHA256" ] && \
@@ -131,12 +140,14 @@ jobs:
             --arg library_run_id "$IN_LIBRARY_RUN_ID" --arg parent_run_attempt "$IN_PARENT_RUN_ATTEMPT" \
             --arg sefaria_tag "$IN_SEFARIA_TAG" --arg snapshot_sha256 "$IN_SNAPSHOT_SHA256" \
             --arg sefaria_metadata_sha256 "$IN_SEFARIA_METADATA_SHA256" \
+            --arg adopt_fingerprint "$IN_ADOPT_FINGERPRINT" \
             --argjson dry_run "$( [ -n "$IN_DRY_RUN" ] && echo true || echo false )" \
             --argjson recovery_mode "$( [ -n "$IN_RECOVERY_MODE" ] && echo true || echo false )" \
             --argjson intake_run_id "$GITHUB_RUN_ID" --argjson intake_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{schema_version:2,request_id:$request_id,library_run_id:$library_run_id,
+            '{schema_version:3,request_id:$request_id,library_run_id:$library_run_id,
               parent_run_attempt:$parent_run_attempt,sefaria_tag:$sefaria_tag,
               snapshot_sha256:$snapshot_sha256,sefaria_release_metadata_sha256:$sefaria_metadata_sha256,
+              adopt_fingerprint:$adopt_fingerprint,
               dry_run:$dry_run,recovery_mode:$recovery_mode,
               intake_run_id:$intake_run_id,intake_run_attempt:$intake_run_attempt}' \
             > intent/kaggle-intent.json

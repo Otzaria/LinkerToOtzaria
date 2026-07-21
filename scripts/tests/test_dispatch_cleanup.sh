@@ -136,6 +136,12 @@ rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" --reco
 check "recovery → distinct exact title and workflow input" \
   test "$rc" -eq 0 -a "$(cancels)" -eq 0 -a "$(grep -c 'recovery_mode=true' "$MOCK_LOG")" -eq 1
 
+export MOCK_LOG="$WORK/t4-adopt.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" \
+  --recovery-mode --adopt-fingerprint 'old fingerprint::new fingerprint' ) >/dev/null 2>&1 || rc=$?
+check "adoption attestation → quoted workflow input" \
+  test "$rc" -eq 0 -a "$(grep -c 'adopt_fingerprint=old fingerprint::new fingerprint' "$MOCK_LOG")" -eq 1
+
 cat > "$WORK/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 exit 1

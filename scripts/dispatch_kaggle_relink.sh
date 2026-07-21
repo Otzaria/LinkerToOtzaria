@@ -4,7 +4,7 @@
 #   scripts/dispatch_kaggle_relink.sh [--dry-run] [--recovery-mode] [--library-run-id <id>] \
 #       [--relink-request-id <64-hex>] [--parent-run-attempt <n>] \
 #       [--sefaria-tag <tag>] [--snapshot-sha256 <sha>] \
-#       [--sefaria-release-metadata-sha256 <sha>]
+#       [--sefaria-release-metadata-sha256 <sha>] [--adopt-fingerprint <OLD::NEW>]
 #
 # --library-run-id: serial mode — the relink takes lines_snapshot.db.zst from that
 # SeforimLibrary run and the waiting build downloads the artifacts back from it.
@@ -37,6 +37,7 @@ SNAPSHOT_SHA256=""
 SEFARIA_METADATA_SHA256=""
 RELINK_REQUEST_ID=""
 PARENT_RUN_ATTEMPT=""
+ADOPT_FINGERPRINT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
@@ -47,6 +48,7 @@ while [ $# -gt 0 ]; do
     --sefaria-tag) SEFARIA_TAG="$2"; shift 2 ;;
     --snapshot-sha256) SNAPSHOT_SHA256="$2"; shift 2 ;;
     --sefaria-release-metadata-sha256) SEFARIA_METADATA_SHA256="$2"; shift 2 ;;
+    --adopt-fingerprint) ADOPT_FINGERPRINT="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -57,6 +59,8 @@ done
 [ -z "$SEFARIA_TAG" ] || [[ "$SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "--sefaria-tag has an invalid shape" >&2; exit 2; }
 [ -z "$SNAPSHOT_SHA256" ] || [[ "$SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--snapshot-sha256 must be 64-hex" >&2; exit 2; }
 [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--sefaria-release-metadata-sha256 must be 64-hex" >&2; exit 2; }
+[ -z "$ADOPT_FINGERPRINT" ] || \
+  python3 "$HERE/ci/validate_printable_ascii.py" adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
 
 # Identity contract: EVERY dispatch carries a request id so the child is addressable
 # by exact run-name equality (never contains / head -1). Serial mode must receive the
@@ -196,15 +200,18 @@ trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
 DISPATCH_ATTEMPTED=1
-python3 "$HERE/scripts/exec_new_session.py" gh workflow run relink.yml -R "$REPO" -f target=kaggle \
-  -f relink_request_id="$RELINK_REQUEST_ID" \
-  ${LIBRARY_RUN_ID:+-f library_run_id="$LIBRARY_RUN_ID"} \
-  ${PARENT_RUN_ATTEMPT:+-f parent_run_attempt="$PARENT_RUN_ATTEMPT"} \
-  ${SEFARIA_TAG:+-f sefaria_tag="$SEFARIA_TAG"} \
-  ${SNAPSHOT_SHA256:+-f snapshot_sha256="$SNAPSHOT_SHA256"} \
-  ${SEFARIA_METADATA_SHA256:+-f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA256"} \
-  ${RECOVERY_MODE:+-f recovery_mode=true} \
-  ${DRY:+-f dry_run=true} &
+DISPATCH_ARGS=(workflow run relink.yml -R "$REPO" -f target=kaggle
+  -f "relink_request_id=$RELINK_REQUEST_ID")
+[ -z "$LIBRARY_RUN_ID" ] || DISPATCH_ARGS+=(-f "library_run_id=$LIBRARY_RUN_ID")
+[ -z "$PARENT_RUN_ATTEMPT" ] || DISPATCH_ARGS+=(-f "parent_run_attempt=$PARENT_RUN_ATTEMPT")
+[ -z "$SEFARIA_TAG" ] || DISPATCH_ARGS+=(-f "sefaria_tag=$SEFARIA_TAG")
+[ -z "$SNAPSHOT_SHA256" ] || DISPATCH_ARGS+=(-f "snapshot_sha256=$SNAPSHOT_SHA256")
+[ -z "$SEFARIA_METADATA_SHA256" ] || \
+  DISPATCH_ARGS+=(-f "sefaria_release_metadata_sha256=$SEFARIA_METADATA_SHA256")
+[ -z "$ADOPT_FINGERPRINT" ] || DISPATCH_ARGS+=(-f "adopt_fingerprint=$ADOPT_FINGERPRINT")
+[ -z "$RECOVERY_MODE" ] || DISPATCH_ARGS+=(-f recovery_mode=true)
+[ -z "$DRY" ] || DISPATCH_ARGS+=(-f dry_run=true)
+python3 "$HERE/scripts/exec_new_session.py" gh "${DISPATCH_ARGS[@]}" &
 ACTIVE_PID=$!
 wait "$ACTIVE_PID"
 ACTIVE_PID=""

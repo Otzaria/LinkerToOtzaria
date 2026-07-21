@@ -58,13 +58,17 @@ def pairs(items):
  return out
 v=json.loads(path.read_text(),object_pairs_hook=pairs)
 base_keys={'schema_version','request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256','dry_run','intake_run_id','intake_run_attempt'}
-if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2): raise SystemExit('invalid intent schema version')
-expected_keys=base_keys if v['schema_version']==1 else base_keys|{'recovery_mode'}
+if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2,3): raise SystemExit('invalid intent schema version')
+expected_keys=(base_keys if v['schema_version']==1 else
+               base_keys|{'recovery_mode'} if v['schema_version']==2 else
+               base_keys|{'recovery_mode','adopt_fingerprint'})
 if set(v)!=expected_keys or type(v['intake_run_id']) is not int or v['intake_run_id']!=expected_run: raise SystemExit('invalid intent schema/identity')
 string_fields=('request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256')
+if v['schema_version']==3: string_fields += ('adopt_fingerprint',)
 if any(type(v[k]) is not str for k in string_fields): raise SystemExit('invalid intent string types')
 if not re.fullmatch(r'[0-9a-f]{64}',v['request_id']): raise SystemExit('invalid request id')
 if type(v['dry_run']) is not bool or type(v.get('recovery_mode',False)) is not bool or type(v['intake_run_attempt']) is not int or v['intake_run_attempt'] != expected_attempt: raise SystemExit('invalid intent types/attempt')
+if not re.fullmatch(r'[ -~]{0,8192}',v.get('adopt_fingerprint','')): raise SystemExit('invalid adoption attestation')
 serial=bool(v['library_run_id'])
 if serial:
  if not re.fullmatch(r'[1-9][0-9]*',v['library_run_id']) or not re.fullmatch(r'[1-9][0-9]*',v['parent_run_attempt']): raise SystemExit('invalid serial parent identity')
@@ -83,6 +87,7 @@ PY
   library_run_id=$(jq -r .library_run_id "$TMP/intent/kaggle-intent.json")
   parent_attempt=$(jq -r .parent_run_attempt "$TMP/intent/kaggle-intent.json")
   recovery_mode=$(jq -r '.recovery_mode // false' "$TMP/intent/kaggle-intent.json")
+  adopt_fingerprint=$(jq -r '.adopt_fingerprint // ""' "$TMP/intent/kaggle-intent.json")
   if [ -n "$library_run_id" ]; then
     if ! gh api "repos/$PARENT_REPO/actions/runs/$library_run_id" > "$TMP/parent.json" 2> "$TMP/parent.err"; then
       if grep -q 'HTTP 404' "$TMP/parent.err"; then
@@ -167,6 +172,7 @@ PY
   done
   [ "$(jq -r .dry_run "$TMP/intent/kaggle-intent.json")" = true ] && args+=(--dry-run)
   [ "$recovery_mode" = true ] && args+=(--recovery-mode)
+  [ -z "$adopt_fingerprint" ] || args+=(--adopt-fingerprint "$adopt_fingerprint")
   bash "$DISPATCH_SCRIPT" "${args[@]}"
   exit 0
 done

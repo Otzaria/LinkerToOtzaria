@@ -20,8 +20,8 @@ import hashlib,json,os
 from pathlib import Path
 run=int(os.environ['RUN_ID']); request=('a' if run==101 else ('c' if run==103 else 'b'))*64
 recovery=bool(os.environ.get('RECOVERY_INTENT'))
-v={'schema_version':(2 if recovery else (True if os.environ.get('MALFORMED_INTENT') else 1)),'request_id':request,'library_run_id':('777' if recovery else ''),'parent_run_attempt':('2' if recovery else ''),'sefaria_tag':('sefaria-pin' if recovery else ''),'snapshot_sha256':('d'*64 if recovery else ''),'sefaria_release_metadata_sha256':('e'*64 if recovery else ''),'dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
-if recovery: v['recovery_mode']=True
+v={'schema_version':(3 if recovery else (True if os.environ.get('MALFORMED_INTENT') else 1)),'request_id':request,'library_run_id':('777' if recovery else ''),'parent_run_attempt':('2' if recovery else ''),'sefaria_tag':('sefaria-pin' if recovery else ''),'snapshot_sha256':('d'*64 if recovery else ''),'sefaria_release_metadata_sha256':('e'*64 if recovery else ''),'dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
+if recovery: v.update(recovery_mode=True,adopt_fingerprint='engine-old::engine-new')
 raw=(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n').encode(); root=Path(os.environ['OUT'])
 (root/'kaggle-intent.json').write_bytes(raw); (root/'kaggle-intent.sha256').write_text(hashlib.sha256(raw).hexdigest()+'\n')
 PY
@@ -104,7 +104,8 @@ test -s "$TMP/dispatch"
 grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 c)" "$TMP/dispatch"
 grep -q -- "--library-run-id 777 --parent-run-attempt 2" "$TMP/dispatch"
 grep -q -- "--recovery-mode" "$TMP/dispatch"
-echo "ok   exact failed terminal parent with one snapshot can be recovered"
+grep -q -- "--adopt-fingerprint engine-old::engine-new" "$TMP/dispatch"
+echo "ok   exact failed terminal parent with one snapshot and adoption can be recovered"
 
 rm -f "$TMP/dispatch"
 rc=0

@@ -43,12 +43,54 @@ NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
-# getrusage(ru_maxrss) unit differs by OS: bytes on macOS, KiB on Linux. Normalize to bytes.
-_RSS_TO_BYTES = 1 if sys.platform == "darwin" else 1024
-
-
 def rss_bytes() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * _RSS_TO_BYTES
+    """Return the process's *current* resident set, not its historical maximum.
+
+    Linux preserves ``ru_maxrss`` across ``execve``.  This worker deliberately
+    self-recycles with ``os.execv``; using the high-water mark therefore made every
+    fresh image inherit the old over-cap value and immediately exec again forever.
+    ``/proc/self/statm`` is the kernel's current-RSS source on Linux.  ``ps`` is a
+    portable current-RSS fallback; ``getrusage`` remains only the last resort.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/statm", encoding="ascii") as fh:
+                fields = fh.read().split()
+            resident_pages = int(fields[1])
+            if resident_pages < 0:
+                raise ValueError("negative resident page count")
+            return resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError):
+            pass
+    try:
+        import subprocess
+        rss_kib = int(subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())], text=True,
+        ).strip())
+        if rss_kib < 0:
+            raise ValueError("negative RSS")
+        return rss_kib * 1024
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Last-resort estimate.  ru_maxrss is bytes on macOS and KiB elsewhere.
+        multiplier = 1 if sys.platform == "darwin" else 1024
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * multiplier
+
+
+def recycle_needed(current_rss: int, cap: float, processed: int) -> bool:
+    """Decide whether a worker life may safely self-recycle.
+
+    An over-cap worker that has completed no book cannot make progress by execing
+    itself again.  Treat that as a configuration/infrastructure failure instead of
+    creating a hot zero-progress restart loop until the outer job timeout.
+    """
+    if current_rss <= cap:
+        return False
+    if processed <= 0:
+        raise RuntimeError(
+            f"worker RSS {current_rss} exceeds cap {int(cap)} before completing any book; "
+            "refusing a zero-progress recycle loop"
+        )
+    return True
 
 
 def claim_id(bk: BookKey) -> str:
@@ -374,8 +416,12 @@ def main():
 
         # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
         # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
-        if rss_bytes() > RSS_CAP:
-            log(f"recycling (RSS over cap) after {processed} books this life")
+        current_rss = rss_bytes()
+        if recycle_needed(current_rss, RSS_CAP, processed):
+            log(
+                f"recycling (current RSS {current_rss} over cap {int(RSS_CAP)}) "
+                f"after {processed} books this life"
+            )
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
     log(f"no more books (processed {processed} this life); exiting")
