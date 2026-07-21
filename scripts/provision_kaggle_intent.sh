@@ -133,7 +133,12 @@ PY
   [ "$recovery_mode" = true ] && prefix=relink-recovery
   title="$prefix request=$request_id parent=$parent"
   rows=$(list_runs_all "$REPO" relink.yml)
-  matches=$(printf '%s\n' "$rows" | awk -F'\t' -v t="$title" '$3==t')
+  # request_id is immutable across code rollouts. Match both the original and
+  # recovery-aware title spellings so renaming the display title can never make
+  # an already-consumed request look new and dispatch it twice.
+  legacy_title="relink request=$request_id parent=$parent"
+  recovery_title="relink-recovery request=$request_id parent=$parent"
+  matches=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$legacy_title" -v b="$recovery_title" '$3==a || $3==b')
   count=$(printf '%s\n' "$matches" | awk 'NF' | wc -l | tr -d ' ')
   if [ "$count" -gt 1 ]; then echo "::error::duplicate relink children for intent $request_id"; exit 1; fi
   if [ "$count" -eq 1 ]; then

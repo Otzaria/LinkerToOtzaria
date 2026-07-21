@@ -42,6 +42,10 @@ if [ "$1" = api ]; then
       request=$(printf '%064d' 0 | tr 0 a)
       printf '9001\tcompleted\trelink request=%s parent=standalone\tdeadbeef\t2026-01-01T00:00:00Z\n' "$request"
     fi
+    if [ "$current" = 103 ] && [ -n "${LEGACY_CHILD:-}" ] && [[ "$joined" != *"status="* ]]; then
+      request=$(printf '%064d' 0 | tr 0 c)
+      printf '9002\tcompleted\trelink request=%s parent=777:2\tdeadbeef\t2026-01-01T00:00:00Z\n' "$request"
+    fi
     exit 0
   fi
   if [[ "$joined" =~ actions/runs/([0-9]+) ]]; then
@@ -101,6 +105,16 @@ grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 c)" "$TMP/dispatch"
 grep -q -- "--library-run-id 777 --parent-run-attempt 2" "$TMP/dispatch"
 grep -q -- "--recovery-mode" "$TMP/dispatch"
 echo "ok   exact failed terminal parent with one snapshot can be recovered"
+
+rm -f "$TMP/dispatch"
+rc=0
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 LEGACY_CHILD=1 CHILD_CONCLUSION=failure INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null 2>&1 || rc=$?
+test "$rc" -ne 0
+test ! -e "$TMP/dispatch"
+echo "ok   legacy child title still consumes the same recovery request id"
 
 rm -f "$TMP/dispatch"
 PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
