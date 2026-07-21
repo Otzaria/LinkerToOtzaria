@@ -278,7 +278,8 @@ jobs:
           [ -z "$SEFARIA_TAG_INPUT" ] || [[ "$SEFARIA_TAG_INPUT" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::sefaria_tag has an invalid shape"; exit 1; }
           [ -z "$SNAPSHOT_SHA256" ] || [[ "$SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::snapshot_sha256 must be 64-hex"; exit 1; }
           [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
-          [ -z "$ADOPT_FINGERPRINT" ] || printf '%s' "$ADOPT_FINGERPRINT" | LC_ALL=C grep -qE '^[[:print:]]{1,8192}$' || { echo "::error::adopt_fingerprint must be single-line printable ASCII (max 8192)"; exit 1; }
+          [ -z "$ADOPT_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
           # rewrites) and recorded lineage have to match the exact export the build was
           # pinned to. Never let a serial relink silently pick up a newer "Latest".
