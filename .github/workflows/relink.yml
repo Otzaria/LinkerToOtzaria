@@ -194,17 +194,66 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts
-          latest_tag="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
-          # Accept the one legacy `links-*` namespace only as a migration source;
-          # every release produced by this workflow uses linker-release-sha256-*.
-          [[ "$latest_tag" =~ ^linker-release-sha256-[0-9a-f]{64}$|^linker-links-sha256-[0-9a-f]{64}$|^links-[A-Za-z0-9._-]{1,150}$ ]]
-          gh release download "$latest_tag" -R "$GITHUB_REPOSITORY" --pattern 'linker_links.zst' -D .
-          remote_digest="$(gh release view "$latest_tag" -R "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[]|select(.name=="linker_links.zst")|.digest')"
+          releases="$RUNNER_TEMP/linker-releases-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          selected="$RUNNER_TEMP/linker-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          payload="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
+          archive="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
+          trap 'rm -f "$releases" "$selected" "$payload" "$archive"' EXIT
+
+          # Use REST, not `gh release view --json assets`: the pinned Kaggle gh
+          # 2.63.2 omits the newer asset.digest field and used to fail this
+          # check silently.  Full pagination also avoids a moving /latest
+          # pointer selecting the model or Mongo auxiliary releases.
+          gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/releases" -f per_page=100 \
+            | jq -s 'add' > "$releases"
+          jq -c '
+            [.[]
+             | select(.draft|not)
+             | select(.tag_name|test("^(linker-release-sha256-[0-9a-f]{64}|linker-links-sha256-[0-9a-f]{64}|links-[A-Za-z0-9._-]{1,150})$"))
+             | select([.assets[]|select(.name=="linker_links.zst")]|length==1)]
+            | sort_by(.published_at,.id)
+            | last // error("no published linker artifact-store release")' \
+            "$releases" > "$selected"
+          asset_id="$(jq -r '.assets[]|select(.name=="linker_links.zst")|.id' "$selected")"
+          remote_size="$(jq -r '.assets[]|select(.name=="linker_links.zst")|.size' "$selected")"
+          remote_digest="$(jq -r '.assets[]|select(.name=="linker_links.zst")|.digest' "$selected")"
+          [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$remote_size" =~ ^[1-9][0-9]*$ ]]
           [[ "$remote_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$(sha256sum linker_links.zst | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
-          tar --use-compress-program=unzstd -xf linker_links.zst artifacts
-          rm -f linker_links.zst
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$payload"
+          [[ "$(stat -c %s "$payload")" == "$remote_size" ]]
+          [[ "$(sha256sum "$payload" | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
+          zstd -q -t "$payload"
+          zstd -q -dc "$payload" > "$archive"
+          python3 - "$archive" <<'PY'
+          import pathlib, sys, tarfile
+          archive = pathlib.Path(sys.argv[1])
+          with tarfile.open(archive, "r:") as stream:
+              members = stream.getmembers()
+              if not members:
+                  raise SystemExit("empty linker artifact archive")
+              names = set()
+              jsonl = 0
+              artifact_members = []
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  if member.name in names:
+                      raise SystemExit(f"duplicate linker artifact member: {member.name!r}")
+                  if member.name == "meta.json" and member.isfile():
+                      names.add(member.name)
+                      continue
+                  if (path.is_absolute() or not path.parts or path.parts[0] != "artifacts"
+                          or ".." in path.parts
+                          or not (member.isdir() or member.isfile())):
+                      raise SystemExit(f"unsafe linker artifact member: {member.name!r}")
+                  names.add(member.name)
+                  jsonl += member.isfile() and path.suffix == ".jsonl"
+                  artifact_members.append(member)
+              if not jsonl:
+                  raise SystemExit("linker artifact archive has no jsonl payloads")
+              stream.extractall(path=".", members=artifact_members, filter="data")
+          PY
           echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
 
       # Inputs reach the shell ONLY via env — never interpolated into the script body

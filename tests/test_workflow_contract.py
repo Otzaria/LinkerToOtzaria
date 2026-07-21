@@ -21,6 +21,21 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("existing immutable draft asset differs from handoff bytes", workflow)
         self.assertNotIn('gh release upload "$tag" "handoff/$name" --clobber', workflow)
 
+    def test_artifact_restore_uses_version_independent_rest_and_safe_tar(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        segment = workflow.split("- name: Restore artifact store from the latest release", 1)[1]
+        segment = segment.split("- name: Resolve upstream tags", 1)[0]
+        self.assertIn("gh api --paginate -X GET", segment)
+        self.assertIn("releases/assets/$asset_id", segment)
+        self.assertIn('[[ "$remote_digest" =~ ^sha256:', segment)
+        self.assertIn('filter="data"', segment)
+        self.assertIn('path.parts[0] != "artifacts"', segment)
+        self.assertIn('member.name == "meta.json" and member.isfile()', segment)
+        self.assertIn("members=artifact_members", segment)
+        self.assertNotIn('latest_tag="$(gh release view', segment)
+
 
 if __name__ == "__main__":
     unittest.main()
