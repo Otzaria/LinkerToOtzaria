@@ -18,8 +18,10 @@ if [ "$1" = run ] && [ "$2" = download ]; then
   RUN_ID="$run_id" OUT="$dir" python3 - <<'PY'
 import hashlib,json,os
 from pathlib import Path
-run=int(os.environ['RUN_ID']); request=('a' if run==101 else 'b')*64
-v={'schema_version':(True if os.environ.get('MALFORMED_INTENT') else 1),'request_id':request,'library_run_id':'','parent_run_attempt':'','sefaria_tag':'','snapshot_sha256':'','sefaria_release_metadata_sha256':'','dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
+run=int(os.environ['RUN_ID']); request=('a' if run==101 else ('c' if run==103 else 'b'))*64
+recovery=bool(os.environ.get('RECOVERY_INTENT'))
+v={'schema_version':(2 if recovery else (True if os.environ.get('MALFORMED_INTENT') else 1)),'request_id':request,'library_run_id':('777' if recovery else ''),'parent_run_attempt':('2' if recovery else ''),'sefaria_tag':('sefaria-pin' if recovery else ''),'snapshot_sha256':('d'*64 if recovery else ''),'sefaria_release_metadata_sha256':('e'*64 if recovery else ''),'dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
+if recovery: v['recovery_mode']=True
 raw=(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n').encode(); root=Path(os.environ['OUT'])
 (root/'kaggle-intent.json').write_bytes(raw); (root/'kaggle-intent.sha256').write_text(hashlib.sha256(raw).hexdigest()+'\n')
 PY
@@ -31,6 +33,7 @@ if [ "$1" = api ]; then
     printf '102\n101\n'; exit 0
   fi
   if [[ "$joined" =~ actions/runs/([0-9]+)/artifacts ]]; then
+    if [[ "$joined" == *"actions/runs/777/artifacts"* ]]; then printf '4242\n'; exit 0; fi
     printf 'kaggle-intent-%064d-1\n' 0; exit 0
   fi
   if [[ "$joined" == *"actions/workflows/relink.yml/runs"* ]]; then
@@ -42,6 +45,10 @@ if [ "$1" = api ]; then
     exit 0
   fi
   if [[ "$joined" =~ actions/runs/([0-9]+) ]]; then
+    if [[ "$joined" == *"actions/runs/777"* ]]; then
+      printf '{"status":"completed","run_attempt":2,"conclusion":"%s"}\n' "${PARENT_CONCLUSION:-failure}"
+      exit 0
+    fi
     if [[ "$joined" == *"--jq .conclusion"* ]]; then printf 'success\n'; else printf '1\n'; fi
     exit 0
   fi
@@ -74,6 +81,24 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
 test "$rc" -ne 0
 test ! -e "$TMP/dispatch"
 echo "ok   boolean schema_version is rejected before provisioning"
+
+rm -f "$TMP/dispatch"
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh"
+test -s "$TMP/dispatch"
+grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 c)" "$TMP/dispatch"
+grep -q -- "--library-run-id 777 --parent-run-attempt 2" "$TMP/dispatch"
+echo "ok   exact failed terminal parent with one snapshot can be recovered"
+
+rm -f "$TMP/dispatch"
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 PARENT_CONCLUSION=success INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
+test ! -e "$TMP/dispatch"
+echo "ok   successful terminal parent cannot enter recovery mode"
 
 python3 - "$ROOT/.github/workflows/kaggle-provisioner.yml" <<'PY'
 import sys

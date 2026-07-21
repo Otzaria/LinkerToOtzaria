@@ -48,12 +48,14 @@ def pairs(items):
   out[k]=v
  return out
 v=json.loads(path.read_text(),object_pairs_hook=pairs)
-keys={'schema_version','request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256','dry_run','intake_run_id','intake_run_attempt'}
-if set(v)!=keys or type(v['schema_version']) is not int or v['schema_version']!=1 or type(v['intake_run_id']) is not int or v['intake_run_id']!=expected_run: raise SystemExit('invalid intent schema/identity')
+base_keys={'schema_version','request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256','dry_run','intake_run_id','intake_run_attempt'}
+if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2): raise SystemExit('invalid intent schema version')
+expected_keys=base_keys if v['schema_version']==1 else base_keys|{'recovery_mode'}
+if set(v)!=expected_keys or type(v['intake_run_id']) is not int or v['intake_run_id']!=expected_run: raise SystemExit('invalid intent schema/identity')
 string_fields=('request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256')
 if any(type(v[k]) is not str for k in string_fields): raise SystemExit('invalid intent string types')
 if not re.fullmatch(r'[0-9a-f]{64}',v['request_id']): raise SystemExit('invalid request id')
-if type(v['dry_run']) is not bool or type(v['intake_run_attempt']) is not int or v['intake_run_attempt'] != expected_attempt: raise SystemExit('invalid intent types/attempt')
+if type(v['dry_run']) is not bool or type(v.get('recovery_mode',False)) is not bool or type(v['intake_run_attempt']) is not int or v['intake_run_attempt'] != expected_attempt: raise SystemExit('invalid intent types/attempt')
 serial=bool(v['library_run_id'])
 if serial:
  if not re.fullmatch(r'[1-9][0-9]*',v['library_run_id']) or not re.fullmatch(r'[1-9][0-9]*',v['parent_run_attempt']): raise SystemExit('invalid serial parent identity')
@@ -61,6 +63,8 @@ if serial:
  if not re.fullmatch(r'[0-9a-f]{64}',v['snapshot_sha256']) or not re.fullmatch(r'[0-9a-f]{64}',v['sefaria_release_metadata_sha256']): raise SystemExit('invalid serial pin digests')
 elif v['parent_run_attempt']:
  raise SystemExit('standalone intent must not name a parent attempt')
+if v.get('recovery_mode',False) and not serial:
+ raise SystemExit('recovery intent must name an exact serial parent')
 raw=path.read_bytes(); side=(root/'kaggle-intent.sha256').read_bytes()
 if side != (hashlib.sha256(raw).hexdigest()+'\n').encode(): raise SystemExit('intent sidecar mismatch')
 canonical=(json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()
@@ -69,6 +73,7 @@ PY
   request_id=$(jq -r .request_id "$TMP/intent/kaggle-intent.json")
   library_run_id=$(jq -r .library_run_id "$TMP/intent/kaggle-intent.json")
   parent_attempt=$(jq -r .parent_run_attempt "$TMP/intent/kaggle-intent.json")
+  recovery_mode=$(jq -r '.recovery_mode // false' "$TMP/intent/kaggle-intent.json")
   if [ -n "$library_run_id" ]; then
     if ! gh api "repos/$PARENT_REPO/actions/runs/$library_run_id" > "$TMP/parent.json" 2> "$TMP/parent.err"; then
       if grep -q 'HTTP 404' "$TMP/parent.err"; then
@@ -81,13 +86,38 @@ PY
     fi
     pstatus=$(jq -r '.status // empty' "$TMP/parent.json")
     pcurrent=$(jq -r '.run_attempt // empty' "$TMP/parent.json")
+    pconclusion=$(jq -r '.conclusion // empty' "$TMP/parent.json")
     case "$pstatus" in requested|waiting|pending|queued|in_progress|completed) ;; *) echo "::error::unknown parent status '$pstatus'"; exit 1;; esac
     [[ "$pcurrent" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid parent attempt '$pcurrent'"; exit 1; }
-    if [ "$pstatus" = completed ] || [ "$pcurrent" -gt "$parent_attempt" ]; then
+    if [ "$pcurrent" -gt "$parent_attempt" ]; then
       echo "serial intent $request_id belongs to a terminal/superseded parent attempt; leaving it unprovisioned"
       continue
     fi
     [ "$pcurrent" -eq "$parent_attempt" ] || { echo "::error::parent attempt regressed below intent identity"; exit 1; }
+    if [ "$recovery_mode" = true ]; then
+      if [ "$pstatus" != completed ]; then
+        echo "recovery intent $request_id is waiting for its exact parent attempt to become terminal"
+        continue
+      fi
+      case "$pconclusion" in failure|cancelled|timed_out|action_required|startup_failure|stale) ;;
+        success|neutral|skipped) echo "recovery intent $request_id belongs to a non-failed parent; leaving it unprovisioned"; continue ;;
+        *) echo "::error::unknown terminal parent conclusion '$pconclusion'"; exit 1 ;;
+      esac
+      snapshot_name="lines-snapshot-$parent_attempt"
+      if ! snapshot_ids=$(gh api --paginate "repos/$PARENT_REPO/actions/runs/$library_run_id/artifacts?per_page=100" \
+          --jq ".artifacts[] | select(.expired==false and .name==\"$snapshot_name\") | (.id|tostring)"); then
+        echo "::error::cannot verify recovery snapshot artifact for parent $library_run_id:$parent_attempt"
+        exit 1
+      fi
+      snapshot_count=$(printf '%s\n' "$snapshot_ids" | awk 'NF' | wc -l | tr -d ' ')
+      [ "$snapshot_count" -eq 1 ] || {
+        echo "::error::recovery parent $library_run_id:$parent_attempt has $snapshot_count unexpired $snapshot_name artifacts (expected exactly one)"
+        exit 1
+      }
+    elif [ "$pstatus" = completed ]; then
+      echo "serial intent $request_id belongs to a terminal/superseded parent attempt; leaving it unprovisioned"
+      continue
+    fi
   fi
   parent="standalone"; [ -z "$library_run_id" ] || parent="$library_run_id:$parent_attempt"
   title="relink request=$request_id parent=$parent"

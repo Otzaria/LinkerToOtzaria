@@ -50,6 +50,14 @@ on:
         required: false
         default: false
         type: boolean
+      recovery_mode:
+        description: >
+          Explicitly reuse the exact snapshot artifact of a failed terminal SeforimLibrary
+          attempt. The provisioner still requires an exact, unsuperseded parent attempt,
+          a non-success conclusion, one unexpired snapshot artifact, and no matching child.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -84,6 +92,7 @@ jobs:
         id: intent
         env:
           IN_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          IN_RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
           IN_LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
           IN_RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
           IN_PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
@@ -109,6 +118,10 @@ jobs:
             echo "::error::standalone intent must not carry parent_run_attempt"
             exit 1
           fi
+          if [ -n "$IN_RECOVERY_MODE" ] && [ -z "$IN_LIBRARY_RUN_ID" ]; then
+            echo "::error::recovery_mode requires an exact serial parent identity"
+            exit 1
+          fi
           request_id="$IN_RELINK_REQUEST_ID"
           if [ -z "$request_id" ]; then
             request_id="$(printf 'standalone-kaggle-intent-v1\0%s\0%s\0%s' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha256sum | cut -d' ' -f1)"
@@ -119,11 +132,13 @@ jobs:
             --arg sefaria_tag "$IN_SEFARIA_TAG" --arg snapshot_sha256 "$IN_SNAPSHOT_SHA256" \
             --arg sefaria_metadata_sha256 "$IN_SEFARIA_METADATA_SHA256" \
             --argjson dry_run "$( [ -n "$IN_DRY_RUN" ] && echo true || echo false )" \
+            --argjson recovery_mode "$( [ -n "$IN_RECOVERY_MODE" ] && echo true || echo false )" \
             --argjson intake_run_id "$GITHUB_RUN_ID" --argjson intake_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{schema_version:1,request_id:$request_id,library_run_id:$library_run_id,
+            '{schema_version:2,request_id:$request_id,library_run_id:$library_run_id,
               parent_run_attempt:$parent_run_attempt,sefaria_tag:$sefaria_tag,
               snapshot_sha256:$snapshot_sha256,sefaria_release_metadata_sha256:$sefaria_metadata_sha256,
-              dry_run:$dry_run,intake_run_id:$intake_run_id,intake_run_attempt:$intake_run_attempt}' \
+              dry_run:$dry_run,recovery_mode:$recovery_mode,
+              intake_run_id:$intake_run_id,intake_run_attempt:$intake_run_attempt}' \
             > intent/kaggle-intent.json
           sha256sum intent/kaggle-intent.json | cut -d' ' -f1 > intent/kaggle-intent.sha256
           echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
