@@ -92,9 +92,11 @@ else:
         raise SystemExit("invalid runtime manifest schema")
     if any(type(manifest[key]) is not str for key in expected_keys - {"schema_version"}):
         raise SystemExit("invalid runtime manifest value type")
-    for key in ("sefaria_commit", "gpu_server_commit", "sefaria_requirements_sha256",
-                "gpu_server_requirements_sha256", "sefaria_freeze_sha256",
-                "gpu_server_freeze_sha256", "builder_sha256"):
+    for key in ("sefaria_commit", "gpu_server_commit"):
+        if not re.fullmatch(r"[0-9a-f]{40}", manifest[key]):
+            raise SystemExit(f"invalid runtime manifest commit: {key}")
+    for key in ("sefaria_requirements_sha256", "gpu_server_requirements_sha256",
+                "sefaria_freeze_sha256", "gpu_server_freeze_sha256", "builder_sha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", manifest[key]):
             raise SystemExit(f"invalid runtime manifest digest: {key}")
     if manifest["python_version"] != "Python 3.12.13":

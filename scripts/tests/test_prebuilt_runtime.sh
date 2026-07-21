@@ -25,8 +25,8 @@ SEF_ID="$SEF_ID" GPU_ID="$GPU_ID" SEF_FREEZE="$SEF_FREEZE" GPU_FREEZE="$GPU_FREE
 import json, os, sys
 v={
  "schema_version":1,"python_version":"Python 3.12.13","platform":"test","machine":"x86_64",
- "sefaria_commit":"5"*64,"sefaria_requirements_sha256":"a"*64,"sefaria_freeze_sha256":os.environ["SEF_FREEZE"],
- "sefaria_identity":os.environ["SEF_ID"],"gpu_server_commit":"d"*64,"gpu_server_requirements_sha256":"b"*64,
+ "sefaria_commit":"5"*40,"sefaria_requirements_sha256":"a"*64,"sefaria_freeze_sha256":os.environ["SEF_FREEZE"],
+ "sefaria_identity":os.environ["SEF_ID"],"gpu_server_commit":"d"*40,"gpu_server_requirements_sha256":"b"*64,
  "gpu_server_freeze_sha256":os.environ["GPU_FREEZE"],"gpu_server_identity":os.environ["GPU_ID"],
  "builder_sha256":"c"*64,
 }
