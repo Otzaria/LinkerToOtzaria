@@ -172,6 +172,10 @@ jobs:
       - name: Checkout linker repo
         uses: actions/checkout@v4
 
+      - name: Bootstrap durable cross-repo host lease
+        if: inputs.target != 'kaggle'
+        run: bash ci/bootstrap_host_lock.sh ci/otzaria-pipeline.tmpfiles.conf
+
       # Fail fast and loud on a missing/empty PIPELINE_TOKEN — the first cold run
       # died here with a blank GH_TOKEN and every later step would too.
       - name: Preflight — token sanity
