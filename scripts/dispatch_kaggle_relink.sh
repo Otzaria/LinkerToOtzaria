@@ -24,6 +24,7 @@ set -euo pipefail
 REPO=Otzaria/LinkerToOtzaria
 KERNEL_ID=otzaria/linker-gpu-runner
 TOOLS_KERNEL=otzaria/linker-tools-fetcher
+RUNTIME_KERNEL=otzaria/linker-python-runtime
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/gh_runs.sh
 source "$HERE/scripts/lib/gh_runs.sh"
@@ -241,7 +242,7 @@ cat > "$PUSH/kernel-metadata.json" <<JSON
   "enable_internet": true,
   "dataset_sources": [],
   "competition_sources": [],
-  "kernel_sources": ["$TOOLS_KERNEL"],
+  "kernel_sources": ["$TOOLS_KERNEL", "$RUNTIME_KERNEL"],
   "model_sources": []
 }
 JSON

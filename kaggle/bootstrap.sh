@@ -5,9 +5,9 @@
 # which base64-embeds this file into the pushed kernel's run.py (the repo is private, so
 # the kernel cannot fetch it itself). All third-party binaries (gh, mongod/mongorestore/
 # mongosh, the Actions runner) come from the attached OUTPUT of the one-shot Kaggle
-# kernel otzaria/linker-tools-fetcher (sha256-pinned downloads; big private datasets
-# fail Kaggle's processing, kernel outputs do not). Only distro packages come from the
-# Ubuntu archive.
+# kernels otzaria/linker-tools-fetcher and otzaria/linker-python-runtime
+# (sha256-pinned outputs; big private datasets fail Kaggle's processing, kernel
+# outputs do not). Only small distro packages come from the Ubuntu archive.
 # The JIT runner executes a single job and deregisters, and the session dies with it —
 # nothing here persists or needs cleanup.
 set -euxo pipefail
@@ -21,27 +21,48 @@ head -2 /etc/os-release; nproc; free -h; df -h /; nvidia-smi || echo "NO GPU"
 # Pinned tool bundle — attached via kernel-metadata kernel_sources (the output of
 # otzaria/linker-tools-fetcher). Required: the whole point is that boot does not
 # depend on mongodb.org/github.com download URLs.
-DS=/kaggle/input/linker-tools-fetcher
 GH_VER=2.63.2
 MONGO_VER=7.0.14
 MONGO_TOOLS_VER=100.10.0
 MONGOSH_VER=2.3.1
 RUNNER_VER=2.335.1
+TOOL_MARKER="gh_${GH_VER}_linux_amd64.tar.gz"
+TOOL_MATCHES=$(find /kaggle/input -mindepth 2 -maxdepth 5 -type f -name "$TOOL_MARKER" -print)
+TOOL_MATCH_COUNT=$(printf '%s\n' "$TOOL_MATCHES" | awk 'NF' | wc -l | tr -d ' ')
+[ "$TOOL_MATCH_COUNT" -eq 1 ] || {
+  echo "expected one attached $TOOL_MARKER; found $TOOL_MATCH_COUNT — attach kernel_sources otzaria/linker-tools-fetcher"
+  exit 1
+}
+DS=$(dirname "$TOOL_MATCHES")
 for f in "gh_${GH_VER}_linux_amd64.tar.gz" \
          "mongodb-linux-x86_64-ubuntu2204-${MONGO_VER}.tgz" \
          "mongodb-database-tools-ubuntu2204-x86_64-${MONGO_TOOLS_VER}.tgz" \
          "mongosh-${MONGOSH_VER}-linux-x64.tgz" \
          "actions-runner-linux-x64-${RUNNER_VER}.tar.gz"; do
-  [ -f "$DS/$f" ] || { echo "dataset asset missing: $DS/$f — attach kernel_sources otzaria/linker-tools-fetcher"; exit 1; }
+  [ -f "$DS/$f" ] || { echo "kernel-output asset missing: $DS/$f — attach kernel_sources otzaria/linker-tools-fetcher"; exit 1; }
 done
+
+# Full pre-resolved Python environments. The 2.6GB archive replaces several GB of
+# live PyPI/CUDA downloads on every ephemeral session. setup_stack verifies this
+# hard-coded content digest and the source/requirements identities before install.
+RUNTIME_NAME=linker-python-runtime-v1.tar.zst
+export LINKER_RUNTIME_ROOT=/kaggle/input
+export LINKER_RUNTIME_SHA256=bacad1b486c2bb392ee786bcc35b27dcc2beb17ea90b05f47352a06e44c8ff43
+RUNTIME_MATCHES=$(find "$LINKER_RUNTIME_ROOT" -mindepth 2 -maxdepth 5 -type f -name "$RUNTIME_NAME" -print)
+RUNTIME_MATCH_COUNT=$(printf '%s\n' "$RUNTIME_MATCHES" | awk 'NF' | wc -l | tr -d ' ')
+[ "$RUNTIME_MATCH_COUNT" -eq 1 ] || {
+  echo "expected one attached $RUNTIME_NAME; found $RUNTIME_MATCH_COUNT — attach kernel_sources otzaria/linker-python-runtime"
+  exit 1
+}
+export LINKER_RUNTIME_ARCHIVE=$RUNTIME_MATCHES
 
 export DEBIAN_FRONTEND=noninteractive
 timeout 600 apt-get update -qq
-# python3.12-venv: the image ships python3.12 with broken ensurepip (and Sefaria's
-# requirements pin django==6.0.4 which demands >=3.12, so an easier 3.11 is out) —
-# setup_stack's venv-capability probe needs a 3.12 that can actually make venvs.
+# Sefaria pins django==6.0.4 and therefore needs Python >=3.12. Venv creation is
+# not needed on the ephemeral path: both environments come from the verified
+# runtime output. Persistent server fallback still provisions its own venv support.
 timeout 900 apt-get install -y -qq zstd unzip curl git ca-certificates procps \
-  python3.12 python3.12-venv >/dev/null
+  python3.12 >/dev/null
 python3.12 --version
 
 TOOLS=/kaggle/temp/tools; mkdir -p "$TOOLS"; cd "$TOOLS"
