@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dispatch a relink onto a fresh Kaggle GPU session.
 #
-#   scripts/dispatch_kaggle_relink.sh [--dry-run] [--library-run-id <id>] \
+#   scripts/dispatch_kaggle_relink.sh [--dry-run] [--recovery-mode] [--library-run-id <id>] \
 #       [--relink-request-id <64-hex>] [--parent-run-attempt <n>] \
 #       [--sefaria-tag <tag>] [--snapshot-sha256 <sha>] \
 #       [--sefaria-release-metadata-sha256 <sha>]
@@ -29,6 +29,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 source "$HERE/scripts/lib/gh_runs.sh"
 
 DRY=""
+RECOVERY_MODE=""
 LIBRARY_RUN_ID=""
 SEFARIA_TAG=""
 SNAPSHOT_SHA256=""
@@ -38,6 +39,7 @@ PARENT_RUN_ATTEMPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
+    --recovery-mode) RECOVERY_MODE=1; shift ;;
     --library-run-id) LIBRARY_RUN_ID="$2"; shift 2 ;;
     --relink-request-id) RELINK_REQUEST_ID="$2"; shift 2 ;;
     --parent-run-attempt) PARENT_RUN_ATTEMPT="$2"; shift 2 ;;
@@ -63,6 +65,7 @@ if [ -n "$LIBRARY_RUN_ID" ]; then
   [[ "$RELINK_REQUEST_ID" =~ ^[0-9a-f]{64}$ ]] || { echo "serial dispatch requires --relink-request-id (64-hex sha256)" >&2; exit 2; }
   [[ "$PARENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "serial dispatch requires --parent-run-attempt (positive integer)" >&2; exit 2; }
 fi
+[ -z "$RECOVERY_MODE" ] || [ -n "$LIBRARY_RUN_ID" ] || { echo "--recovery-mode requires an exact serial parent" >&2; exit 2; }
 if [ -z "$RELINK_REQUEST_ID" ]; then
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     RELINK_REQUEST_ID=$(printf 'relink-request-v1 standalone %s %s %s' \
@@ -75,7 +78,9 @@ fi
 # Must byte-match relink.yml's run-name template — the cleanup trap and the waiting
 # build both compare the FULL title with ==.
 if [ -n "$LIBRARY_RUN_ID" ]; then
-  CHILD_TITLE="relink request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
+  CHILD_PREFIX=relink
+  [ -z "$RECOVERY_MODE" ] || CHILD_PREFIX=relink-recovery
+  CHILD_TITLE="$CHILD_PREFIX request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
 else
   CHILD_TITLE="relink request=$RELINK_REQUEST_ID parent=standalone"
 fi
@@ -174,6 +179,7 @@ python3 "$HERE/scripts/exec_new_session.py" gh workflow run relink.yml -R "$REPO
   ${SEFARIA_TAG:+-f sefaria_tag="$SEFARIA_TAG"} \
   ${SNAPSHOT_SHA256:+-f snapshot_sha256="$SNAPSHOT_SHA256"} \
   ${SEFARIA_METADATA_SHA256:+-f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA256"} \
+  ${RECOVERY_MODE:+-f recovery_mode=true} \
   ${DRY:+-f dry_run=true} &
 ACTIVE_PID=$!
 wait "$ACTIVE_PID"

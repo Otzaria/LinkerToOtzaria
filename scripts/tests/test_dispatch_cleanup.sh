@@ -37,7 +37,8 @@ emit_child_row() {  # constructed from the recorded dispatch; 3- or 5-col
   # shellcheck source=/dev/null
   source "$MOCK_DIR/dispatched.env"
   if [ -n "${D_LIBRARY_RUN_ID:-}" ]; then
-    title="relink request=$D_REQUEST_ID parent=$D_LIBRARY_RUN_ID:$D_PARENT_ATTEMPT"
+    prefix=relink; [ -z "${D_RECOVERY_MODE:-}" ] || prefix=relink-recovery
+    title="$prefix request=$D_REQUEST_ID parent=$D_LIBRARY_RUN_ID:$D_PARENT_ATTEMPT"
   else
     title="relink request=$D_REQUEST_ID parent=standalone"
   fi
@@ -62,15 +63,16 @@ case "$1 $2" in
       fi ;;
   "api -X") echo "FAKEJIT" ;;
   "workflow run")
-      rid=""; lib=""; att=""
+      rid=""; lib=""; att=""; recovery=""
       while [ $# -gt 0 ]; do
         case "$1" in
           relink_request_id=*) rid="${1#*=}" ;;
           library_run_id=*) lib="${1#*=}" ;;
           parent_run_attempt=*) att="${1#*=}" ;;
+          recovery_mode=true) recovery=1 ;;
         esac; shift
       done
-      printf 'D_REQUEST_ID=%s\nD_LIBRARY_RUN_ID=%s\nD_PARENT_ATTEMPT=%s\n' "$rid" "$lib" "$att" > "$MOCK_DIR/dispatched.env"
+      printf 'D_REQUEST_ID=%s\nD_LIBRARY_RUN_ID=%s\nD_PARENT_ATTEMPT=%s\nD_RECOVERY_MODE=%s\n' "$rid" "$lib" "$att" "$recovery" > "$MOCK_DIR/dispatched.env"
       exit 0 ;;
   "run cancel") echo "CANCELLED $3" >> "$MOCK_LOG"; exit "${MOCK_CANCEL_RC:-0}" ;;
   *) exit 0 ;;
@@ -116,6 +118,11 @@ check "push failure → child cancelled once, rc!=0" test "$rc" -ne 0 -a "$(canc
 export MOCK_LOG="$WORK/t4.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
 check "success → no cancel, rc=0" test "$rc" -eq 0 -a "$(cancels)" -eq 0
+
+export MOCK_LOG="$WORK/t4-recovery.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" --recovery-mode ) >/dev/null 2>&1 || rc=$?
+check "recovery → distinct exact title and workflow input" \
+  test "$rc" -eq 0 -a "$(cancels)" -eq 0 -a "$(grep -c 'recovery_mode=true' "$MOCK_LOG")" -eq 1
 
 cat > "$WORK/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash

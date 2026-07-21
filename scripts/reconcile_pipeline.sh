@@ -5,7 +5,9 @@
 # For every LIVE (pre-terminal) relink.yml / kaggle-relink.yml run stamped with a
 # serial identity ("<wf> request=<64-hex> parent=<run_id>:<attempt>"), fetch the parent
 # SeforimLibrary run and decide:
-#   • parent completed (any conclusion)            → no build is waiting — cancel.
+#   • parent completed (any conclusion)            → normal child: cancel.
+#   • recovery child + same failed terminal attempt → keep: this is the explicit
+#     replay contract, and no live build is expected to be waiting.
 #   • parent's current attempt > stamped attempt   → that attempt was superseded by a
 #     rerun (its request id is dead — a rerun derives a NEW id) — cancel.
 #   • parent gone entirely (HTTP 404)              → deleted/never existed — cancel.
@@ -42,9 +44,9 @@ SEEN_IDS_FILE="$TMP/seen-request-ids"
 
 handle_run() {
   local wf="$1" rid="$2" title="$3"
-  local req prun pattempt
-  if [[ "$title" =~ ^(relink|kaggle-relink)\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
-    req="${BASH_REMATCH[2]}"; prun="${BASH_REMATCH[3]}"; pattempt="${BASH_REMATCH[4]}"
+  local req prun pattempt kind
+  if [[ "$title" =~ ^(relink|relink-recovery|kaggle-relink)\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+    kind="${BASH_REMATCH[1]}"; req="${BASH_REMATCH[2]}"; prun="${BASH_REMATCH[3]}"; pattempt="${BASH_REMATCH[4]}"
   else
     echo "skip  $wf/$rid: not a serial identity-stamped run ($title)"
     return 0
@@ -64,13 +66,14 @@ handle_run() {
 
   # Validate the parent payload BEFORE acting on it: a malformed body, an unknown
   # status, or a non-numeric attempt must never drive a cancel decision.
-  local pstatus pcurrent
+  local pstatus pcurrent pconclusion
   if ! jq -e . "$TMP/parent.json" > /dev/null 2>&1; then
     echo "::warning::parent $prun returned unparseable JSON — left for the next tick"
     FAILURES=$((FAILURES+1)); return 0
   fi
   pstatus=$(jq -r '.status // empty' "$TMP/parent.json")
   pcurrent=$(jq -r '.run_attempt // empty' "$TMP/parent.json")
+  pconclusion=$(jq -r '.conclusion // empty' "$TMP/parent.json")
   case "$pstatus" in
     requested|waiting|pending|queued|in_progress|completed) ;;
     *) echo "::warning::parent $prun has unrecognized status '$pstatus' — left for the next tick"
@@ -81,7 +84,25 @@ handle_run() {
     FAILURES=$((FAILURES+1)); return 0
   fi
 
-  if [ "$pcurrent" -lt "$pattempt" ]; then
+  if [ "$kind" = relink-recovery ] && [ "$pcurrent" -eq "$pattempt" ]; then
+    if [ "$pstatus" != completed ]; then
+      echo "::warning::recovery $wf/$rid has a non-terminal parent $prun:$pattempt — left untouched"
+      FAILURES=$((FAILURES+1))
+      return 0
+    fi
+    case "$pconclusion" in
+      failure|cancelled|timed_out|action_required|startup_failure|stale)
+        echo "keep  $wf/$rid: explicit recovery of failed parent $prun:$pattempt ($pconclusion)"
+        return 0 ;;
+      success|neutral|skipped)
+        echo "reap  $wf/$rid: recovery parent $prun:$pattempt is not failed ($pconclusion)"
+        gh run cancel "$rid" -R "$REPO" || { echo "::warning::cancel of $wf/$rid failed"; FAILURES=$((FAILURES+1)); return 0; }
+        REAPED=$((REAPED+1)); return 0 ;;
+      *)
+        echo "::warning::recovery parent $prun:$pattempt has unknown conclusion '$pconclusion' — left untouched"
+        FAILURES=$((FAILURES+1)); return 0 ;;
+    esac
+  elif [ "$pcurrent" -lt "$pattempt" ]; then
     echo "::warning::parent $prun current attempt $pcurrent is below stamped attempt $pattempt — left untouched"
     FAILURES=$((FAILURES+1))
   elif [ "$pstatus" = "completed" ] || [ "$pcurrent" -gt "$pattempt" ]; then
@@ -105,7 +126,7 @@ collect_workflow() {
   printf '%s\n' "$rows" > "$TMP/$wf.tsv"
   while IFS=$'\t' read -r rid status title; do
     [ -n "$rid" ] || continue
-    if [[ "$title" =~ ^(relink|kaggle-relink)\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+    if [[ "$title" =~ ^(relink|relink-recovery|kaggle-relink)\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
       echo "$wf ${BASH_REMATCH[2]}" >> "$SEEN_IDS_FILE"
     fi
   done <<< "$rows"

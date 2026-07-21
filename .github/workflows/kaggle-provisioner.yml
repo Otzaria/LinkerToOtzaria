@@ -29,6 +29,11 @@ jobs:
     concurrency:
       group: linker-relink
       cancel-in-progress: false
+      # This group is shared with the hours-long relink child. Without an
+      # unbounded pending queue, a scheduled provisioner tick can replace the
+      # pending slot that currently represents the active JIT handoff and GitHub
+      # cancels the running relink (observed on run 29823214655).
+      queue: max
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}

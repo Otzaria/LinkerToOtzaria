@@ -2,7 +2,7 @@ name: relink
 # הבנייה הממתינה, ה-trap של ה-dispatcher וה-reconciler מזהים ריצה זו בהתאמה מדויקת
 # (==, לא contains) על הכותרת כולה — request= (זהות per-attempt) + parent= (קואורדינטות
 # ההורה עבור ה-reconciler). אל תשנו את התבנית בלי לעדכן את שלושת הצרכנים.
-run-name: "relink request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"
+run-name: "${{ inputs.recovery_mode && 'relink-recovery' || 'relink' }} request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"
 
 # Incremental re-link: re-run the linker only on source books that changed since the last
 # run, then hand the ref-based artifacts back to the SeforimLibrary build.
@@ -100,6 +100,14 @@ on:
         description: >
           Run everything but SKIP publish + baseline commit (canary/testing — safe to
           run beside a real run; gets its own concurrency group).
+        required: false
+        default: false
+        type: boolean
+      recovery_mode:
+        description: >
+          Marks an explicitly validated replay of one failed terminal parent snapshot.
+          Its distinct exact title prevents the normal orphan reconciler from treating
+          the intentionally terminal parent as proof that the recovery is orphaned.
         required: false
         default: false
         type: boolean
@@ -269,6 +277,7 @@ jobs:
           SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
         run: |
           set -euo pipefail
           # Shape-validate EVERY dispatch input once, fail-closed, before any step
@@ -295,8 +304,12 @@ jobs:
             [ -n "$SNAPSHOT_SHA256" ] && [ -n "$SEFARIA_METADATA_SHA256" ] || {
               echo "::error::serial relink requires snapshot and release-metadata digests"; exit 1;
             }
+            [ -z "$RECOVERY_MODE" ] || echo "validated recovery child for terminal parent $LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
           elif [ -n "$PARENT_RUN_ATTEMPT" ]; then
             echo "::error::standalone relink must not carry parent_run_attempt"; exit 1
+          fi
+          if [ -n "$RECOVERY_MODE" ] && [ -z "$LIBRARY_RUN_ID" ]; then
+            echo "::error::recovery_mode requires an exact serial parent"; exit 1
           fi
           if [ -n "$SEFARIA_TAG_INPUT" ]; then
             SEF_TAG="$SEFARIA_TAG_INPUT"

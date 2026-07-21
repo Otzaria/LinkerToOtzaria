@@ -90,6 +90,7 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
 test -s "$TMP/dispatch"
 grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 c)" "$TMP/dispatch"
 grep -q -- "--library-run-id 777 --parent-run-attempt 2" "$TMP/dispatch"
+grep -q -- "--recovery-mode" "$TMP/dispatch"
 echo "ok   exact failed terminal parent with one snapshot can be recovered"
 
 rm -f "$TMP/dispatch"
@@ -105,10 +106,15 @@ import sys
 from pathlib import Path
 workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
 job = workflow.split("  provision:\n", 1)[1]
-if "    concurrency:\n      group: linker-relink\n      cancel-in-progress: false" not in job:
+if "    concurrency:\n      group: linker-relink\n      cancel-in-progress: false\n      #" not in job:
     raise SystemExit("provisioner does not hold the real relink mutex")
+if "      queue: max" not in job:
+    raise SystemExit("shared relink mutex can replace/cancel an active handoff")
 header = workflow.split("jobs:\n", 1)[0]
 if "queue: max" in header:
     raise SystemExit("interchangeable provisioner ticks must not accumulate as durable intents")
 PY
 echo "ok   provisioner holds relink mutex through admission and dispatch"
+
+grep -q 'created_at >=.*DURABLE_INTENT_ROLLOUT_AT' "$ROOT/scripts/provision_kaggle_intent.sh"
+echo "ok   scheduled scanner excludes pre-contract legacy intakes"

@@ -60,6 +60,7 @@ row() { printf '%s\tqueued\t%s\n' "$1" "$2"; }
 
 RA=$(printf 'a%.0s' {1..64}); RB=$(printf 'b%.0s' {1..64}); RC64=$(printf 'c%.0s' {1..64})
 RD=$(printf 'd%.0s' {1..64}); RE=$(printf 'e%.0s' {1..64})
+RF=$(printf 'f%.0s' {1..64}); RG=$(printf '1%.0s' {1..64})
 
 # Scenario matrix — one pass, mixed population.
 { row 101 "relink request=$RA parent=11:1"
@@ -69,11 +70,15 @@ RD=$(printf 'd%.0s' {1..64}); RE=$(printf 'e%.0s' {1..64})
   row 105 "relink request=$RE parent=standalone"
   row 106 "relink request=none parent=standalone"
   row 107 "relink (library_run_id=777)"
+  row 108 "relink-recovery request=$RF parent=15:1"
+  row 109 "relink-recovery request=$RG parent=16:1"
 } > "$MOCK_DIR/list_relink.tsv"
 row 201 "kaggle-relink request=$RA parent=11:1" > "$MOCK_DIR/list_kaggle-relink.tsv"
 echo '{"status":"completed","run_attempt":1}'   > "$MOCK_DIR/parent_11.json"
 echo '{"status":"in_progress","run_attempt":1}' > "$MOCK_DIR/parent_12.json"
 echo '{"status":"in_progress","run_attempt":3}' > "$MOCK_DIR/parent_13.json"
+echo '{"status":"completed","run_attempt":1,"conclusion":"failure"}' > "$MOCK_DIR/parent_15.json"
+echo '{"status":"completed","run_attempt":1,"conclusion":"success"}' > "$MOCK_DIR/parent_16.json"
 
 rc=$(run_reconcile)
 check "parent completed → child + dispatcher reaped" test "$(cancelled 101)" -eq 1 -a "$(cancelled 201)" -eq 1
@@ -81,6 +86,8 @@ check "parent alive on stamped attempt → kept"        test "$(cancelled 102)" 
 check "parent rerun superseded attempt → reaped"      test "$(cancelled 103)" -eq 1
 check "parent 404 → reaped"                           test "$(cancelled 104)" -eq 1
 check "standalone/none/legacy → untouched"            test "$(cancelled 105)" -eq 0 -a "$(cancelled 106)" -eq 0 -a "$(cancelled 107)" -eq 0
+check "explicit failed-parent recovery → kept"        test "$(cancelled 108)" -eq 0
+check "recovery of successful parent → reaped"        test "$(cancelled 109)" -eq 1
 check "dispatcher+child same id ≠ duplicate; clean tick rc=0" test "$rc" -eq 0
 
 # Fail-closed listing: EVERY status query fails → red tick, zero decisions.

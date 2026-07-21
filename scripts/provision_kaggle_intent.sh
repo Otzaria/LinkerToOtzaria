@@ -6,8 +6,17 @@ source "$HERE/lib/gh_runs.sh"
 REPO=${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}
 PARENT_REPO=${KAGGLE_PARENT_REPO:-Otzaria/SeforimLibrary}
 DISPATCH_SCRIPT=${KAGGLE_DISPATCH_SCRIPT:-$HERE/dispatch_kaggle_relink.sh}
+# Successful intake runs created before this instant predate the durable intent
+# artifact contract. Scheduled scans must not fail forever on those legacy runs;
+# an explicit INTENT_RUN_ID remains a fail-loud forensic/recovery path.
+DURABLE_INTENT_ROLLOUT_AT=${DURABLE_INTENT_ROLLOUT_AT:-2026-07-21T09:39:49Z}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+
+[[ "$DURABLE_INTENT_ROLLOUT_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+  echo "::error::invalid DURABLE_INTENT_ROLLOUT_AT" >&2
+  exit 2
+}
 
 if [ -n "${INTENT_RUN_ID:-}" ]; then
   [[ "$INTENT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -20,7 +29,7 @@ PY
   )
   candidates=$(gh api --paginate -X GET "repos/$REPO/actions/workflows/kaggle-relink.yml/runs" \
     -f event=workflow_dispatch -f status=completed -f created=">=$since" -f per_page=100 \
-    --jq '.workflow_runs[] | select(.conclusion=="success") | (.id|tostring)' | \
+    --jq ".workflow_runs[] | select(.conclusion==\"success\" and .created_at >= \"$DURABLE_INTENT_ROLLOUT_AT\") | (.id|tostring)" | \
     awk '{rows[NR]=$0} END {for (i=NR; i>=1; i--) print rows[i]}')
 fi
 
@@ -120,7 +129,9 @@ PY
     fi
   fi
   parent="standalone"; [ -z "$library_run_id" ] || parent="$library_run_id:$parent_attempt"
-  title="relink request=$request_id parent=$parent"
+  prefix=relink
+  [ "$recovery_mode" = true ] && prefix=relink-recovery
+  title="$prefix request=$request_id parent=$parent"
   rows=$(list_runs_all "$REPO" relink.yml)
   matches=$(printf '%s\n' "$rows" | awk -F'\t' -v t="$title" '$3==t')
   count=$(printf '%s\n' "$matches" | awk 'NF' | wc -l | tr -d ' ')
@@ -143,6 +154,7 @@ PY
     [ -z "$value" ] || args+=("$flag" "$value")
   done
   [ "$(jq -r .dry_run "$TMP/intent/kaggle-intent.json")" = true ] && args+=(--dry-run)
+  [ "$recovery_mode" = true ] && args+=(--recovery-mode)
   bash "$DISPATCH_SCRIPT" "${args[@]}"
   exit 0
 done
