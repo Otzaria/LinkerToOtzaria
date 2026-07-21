@@ -54,7 +54,16 @@ RUNTIME_MATCH_COUNT=$(printf '%s\n' "$RUNTIME_MATCHES" | awk 'NF' | wc -l | tr -
   echo "expected one attached $RUNTIME_NAME; found $RUNTIME_MATCH_COUNT — attach kernel_sources otzaria/linker-python-runtime"
   exit 1
 }
-export LINKER_RUNTIME_ARCHIVE=$RUNTIME_MATCHES
+# Runner.Worker does not inherit Kaggle's /kaggle/input mount namespace. Copy
+# the immutable archive into the shared /kaggle/temp filesystem before starting
+# the JIT runner; every job step can see this stable handoff path.
+export LINKER_RUNTIME_ARCHIVE=/kaggle/temp/$RUNTIME_NAME
+rm -f "$LINKER_RUNTIME_ARCHIVE.tmp"
+cp --reflink=auto "$RUNTIME_MATCHES" "$LINKER_RUNTIME_ARCHIVE.tmp"
+mv "$LINKER_RUNTIME_ARCHIVE.tmp" "$LINKER_RUNTIME_ARCHIVE"
+[ "$(stat -c %s "$LINKER_RUNTIME_ARCHIVE")" -eq 2619185146 ] || {
+  echo "runtime handoff size mismatch"; exit 1;
+}
 
 export DEBIAN_FRONTEND=noninteractive
 timeout 600 apt-get update -qq

@@ -177,7 +177,7 @@ jobs:
       # The attached private kernel output is mounted before the JIT runner
       # starts. Declare the pin at job level as well as bootstrap level so the
       # worker never depends on arbitrary host-environment inheritance.
-      LINKER_RUNTIME_ROOT: ${{ inputs.target == 'kaggle' && '/kaggle/input' || '' }}
+      LINKER_RUNTIME_ARCHIVE: ${{ inputs.target == 'kaggle' && '/kaggle/temp/linker-python-runtime-v1.tar.zst' || '' }}
       LINKER_RUNTIME_SHA256: ${{ inputs.target == 'kaggle' && 'bacad1b486c2bb392ee786bcc35b27dcc2beb17ea90b05f47352a06e44c8ff43' || '' }}
       SEF_PROJECT: ${{ github.workspace }}/stack/Sefaria-Project
       RUN_DIR: ${{ github.workspace }}/run
@@ -198,6 +198,15 @@ jobs:
           gh release view -R Otzaria/SefariaExport  --json tagName -q .tagName >/dev/null
           gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName >/dev/null
           echo "token OK (cross-repo release access verified)"
+
+      - name: Preflight — verified Kaggle runtime handoff
+        if: inputs.target == 'kaggle'
+        run: |
+          set -euo pipefail
+          test -f "$LINKER_RUNTIME_ARCHIVE"
+          test "$(stat -c %s "$LINKER_RUNTIME_ARCHIVE")" -eq 2619185146
+          echo "$LINKER_RUNTIME_SHA256  $LINKER_RUNTIME_ARCHIVE" | sha256sum -c -
+          echo "prebuilt runtime handoff verified before large snapshot download"
 
       # The artifact store is NOT in git (see .gitignore) — the release payload IS the
       # store. Restore the full per-book artifact set from the latest published pack, or

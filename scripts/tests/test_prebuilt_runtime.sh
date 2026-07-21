@@ -66,7 +66,11 @@ if not match or match.group(1) != "bacad1b486c2bb392ee786bcc35b27dcc2beb17ea90b0
     raise SystemExit("bootstrap does not pin the reviewed runtime archive")
 if workflow.count("bacad1b486c2bb392ee786bcc35b27dcc2beb17ea90b05f47352a06e44c8ff43") != 1:
     raise SystemExit("relink job does not independently pin the reviewed runtime archive")
-if "LINKER_RUNTIME_ROOT: ${{ inputs.target == 'kaggle' && '/kaggle/input' || '' }}" not in workflow:
-    raise SystemExit("relink job does not declare the fixed Kaggle input discovery root")
+if "LINKER_RUNTIME_ARCHIVE: ${{ inputs.target == 'kaggle' && '/kaggle/temp/linker-python-runtime-v1.tar.zst' || '' }}" not in workflow:
+    raise SystemExit("relink job does not consume the bootstrap-to-worker handoff path")
+if "Preflight — verified Kaggle runtime handoff" not in workflow:
+    raise SystemExit("relink job does not verify the runtime before downloading the snapshot")
+if 'cp --reflink=auto "$RUNTIME_MATCHES" "$LINKER_RUNTIME_ARCHIVE.tmp"' not in bootstrap:
+    raise SystemExit("bootstrap does not materialize the input mount into worker-visible storage")
 PY
 echo "ok   JIT kernel attaches the exact reviewed runtime output"
