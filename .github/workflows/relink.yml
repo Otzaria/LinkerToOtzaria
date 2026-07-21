@@ -151,7 +151,14 @@ jobs:
     # 24GB), so this job runs LEAN there (2 NER + 2 engine workers) and tears the NER
     # down when done; a standalone dispatch has the box to itself.
     # kaggle: a throwaway GPU VM (see kaggle/); NER on CUDA, host RAM varies 13-29GB.
-    runs-on: ${{ inputs.target == 'kaggle' && fromJSON('["self-hosted","kaggle","gpu"]') || fromJSON('["self-hosted","Linux","ARM64","server-2"]') }}
+    # The request label binds this job to the one JIT configuration created for
+    # it. A prior Kaggle listener that is still shutting down lacks this label
+    # and therefore cannot steal the next recovery job.
+    runs-on:
+      - self-hosted
+      - ${{ inputs.target == 'kaggle' && 'kaggle' || 'Linux' }}
+      - ${{ inputs.target == 'kaggle' && 'gpu' || 'ARM64' }}
+      - ${{ inputs.target == 'kaggle' && format('request-{0}', inputs.relink_request_id) || 'server-2' }}
     # Timeout by mode. A SERIAL relink (library_run_id set) is always a bounded delta —
     # it runs with --forbid-full-relink, so it can never do a full corpus. Cap it at 8h:
     # far above the worst realistic weekly delta (~285 changed books ≈ 4h at 2 workers)

@@ -76,6 +76,7 @@ if [ -z "$RELINK_REQUEST_ID" ]; then
   fi
 fi
 [[ "$RELINK_REQUEST_ID" =~ ^[0-9a-f]{64}$ ]] || { echo "--relink-request-id must be 64-hex" >&2; exit 2; }
+JIT_REQUEST_LABEL="request-$RELINK_REQUEST_ID"
 # Must byte-match relink.yml's run-name template — the cleanup trap and the waiting
 # build both compare the FULL title with ==.
 if [ -n "$LIBRARY_RUN_ID" ]; then
@@ -104,10 +105,32 @@ if [ "$BUSY" -ne 0 ]; then
   exit 1
 fi
 
-NAME="kaggle-$(date +%Y%m%d-%H%M%S)"
+# A previous ephemeral listener can remain registered briefly after its one job
+# becomes terminal. Reap only idle linker-owned JIT registrations before creating
+# the next one; an unexpectedly busy registration is an invariant failure. The
+# request-specific label below is the hard isolation boundary even if an old
+# kernel registers in the tiny interval after this sweep.
+if ! STALE_RUNNERS=$(gh api --paginate -X GET "repos/$REPO/actions/runners" -f per_page=100 \
+    --jq '.runners[] | select(.name|startswith("kaggle-")) | [.id,.name,.busy,.status] | @tsv'); then
+  echo "::error::cannot enumerate stale Kaggle JIT registrations" >&2
+  exit 1
+fi
+while IFS=$'\t' read -r stale_id stale_name stale_busy stale_status; do
+  [ -n "$stale_id" ] || continue
+  [[ "$stale_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid stale runner id" >&2; exit 1; }
+  if [ "$stale_busy" = true ]; then
+    echo "::error::stale JIT runner $stale_name ($stale_id) is busy while no relink run is active" >&2
+    exit 1
+  fi
+  [ "$stale_busy" = false ] || { echo "::error::invalid busy state for runner $stale_name" >&2; exit 1; }
+  echo "removing idle stale JIT registration: $stale_name ($stale_status)"
+  gh api -X DELETE "repos/$REPO/actions/runners/$stale_id"
+done <<< "$STALE_RUNNERS"
+
+NAME="kaggle-${RELINK_REQUEST_ID:0:16}-$(date +%Y%m%d-%H%M%S)"
 JIT=$(gh api -X POST "repos/$REPO/actions/runners/generate-jitconfig" \
   -f name="$NAME" -F runner_group_id=1 -f work_folder=_work \
-  -f 'labels[]=self-hosted' -f 'labels[]=kaggle' -f 'labels[]=gpu' \
+  -f 'labels[]=self-hosted' -f 'labels[]=kaggle' -f 'labels[]=gpu' -f "labels[]=$JIT_REQUEST_LABEL" \
   -q .encoded_jit_config)
 echo "JIT runner registered: $NAME"
 

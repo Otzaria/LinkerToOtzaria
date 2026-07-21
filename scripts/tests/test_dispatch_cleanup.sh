@@ -53,7 +53,9 @@ emit_child_row() {  # constructed from the recorded dispatch; 3- or 5-col
 case "$1 $2" in
   "api --paginate")
       [ -z "${MOCK_LIST_FAIL:-}" ] || { echo "gh: HTTP 500" >&2; exit 1; }
-      if [[ "$all" == *"-f created="* ]]; then
+      if [[ "$all" == *"actions/runners"* ]]; then
+        [ -z "${MOCK_STALE_RUNNER:-}" ] || printf '44\tkaggle-old\tfalse\toffline\n'
+      elif [[ "$all" == *"-f created="* ]]; then
         emit_child_row 5
       elif [[ "$all" == *"-f status=queued"* ]]; then
         if [ -f "$MOCK_DIR/dispatched.env" ]; then emit_child_row 3
@@ -61,7 +63,10 @@ case "$1 $2" in
       elif [[ "$all" == *"workflows/relink.yml/runs"* ]]; then
         emit_child_row 5
       fi ;;
-  "api -X") echo "FAKEJIT" ;;
+  "api -X")
+      if [[ "$all" == *" DELETE "* ]]; then echo "DELETED" >> "$MOCK_LOG"
+      else echo "FAKEJIT"
+      fi ;;
   "workflow run")
       rid=""; lib=""; att=""; recovery=""
       while [ $# -gt 0 ]; do
@@ -118,6 +123,13 @@ check "push failure → child cancelled once, rc!=0" test "$rc" -ne 0 -a "$(canc
 export MOCK_LOG="$WORK/t4.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
 check "success → no cancel, rc=0" test "$rc" -eq 0 -a "$(cancels)" -eq 0
+check "request-specific JIT label → stale listener cannot steal child" \
+  test "$(grep -c "labels\[\]=request-$RID" "$MOCK_LOG")" -eq 1
+
+export MOCK_LOG="$WORK/t4-stale.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_STALE_RUNNER=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
+check "idle stale JIT registration → removed before new JIT" \
+  test "$rc" -eq 0 -a "$(grep -c DELETED "$MOCK_LOG")" -eq 1
 
 export MOCK_LOG="$WORK/t4-recovery.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" --recovery-mode ) >/dev/null 2>&1 || rc=$?

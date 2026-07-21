@@ -72,5 +72,7 @@ if "Preflight — verified Kaggle runtime handoff" not in workflow:
     raise SystemExit("relink job does not verify the runtime before downloading the snapshot")
 if 'cp --reflink=auto "$RUNTIME_MATCHES" "$LINKER_RUNTIME_ARCHIVE.tmp"' not in bootstrap:
     raise SystemExit("bootstrap does not materialize the input mount into worker-visible storage")
+if "format('request-{0}', inputs.relink_request_id)" not in workflow:
+    raise SystemExit("Kaggle job is not isolated to its request-specific JIT runner")
 PY
 echo "ok   JIT kernel attaches the exact reviewed runtime output"
