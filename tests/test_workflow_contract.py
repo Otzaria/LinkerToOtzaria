@@ -36,6 +36,18 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("members=artifact_members", segment)
         self.assertNotIn('latest_tag="$(gh release view', segment)
 
+    def test_attested_fingerprint_adoption_reaches_serial_recovery(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        segment = workflow.split('ARGS=(', 1)[1].split(
+            '"$SEF_PROJECT/.venv/bin/python" src/incremental.py', 1
+        )[0]
+        serial_branch, after_branch = segment.split("          fi\n", 1)
+        self.assertIn("--forbid-full-relink", serial_branch)
+        self.assertNotIn("--adopt-fingerprint", serial_branch)
+        self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', after_branch)
+
 
 if __name__ == "__main__":
     unittest.main()

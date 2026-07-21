@@ -479,8 +479,12 @@ jobs:
             ARGS+=(--engine-workers 2 --forbid-full-relink)
           else
             ARGS+=(--engine-workers 3)
-            [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
           fi
+          # An explicit OLD::NEW attestation is output-neutral by contract and is
+          # therefore valid in both standalone and serial recovery.  Keeping this
+          # outside the worker-count branch prevents a recovery from silently
+          # dropping the already-validated migration and demanding a full relink.
+          [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
           "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
