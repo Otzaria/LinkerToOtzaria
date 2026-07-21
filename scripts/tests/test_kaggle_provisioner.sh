@@ -46,6 +46,12 @@ if [ "$1" = api ]; then
       request=$(printf '%064d' 0 | tr 0 c)
       printf '9002\tcompleted\trelink request=%s parent=777:2\tdeadbeef\t2026-01-01T00:00:00Z\n' "$request"
     fi
+    if [ "$current" = 103 ] && [ -n "${DUPLICATE_CHILDREN:-}" ] && [[ "$joined" != *"status="* ]]; then
+      request=$(printf '%064d' 0 | tr 0 c)
+      printf '9002\tcompleted\trelink request=%s parent=777:2\tdeadbeef\t2026-01-01T00:00:00Z\n' "$request"
+      status=completed; [ "$DUPLICATE_CHILDREN" != active ] || status=in_progress
+      printf '9003\t%s\trelink-recovery request=%s parent=777:2\tdeadbeef\t2026-01-02T00:00:00Z\n' "$status" "$request"
+    fi
     exit 0
   fi
   if [[ "$joined" =~ actions/runs/([0-9]+) ]]; then
@@ -116,6 +122,24 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
 test "$rc" -ne 0
 test ! -e "$TMP/dispatch"
 echo "ok   legacy child title still consumes the same recovery request id"
+
+rm -f "$TMP/dispatch"
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 DUPLICATE_CHILDREN=terminal INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
+test ! -e "$TMP/dispatch"
+echo "ok   historical all-terminal duplicate children are consumed without poisoning scans"
+
+rm -f "$TMP/dispatch"
+rc=0
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 DUPLICATE_CHILDREN=active INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null 2>&1 || rc=$?
+test "$rc" -ne 0
+test ! -e "$TMP/dispatch"
+echo "ok   duplicate set with an active child remains fail-closed"
 
 rm -f "$TMP/dispatch"
 PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \

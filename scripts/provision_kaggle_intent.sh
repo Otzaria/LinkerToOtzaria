@@ -145,7 +145,21 @@ PY
   recovery_title="relink-recovery request=$request_id parent=$parent"
   matches=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$legacy_title" -v b="$recovery_title" '$3==a || $3==b')
   count=$(printf '%s\n' "$matches" | awk 'NF' | wc -l | tr -d ' ')
-  if [ "$count" -gt 1 ]; then echo "::error::duplicate relink children for intent $request_id"; exit 1; fi
+  if [ "$count" -gt 1 ]; then
+    # A short-lived pre-rollout bug allowed a failed child to be followed by a
+    # recovery child with the same request id. Those historical runs are all
+    # terminal and therefore cannot execute or be dispatched again; failing
+    # every scheduled scan forever would only poison admission for newer work.
+    # A duplicate set containing even one live child remains an invariant
+    # violation and fails loudly — never choose or cancel one by guesswork.
+    live_duplicates=$(printf '%s\n' "$matches" | awk -F'\t' '$2 != "completed"' | awk 'NF' | wc -l | tr -d ' ')
+    if [ "$live_duplicates" -gt 0 ]; then
+      echo "::error::duplicate relink children for intent $request_id include $live_duplicates active run(s)"
+      exit 1
+    fi
+    echo "::warning::historical intent $request_id has $count terminal children; treating it as consumed"
+    continue
+  fi
   if [ "$count" -eq 1 ]; then
     status=$(printf '%s\n' "$matches" | cut -f2)
     [ "$status" != completed ] && exit 0
