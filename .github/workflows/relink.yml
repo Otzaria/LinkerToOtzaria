@@ -476,7 +476,15 @@ jobs:
             --engine-fingerprint "$FINGERPRINT"
           )
           if [ -n "$LIBRARY_RUN_ID" ]; then
-            ARGS+=(--engine-workers 2 --forbid-full-relink)
+            # Each worker owns a full Sefaria process.  Kaggle's host RAM is
+            # variable and two workers were OOM-killed together in canary
+            # 29922788210.  Keep the GPU fed with one durable producer there;
+            # the dedicated server has enough memory for two.
+            case "$TARGET" in
+              kaggle) ARGS+=(--engine-workers 1) ;;
+              *) ARGS+=(--engine-workers 2) ;;
+            esac
+            ARGS+=(--forbid-full-relink)
           else
             ARGS+=(--engine-workers 3)
           fi
