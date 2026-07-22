@@ -182,55 +182,111 @@ def process_book(linker, bk, lines, skipped_log, heartbeat):
         heartbeat()
         if not batch:
             continue
-        words += sum(len(c.split()) for _, c in batch)
-        try:
-            docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
-            if len(docs) != len(batch):  # a short reply would silently drop tail lines
-                raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
-        except Exception:
-            if not ner_alive():
-                raise
-            # Batch failed but NER is alive: replay line-by-line to pinpoint the broken
-            # line, then FAIL the book on it (logged first, for diagnosis). A swallowed
-            # line would silently drop all its citations while the book counts as linked
-            # and the baseline advances past it — the bootstrap lost 216 lines this way.
-            docs = []
-            for li, c in batch:
-                try:
-                    docs.append(linker.bulk_link([c], type_filter="citation")[0])
-                except Exception as le:
-                    skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
-                    raise RuntimeError(
-                        f"line {li} failed to link: {type(le).__name__}: {le}") from le
-        for (line_index, content), doc in zip(batch, docs):
-            # Digest the exact content the offsets index, so the build can drop this line's
-            # links if the source book changed before Phase-2 applies them (cross-cycle drift).
-            src_hash = content_hash(content)
-            # spaCy spans are Python code-point offsets; the Kotlin consumer indexes the
-            # SAME content string in UTF-16 units. They diverge only past a non-BMP char
-            # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
-            has_non_bmp = any(ord(c) > 0xFFFF for c in content)
-            for rr in doc.resolved_refs:
-                try:
-                    ref = _pick_ref(rr)
-                    if ref is None:
-                        continue
-                    start, end = rr.raw_entity.span.range
-                    if has_non_bmp:
-                        start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
-                        end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
-                    records.append(LinkRecord(
-                        book_key=bk, line_index=line_index,
-                        start=start, end=end, target_ref=ref.normal(),
-                        source_hash=src_hash,
-                    ))
-                except Exception as ce:
-                    # A broken citation is OUR bug (resolver/normal()), not corpus noise —
-                    # fail the book loudly (logged first) instead of silently losing a link.
-                    skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
-                    raise RuntimeError(
-                        f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
+        batch_records, batch_words = process_batch(linker, bk, batch, skipped_log)
+        records.extend(batch_records)
+        words += batch_words
     return records, words
+
+
+def process_batch(linker, bk, batch, skipped_log):
+    """Link one transport batch. Output is independent of neighbouring batches."""
+    words = sum(len(c.split()) for _, c in batch)
+    try:
+        docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
+        if len(docs) != len(batch):  # a short reply would silently drop tail lines
+            raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
+    except Exception:
+        if not ner_alive():
+            raise
+        # Batch failed but NER is alive: replay line-by-line to pinpoint the broken
+        # line, then FAIL the book on it (logged first, for diagnosis). A swallowed
+        # line would silently drop all its citations while the book counts as linked
+        # and the baseline advances past it — the bootstrap lost 216 lines this way.
+        docs = []
+        for li, c in batch:
+            try:
+                docs.append(linker.bulk_link([c], type_filter="citation")[0])
+            except Exception as le:
+                skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
+                raise RuntimeError(
+                    f"line {li} failed to link: {type(le).__name__}: {le}") from le
+
+    records: list[LinkRecord] = []
+    for (line_index, content), doc in zip(batch, docs):
+        # Digest the exact content the offsets index, so the build can drop this line's
+        # links if the source book changed before Phase-2 applies them (cross-cycle drift).
+        src_hash = content_hash(content)
+        # spaCy spans are Python code-point offsets; the Kotlin consumer indexes the
+        # SAME content string in UTF-16 units. They diverge only past a non-BMP char
+        # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
+        has_non_bmp = any(ord(c) > 0xFFFF for c in content)
+        for rr in doc.resolved_refs:
+            try:
+                ref = _pick_ref(rr)
+                if ref is None:
+                    continue
+                start, end = rr.raw_entity.span.range
+                if has_non_bmp:
+                    start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
+                    end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
+                records.append(LinkRecord(
+                    book_key=bk, line_index=line_index,
+                    start=start, end=end, target_ref=ref.normal(),
+                    source_hash=src_hash,
+                ))
+            except Exception as ce:
+                # A broken citation is OUR bug (resolver/normal()), not corpus noise —
+                # fail the book loudly (logged first) instead of silently losing a link.
+                skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
+                raise RuntimeError(
+                    f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
+    return records, words
+
+
+def process_book_checkpointed(
+    linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
+):
+    """Link a book with an atomic checkpoint after every transport batch.
+
+    Large books can grow Sefaria's in-process Ref caches until the kernel OOM-kills
+    the worker.  Each completed batch is therefore written as an immutable JSONL
+    shard.  Once RSS crosses the cap, ``on_recycle`` execs a fresh worker image;
+    that image skips verified-complete shards and continues at the next batch.
+    The public per-book artifact is replaced atomically only after every shard is
+    present, so a crash can expose neither a partial new artifact nor a false done
+    marker.
+    """
+    from itertools import chain
+    from linker_artifact import read_artifact
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    shard_paths = []
+    total_words = 0
+    batches_this_life = 0
+    for i in range(0, len(lines), BATCH_LINES):
+        batch = [(li, c) for li, c in lines[i:i + BATCH_LINES] if c and len(c.strip()) > 1]
+        total_words += sum(len(c.split()) for _, c in batch)
+        heartbeat()
+        shard = os.path.join(checkpoint_dir, f"{i:012d}.jsonl")
+        shard_paths.append(shard)
+        if os.path.exists(shard):
+            continue
+        records, _ = process_batch(linker, bk, batch, skipped_log) if batch else ([], 0)
+        write_artifact(shard, records)
+        batches_this_life += 1
+        # Drop batch-local resolved documents before measuring current RSS.  The
+        # long-lived Sefaria caches remain; those are precisely what exec recycles.
+        del records
+        import gc
+        gc.collect()
+        current_rss = rss_bytes()
+        if recycle_needed(current_rss, RSS_CAP, batches_this_life):
+            on_recycle(current_rss, batches_this_life)
+            raise RuntimeError("worker recycle callback returned unexpectedly")
+
+    records = chain.from_iterable(read_artifact(path) for path in shard_paths)
+    count = write_artifact(out_path, records)
+    return count, total_words
 
 
 # Bavli-convention flag is read once into a module global by main().
@@ -264,7 +320,7 @@ def main():
     _BAVLI_CONVENTION = args.bavli_convention
 
     run = args.run_dir
-    for d in ("done", "claim", "logs", "failed", "worker-heartbeats"):
+    for d in ("done", "claim", "logs", "failed", "worker-heartbeats", "checkpoints"):
         os.makedirs(os.path.join(run, d), exist_ok=True)
     heartbeat_path = os.path.join(run, "worker-heartbeats", args.label)
 
@@ -375,11 +431,27 @@ def main():
                 break  # another live worker owns it — it will mark done/failed
             lines = book_lines(con, bk)
             out_path = os.path.join(args.repo, book_key_to_relpath(bk))
+            checkpoint_dir = os.path.join(run, "checkpoints", cid)
             t0 = time.time()
             try:
                 worker_heartbeat()
                 wait_for_ner(log)
-                records, words = process_book(linker, bk, lines, skipped_log, lambda: heartbeat(cid))
+
+                def recycle_worker(current_rss, batches):
+                    log(
+                        f"recycling mid-book (current RSS {current_rss} over cap "
+                        f"{int(RSS_CAP)}) after {batches} checkpointed batch(es) this life"
+                    )
+                    # The next exec (or a peer) must be able to claim the same book
+                    # immediately and resume its immutable batch shards.
+                    release_claim(cid)
+                    con.close()
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+                record_count, words = process_book_checkpointed(
+                    linker, bk, lines, skipped_log, lambda: heartbeat(cid),
+                    checkpoint_dir, out_path, recycle_worker,
+                )
             except Exception as e:
                 if not ner_alive():
                     # Infrastructure outage, not a book problem: release the claim, wait
@@ -404,13 +476,13 @@ def main():
             # Atomic per-book output: write the artifact only when the whole book is linked.
             # A book with zero links writes no file (kept clean); a previously-linked book
             # that now yields nothing has its stale artifact removed.
-            if records:
-                write_artifact(out_path, records)
-            elif os.path.exists(out_path):
+            if record_count == 0 and os.path.exists(out_path):
                 os.remove(out_path)
             open(os.path.join(run, "done", cid), "w").close()
+            import shutil
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
             processed += 1
-            log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={len(records)} {time.time()-t0:.1f}s")
+            log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
             worker_heartbeat()
             break
 

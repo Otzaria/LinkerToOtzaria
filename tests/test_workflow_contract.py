@@ -62,6 +62,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("kaggle) ARGS+=(--engine-workers 1) ;;", segment)
         self.assertIn("*) ARGS+=(--engine-workers 2) ;;", segment)
         self.assertIn("ARGS+=(--forbid-full-relink)", segment)
+        self.assertIn("LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}", workflow)
+        self.assertIn("inputs.library_run_id != '' && '1' || '2'", workflow)
 
 
 if __name__ == "__main__":

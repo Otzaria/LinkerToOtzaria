@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -27,6 +28,54 @@ class WorkerMemoryTest(unittest.TestCase):
     def test_recycle_only_after_progress(self):
         self.assertFalse(link_books.recycle_needed(current_rss=100, cap=100, processed=0))
         self.assertTrue(link_books.recycle_needed(current_rss=101, cap=100, processed=1))
+
+    def test_checkpointed_book_resumes_after_mid_book_recycle(self):
+        class Doc:
+            resolved_refs = []
+
+        class Linker:
+            def __init__(self):
+                self.calls = []
+
+            def bulk_link(self, texts, type_filter):
+                self.calls.append(list(texts))
+                return [Doc() for _ in texts]
+
+        class RecycleSignal(Exception):
+            pass
+
+        bk = link_books.BookKey("source", "giant")
+        lines = [(i, f"line {i}") for i in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "checkpoint")
+            output = os.path.join(tmp, "artifacts", "giant.jsonl")
+            first = Linker()
+            with mock.patch.object(link_books, "BATCH_LINES", 2), \
+                    mock.patch.object(link_books, "RSS_CAP", 100), \
+                    mock.patch.object(link_books, "rss_bytes", return_value=101):
+                with self.assertRaises(RecycleSignal):
+                    link_books.process_book_checkpointed(
+                        first, bk, lines, lambda _line: None, lambda: None,
+                        checkpoint, output,
+                        lambda _rss, _batches: (_ for _ in ()).throw(RecycleSignal()),
+                    )
+            self.assertEqual(first.calls, [["line 0", "line 1"]])
+            self.assertTrue(os.path.exists(os.path.join(checkpoint, "000000000000.jsonl")))
+            self.assertFalse(os.path.exists(output), "partial book became publicly visible")
+
+            second = Linker()
+            with mock.patch.object(link_books, "BATCH_LINES", 2), \
+                    mock.patch.object(link_books, "RSS_CAP", 100), \
+                    mock.patch.object(link_books, "rss_bytes", return_value=0):
+                count, words = link_books.process_book_checkpointed(
+                    second, bk, lines, lambda _line: None, lambda: None,
+                    checkpoint, output,
+                    lambda _rss, _batches: self.fail("unexpected second recycle"),
+                )
+            self.assertEqual(second.calls, [["line 2", "line 3"], ["line 4"]])
+            self.assertEqual(count, 0)
+            self.assertEqual(words, 10)
+            self.assertTrue(os.path.exists(output))
 
 
 if __name__ == "__main__":

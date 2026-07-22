@@ -424,8 +424,12 @@ jobs:
       # freeing ~3GB of models for whatever resumes on the shared host either way.
       - name: Bring up the stack + incremental re-link (heavy phase, host-leased)
         env:
-          # Lean under a waiting build (shared 24GB host), full when standalone.
-          NER_WORKERS: ${{ inputs.library_run_id != '' && '2' || (inputs.target == 'kaggle' && '2' || '3') }}
+          # Kaggle serial deltas use one NER process and smaller transport batches:
+          # the 31GB canary still OOM-killed a single engine inside one giant book
+          # when two model-serving workers and 100-line requests shared the VM.
+          # Standalone Kaggle and the 24GB server retain their measured parallelism.
+          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.library_run_id != '' && '2' || '3') }}
+          LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
           # Shared, pre-provisioned via /etc/tmpfiles.d/otzaria-pipeline.conf on the
           # box (1777 dir, recreated on boot) — same path the SeforimLibrary build
           # holds; never a user-owned /tmp file a cleaner could unlink mid-hold.

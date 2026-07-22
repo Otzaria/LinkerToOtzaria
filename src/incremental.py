@@ -362,7 +362,7 @@ def run_incremental(args) -> int:
         # marker → baseline would advance as if it linked → orphan. So we never depend on external
         # workspace cleanup: we clear them ourselves. (logs/ is append-only diagnostics — kept.)
         import shutil
-        for d in ("done", "claim", "failed"):
+        for d in ("done", "claim", "failed", "checkpoints"):
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         with open(only, "w", encoding="utf-8") as fh:
