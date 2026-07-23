@@ -278,15 +278,16 @@ def _log(msg):
     print(f"[incremental] {msg}", flush=True)
 
 
-def run_incremental(args) -> int:
-    """End-to-end incremental update. Returns the number of books re-linked."""
+def compute_incremental_plan(args) -> dict:
+    """Compute the immutable work plan without touching artifacts or baseline state.
+
+    The GPU producer and CPU resolver both call this exact function.  Keeping one
+    planner is a correctness boundary: a transport split must never let Kaggle
+    recognize one set of books while the resolver advances a different set.
+    """
     repo = os.path.abspath(args.repo)
     baseline_dir = os.path.join(repo, "baseline")
-    os.makedirs(baseline_dir, exist_ok=True)
-    artifacts_dir = os.path.join(repo, "artifacts")
-    os.makedirs(artifacts_dir, exist_ok=True)
-
-    # 1. Diff the CURRENT snapshot's per-book content hashes against the baseline.
+    # Diff the CURRENT snapshot's per-book content hashes against the baseline.
     #    A changed engine fingerprint invalidates the WHOLE baseline (full relink):
     #    the engine version shapes the output, so a partial relink under a new engine
     #    would leave the artifact store a mix of engines. The `removed` plan still uses
@@ -333,6 +334,60 @@ def run_incremental(args) -> int:
                  f"({stored_fingerprint!r} -> {fingerprint!r}) — FULL relink")
             changed = [BookKey(s, t) for (s, t) in sorted(current)]
     _log(f"snapshot: {len(current)} books | changed/new={len(changed)} removed={len(removed)}")
+    return {
+        "current": current,
+        "changed": changed,
+        "removed": removed,
+        "engine_fingerprint": fingerprint,
+        "stored_engine_fingerprint": stored_fingerprint,
+    }
+
+
+def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
+    """Write the GPU→resolver planning contract as canonical, duplicate-free JSON."""
+    import re
+
+    if not re.fullmatch(r"[0-9a-f]{64}", relink_request_id or ""):
+        raise RuntimeError("--relink-request-id must be exactly 64 lowercase hex characters")
+    plan = compute_incremental_plan(args)
+    current = plan["current"]
+    document = {
+        "schema_version": 1,
+        "relink_request_id": relink_request_id,
+        "snapshot_sha256": sha256_of_file(args.snapshot),
+        "changelog_sha256": sha256_of_file(args.changelog) if args.changelog else None,
+        "engine_fingerprint": plan["engine_fingerprint"],
+        "changed": [book.to_dict() for book in plan["changed"]],
+        "removed": [book.to_dict() for book in plan["removed"]],
+        "current_books": [
+            {"source_name": source, "canonical_he_title": title, "hash": digest}
+            for (source, title), digest in sorted(current.items())
+        ],
+    }
+    parent = os.path.dirname(os.path.abspath(output))
+    os.makedirs(parent, exist_ok=True)
+    tmp = output + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, output)
+    _log(f"wrote immutable split plan: {len(plan['changed'])} changed book(s) -> {output}")
+    return len(plan["changed"])
+
+
+def run_incremental(args) -> int:
+    """End-to-end incremental update. Returns the number of books re-linked."""
+    repo = os.path.abspath(args.repo)
+    baseline_dir = os.path.join(repo, "baseline")
+    os.makedirs(baseline_dir, exist_ok=True)
+    artifacts_dir = os.path.join(repo, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    plan = compute_incremental_plan(args)
+    current = plan["current"]
+    changed = plan["changed"]
+    removed = plan["removed"]
+    fingerprint = plan["engine_fingerprint"]
 
     # 2. Target en-renames: rewrite target_ref across ALL artifacts (no linking). Target-only.
     # The changelog_diff.json contract (SefariaExport generate_changelog.py) nests the book
@@ -366,7 +421,13 @@ def run_incremental(args) -> int:
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         with open(only, "w", encoding="utf-8") as fh:
-            json.dump([b.to_dict() for b in changed], fh, ensure_ascii=False)
+            json.dump([
+                {
+                    **book.to_dict(),
+                    "hash": current[(book.source_name, book.canonical_he_title)],
+                }
+                for book in changed
+            ], fh, ensure_ascii=False)
         _log(f"re-linking {len(changed)} changed books")
         codes = _run_engine(args, only)
         failed = read_failed_books(args.run_dir)
@@ -472,6 +533,13 @@ def _run_engine(args, only_books_path):
                 "--run-dir", os.path.abspath(args.run_dir), "--only-books", os.path.abspath(only_books_path)]
     if args.bavli_convention:
         base_cmd.append("--bavli-convention")
+    ner_bundle_dir = getattr(args, "ner_bundle_dir", None)
+    if ner_bundle_dir:
+        base_cmd += [
+            "--ner-bundle-dir", os.path.abspath(ner_bundle_dir),
+            "--expected-engine-fingerprint", args.engine_fingerprint or "",
+            "--expected-relink-request-id", args.relink_request_id or "",
+        ]
     env = dict(os.environ, PYTHONPATH=args.sef_project + ":" + os.environ.get("PYTHONPATH", ""))
     workers = max(1, int(getattr(args, "engine_workers", 1) or 1))
     _log(f"running engine ({workers} worker(s)): " + " ".join(base_cmd))
@@ -621,8 +689,20 @@ def main():
     ap.add_argument("--adopt-fingerprint", default=None, metavar="OLD::NEW",
                     help="operator-attested migration: re-stamp the baseline fingerprint "
                          "WITHOUT a full relink; both strings must match exactly")
+    ap.add_argument("--ner-bundle-dir", default=None,
+                    help="verified raw-NER bundle directory; resolve without a live GPU service")
+    ap.add_argument("--plan-only", default=None, metavar="PATH",
+                    help="write the immutable changed-book plan and exit without mutation")
+    ap.add_argument("--relink-request-id", default=None,
+                    help="64-hex correlation key embedded in --plan-only output")
     args = ap.parse_args()
     install_terminate_handler()
+    if args.plan_only:
+        n = write_incremental_plan(args, args.plan_only, args.relink_request_id)
+        _log(f"plan complete: {n} books require NER")
+        return
+    if args.relink_request_id and not args.ner_bundle_dir:
+        ap.error("--relink-request-id without --plan-only requires --ner-bundle-dir")
     n = run_incremental(args)
     _log(f"done: {n} books re-linked")
 

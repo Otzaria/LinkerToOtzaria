@@ -17,6 +17,11 @@ CACHE="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}"
 SEF="$STACK/Sefaria-Project"
 GPU="$STACK/gpu-server"
 NER_URL="http://127.0.0.1:5051/recognize-entities"
+STACK_ROLE="${LINKER_STACK_ROLE:-full}"
+case "$STACK_ROLE" in
+  full|ner|resolver) ;;
+  *) echo "::error::LINKER_STACK_ROLE must be full, ner, or resolver"; exit 2 ;;
+esac
 mkdir -p "$STACK" "$CACHE"
 
 # Kaggle chooses the mount directory for a kernel output. Discover by the pinned
@@ -135,7 +140,6 @@ grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://loc
 # new dump, must not survive into the restored state.
 DUMP_TAG="${LINKER_DUMP_TAG:-dump-v1}"
 DUMP_REPO="${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}"
-pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
 # Content-addressed dump identity: ALWAYS computed from the SHA256SUMS asset,
 # BEFORE any cache decision. A tag-keyed marker once let a stale server cache
 # fingerprint the same dump differently than a fresh Kaggle session (empty
@@ -146,7 +150,10 @@ rm -rf "$CACHE/dump-sums" && mkdir -p "$CACHE/dump-sums"
 gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p SHA256SUMS -D "$CACHE/dump-sums"
 DUMP_CONTENT_ID="$(sha256sum "$CACHE/dump-sums/SHA256SUMS" | cut -c1-16)"
 DUMP_MARKER="$CACHE/.dump-restored-content-$DUMP_CONTENT_ID"
-if [ ! -f "$DUMP_MARKER" ]; then
+if [ "$STACK_ROLE" != ner ]; then
+  pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
+fi
+if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
   rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
   gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
   cp "$CACHE/dump-sums/SHA256SUMS" "$CACHE/dump-dl/SHA256SUMS"
@@ -240,7 +247,13 @@ NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
 NER_SCOPE_MODE="${LINKER_NER_SCOPE_MODE:-0600}"
 PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
-if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
+if [ "$STACK_ROLE" = resolver ]; then
+  # The CPU resolver deliberately has no model server in memory.  This runs under
+  # the shared host lease, so stopping the exact owned group cannot race another job.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
+elif [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
   # Stop only an identity-bound process group.  A pre-migration gunicorn without
   # scope state is never killed heuristically; a live port below fails loudly and
   # requires one explicit operator cleanup.
@@ -257,7 +270,7 @@ if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
     exit 1
   fi
 fi
-if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
+if [ "$STACK_ROLE" != resolver ] && ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
   # A same-fingerprint master may have become unhealthy while descendants still
   # exist. Reap its verified group before starting a replacement; never overlap
@@ -290,13 +303,15 @@ if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
   done
   curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
     -d '{"text":"בדיקה","lang":"he"}' >/dev/null || { echo "::error::NER did not come up"; tail -50 "$CACHE/gunicorn.log"; exit 1; }
-else
+elif [ "$STACK_ROLE" != resolver ]; then
   python3 "$PROCESS_SCOPE" check --state "$NER_SCOPE" --expect 'app:create_app()' || {
     echo "::error::healthy :5051 service lacks valid process ownership state; refusing to adopt it"
     exit 1
   }
 fi
-printf '%s' "$NER_ID" > "$NER_MARKER"
+if [ "$STACK_ROLE" != resolver ]; then
+  printf '%s' "$NER_ID" > "$NER_MARKER"
+fi
 
 # ── 6. Engine fingerprint (consumed by relink.yml → incremental --engine-fingerprint) ─
 # Everything that shapes linker OUTPUT: the two upstream checkouts, the model wheels,
@@ -308,12 +323,18 @@ printf '%s' "$NER_ID" > "$NER_MARKER"
   echo "gpu-server=$(git -C "$GPU" rev-parse HEAD)"
   echo "python_runtime=$PYTHON_RUNTIME_ID"
   echo "dump=$DUMP_CONTENT_ID"
-  echo "engine_src=$(cat "${LINKER_REPO:-$PWD}/src/link_books.py" "${LINKER_REPO:-$PWD}/src/linker_artifact.py" "${LINKER_REPO:-$PWD}/src/incremental.py" | sha256sum | cut -c1-16)"
+  echo "engine_src=$(cat \
+    "${LINKER_REPO:-$PWD}/src/link_books.py" \
+    "${LINKER_REPO:-$PWD}/src/linker_artifact.py" \
+    "${LINKER_REPO:-$PWD}/src/incremental.py" \
+    "${LINKER_REPO:-$PWD}/src/ner_handoff.py" \
+    "${LINKER_REPO:-$PWD}/src/precompute_ner.py" \
+    | sha256sum | cut -c1-16)"
   for name in he_ref_ner he_subref_ner; do
     whl=$(find "$MODELS" -name "${name}-*.whl" | head -1)
     echo "${name}=$(sha256sum "$whl" | cut -c1-16)"
   done
 } > "$STACK/engine_fingerprint.txt"
 
-echo "stack up: Sefaria venv=$SEF/.venv, NER=$NER_URL"
+echo "stack up: role=$STACK_ROLE Sefaria venv=$SEF/.venv NER=$([ "$STACK_ROLE" = resolver ] && echo disabled || echo "$NER_URL")"
 echo "engine fingerprint:"; cat "$STACK/engine_fingerprint.txt"

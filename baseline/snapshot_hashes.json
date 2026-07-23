@@ -36431,5 +36431,5 @@
 "source_name": "wikisourceToOtzaria"
 }
 ],
-"engine_fingerprint": "dump=44e55916743983b8;engine_src=d0b892dc71b0a705;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
+"engine_fingerprint": "dump=44e55916743983b8;engine_src=1851a27d5b7ff66c;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
 }

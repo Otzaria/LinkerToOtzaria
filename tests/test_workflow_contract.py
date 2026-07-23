@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 import unittest
 
@@ -40,43 +42,75 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
         )
-        segment = workflow.split('ARGS=(', 1)[1].split(
-            '"$SEF_PROJECT/.venv/bin/python" src/incremental.py', 1
-        )[0]
-        serial_branch, after_branch = segment.split(
-            "          # An explicit OLD::NEW attestation", 1
-        )
-        self.assertIn("--forbid-full-relink", serial_branch)
-        self.assertNotIn("--adopt-fingerprint", serial_branch)
-        self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', after_branch)
+        self.assertIn('PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', workflow)
+        self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', workflow)
+        self.assertGreaterEqual(workflow.count("--forbid-full-relink"), 2)
 
-    def test_serial_kaggle_relink_admits_bounded_workers_by_actual_memory(self):
+    def test_kaggle_is_ner_only_and_resolution_runs_on_server(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
         )
-        args_segment = workflow.split("          ARGS=(", 1)[1].split(
-            '"$SEF_PROJECT/.venv/bin/python" src/incremental.py', 1
-        )[0]
-        segment = args_segment.split('if [ -n "$LIBRARY_RUN_ID" ]; then', 1)[1].split(
-            "          # An explicit OLD::NEW attestation", 1
-        )[0]
-        self.assertIn('case "$TARGET" in', segment)
-        self.assertIn("MEM_TOTAL_KIB=", segment)
-        self.assertIn('[ "$MEM_TOTAL_KIB" -ge 24000000 ]', segment)
-        self.assertIn("ENGINE_WORKERS=2", segment)
-        self.assertIn("ENGINE_WORKERS=1", segment)
-        self.assertIn('ARGS+=(--engine-workers "$ENGINE_WORKERS")', segment)
-        self.assertIn("*) ARGS+=(--engine-workers 2) ;;", segment)
-        self.assertIn("ARGS+=(--forbid-full-relink)", segment)
-        self.assertIn("LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}", workflow)
-        self.assertIn("inputs.library_run_id != '' && '1' || '2'", workflow)
+        self.assertIn("export LINKER_STACK_ROLE=ner", workflow)
+        self.assertIn("src/precompute_ner.py", workflow)
+        self.assertIn("--workers 2", workflow)
+        self.assertIn("name: Resolve raw NER on the durable CPU host", workflow)
+        self.assertIn("runs-on: [self-hosted, Linux, ARM64, server-2]", workflow)
+        self.assertIn("LINKER_STACK_ROLE: resolver", workflow)
+        self.assertIn("--ner-bundle-dir", workflow)
+        self.assertIn("--engine-workers 2", workflow)
+        self.assertIn("LINKER_BATCH_LINES: 25", workflow)
+        self.assertIn("flock -w 3600 9", workflow)
 
     def test_serial_kaggle_timeout_fits_ephemeral_session(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("inputs.target == 'kaggle' && 525 || 480", workflow)
-        self.assertIn("below the ephemeral session's ~9h lifetime", workflow)
+        self.assertIn("inputs.target == 'kaggle' && 90", workflow)
+        self.assertIn("--deadline-seconds 3600", workflow)
+        self.assertIn("compression-level: 0", workflow)
+        self.assertIn("Pack resumable NER checkpoint after bounded failure", workflow)
+        self.assertIn("Restore exact prior-attempt NER checkpoint", workflow)
+        self.assertIn("Kaggle now performs NER only", workflow)
+
+    def test_resolver_only_recovery_uses_exact_producer_artifact(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("raw_ner_source_run_id:", workflow)
+        self.assertIn("raw_ner_source_run_attempt:", workflow)
+        self.assertIn("Validate exact raw-NER recovery source", workflow)
+        self.assertIn("raw-ner-handoff-{0}-{1}", workflow)
+        self.assertIn("run-id: ${{ inputs.raw_ner_source_run_id || github.run_id }}", workflow)
+        self.assertIn("needs.relink.outputs.raw_ner_artifact_name", workflow)
+
+    def test_gpu_producer_does_not_import_mongo_bound_sefaria_model(self):
+        producer = (Path(__file__).parents[1] / "src/precompute_ner.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("from sefaria.model", producer)
+        self.assertNotIn("django.setup", producer)
+        self.assertIn("from sefaria.helper.normalization import NormalizerComposer", producer)
+
+    def test_committed_fingerprint_matches_split_engine_sources(self):
+        root = Path(__file__).parents[1]
+        digest = hashlib.sha256()
+        for relative_path in (
+            "src/link_books.py",
+            "src/linker_artifact.py",
+            "src/incremental.py",
+            "src/ner_handoff.py",
+            "src/precompute_ner.py",
+        ):
+            digest.update((root / relative_path).read_bytes())
+        engine_component = f"engine_src={digest.hexdigest()[:16]}"
+
+        baseline = json.loads((root / "baseline/snapshot_hashes.json").read_text())
+        metadata = json.loads((root / "meta.json").read_text())
+        baseline_fingerprint = baseline["engine_fingerprint"]
+        metadata_fingerprint = metadata["engine"]["fingerprint"]
+
+        self.assertEqual(baseline_fingerprint, metadata_fingerprint)
+        self.assertIn(engine_component, baseline_fingerprint)
 
 
 if __name__ == "__main__":

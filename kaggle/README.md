@@ -1,8 +1,13 @@
 # Kaggle — הזרוע הענן של הלינקר
 
-‏session חד-פעמי של Kaggle‏ (GPU + אינטרנט) נרשם כ-GitHub JIT runner‏ (job אחד בדיוק),
-מריץ את relink.yml הרגיל במלואו — אותו stack, אותם שערים (fingerprint, ‏linkerStrict,
-‏publish→baseline) — ונמחק כליל בסיומו. אין מה לנקות ואין מצב שנשאר.
+‏session חד-פעמי של Kaggle‏ (GPU + אינטרנט) נרשם כ-GitHub JIT runner‏ (job אחד בדיוק).
+הוא מריץ **רק NER** על הספרים ששונו ומעלה handoff גולמי, ממופתֵח-תוכן ומוצמד
+ל-snapshot/fingerprint/request. שלב `resolve` נפרד מוריד אותו לשרת Oracle, פותר את
+ה-refs על CPU תחת ה-host lease, ורק אחריו מופעל ה-publisher.
+
+ל-job של Kaggle תקרה של 90 דקות, אך מפיק ה-NER עוצר אחרי 60 דקות כדי להשאיר זמן
+לאריזה ולהעלאה. אם לא סיים, נשמר checkpoint פר-ספר; rerun של אותו workflow
+databaseId ממשיך ממנו ולא מתחיל מאפס.
 
 ## שיגור
 
@@ -16,8 +21,8 @@
 
 | תרחיש | יעד |
 |---|---|
-| ‏relink סריאלי בתוך בנייה שבועית (החלטת בעלים 19/07/2026) | קגל — ‏manual-generate-release משגר דרך kaggle-relink.yml עם library_run_id; מרחיק את העבודה ממארח הבנייה |
-| ‏relink עצמאי / עומס כבד | קגל |
+| ‏relink סריאלי בתוך בנייה שבועית | NER בקגל; resolution+publish בשרת |
+| ‏relink עצמאי / עומס כבד | NER בקגל; resolution בשרת |
 | שיגור ידני כשקגל לא זמין | שרת (‏target=server) |
 | ‏relink מלא של כל הקורפוס | אף אחד מהם ישירות — ראו למטה |
 
@@ -31,10 +36,22 @@
 
 - העומס הוא **resolution-bound, לא NER-bound**: ‏GPU T4 נתן ‏7.2M מילים/שעה מול ‏6.4M
   על ה-ARM — ההאצה זניחה כי צוואר-הבקבוק הוא פייתון/CPU‏ (4 ליבות בשני המקומות).
+- לכן זמן ה-GPU מוקדש לזיהוי בלבד. השרת אינו טוען את מודלי ה-NER בשלב הפתרון,
+  ו-Kaggle אינו מעלה Mongo או מריץ Django/model resolution.
 - ‏relink מלא = ‏~421M מילים ≈ ‏58 שעות ≈ פי-2 ממכסת ה-GPU השבועית (30h) — לא ריאלי
   ב-session בודד (תקרה ~9h). לשינויי-מנוע שהם output-neutral יש מסלול מוסדר:
   ‏`--adopt-fingerprint OLD::NEW`‏ (אטסטציית מפעיל, ראו incremental.py). שינוי מנוע
   שמחייב באמת relink מלא ידרוש פריסה על sessions‏ (--max-books, טרם ממומש) או את השרת.
+
+## שחזור בלי לשלם שוב על GPU
+
+- כשל/timeout בזמן NER: הפעילו `Re-run failed jobs` על אותו run. attempt חדש מאתר
+  checkpoint יחיד מן ה-attempt הקודם, מאמת את זהותו וממשיך ממנו.
+- כשל בשלב `resolve` אחרי שה-handoff הגולמי עלה: אין להריץ NER שוב. שגרו
+  `relink.yml` ישירות עם `target=kaggle`, ‏`recovery_mode=true`,
+  ‏`raw_ner_source_run_id` ו-`raw_ner_source_run_attempt` של המפיק המקורי, יחד עם
+  אותן קואורדינטות parent/request/pins. ה-workflow דורש source failed מדויק, commit
+  זהה, parent failed מדויק ו-artifact יחיד; תוכן ה-handoff נבדק שוב לפני פתרון.
 
 ## מלכודות סביבת Kaggle (כולן מטופלות ב-bootstrap.sh)
 
