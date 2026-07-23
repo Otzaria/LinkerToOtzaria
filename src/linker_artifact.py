@@ -181,20 +181,33 @@ def read_artifact(path: str) -> Iterator[LinkRecord]:
 def write_artifact(path: str, records: Iterable[LinkRecord]) -> int:
     """Write all records for a single book to `path`. Asserts every record shares the
     same book_key (one file per book). Returns the number of records written."""
-    recs = list(records)
-    keys = {r.book_key for r in recs}
-    if len(keys) > 1:
-        raise ValueError(f"write_artifact: {path} received {len(keys)} distinct book_keys; expected 1")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # Atomic: write to a PROCESS-UNIQUE temp then rename, so a crash/steal mid-write never
     # leaves a truncated artifact — readers only ever see a complete file (or the previous
     # one). The pid suffix keeps two workers racing the same book (stale-claim steal) from
     # sharing one temp file and interleaving / breaking each other's os.replace.
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        for r in recs:
-            fh.write(json.dumps(r.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
-    return len(recs)
+    count = 0
+    book_key = None
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for r in records:
+                if book_key is None:
+                    book_key = r.book_key
+                elif r.book_key != book_key:
+                    raise ValueError(
+                        f"write_artifact: {path} received records for distinct book_keys; "
+                        "expected one book"
+                    )
+                fh.write(json.dumps(r.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
+                count += 1
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    return count

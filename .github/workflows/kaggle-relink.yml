@@ -1,14 +1,16 @@
 # Launch a relink on a fresh Kaggle GPU session — the cloud arm of the linker.
 #
-# Wraps scripts/dispatch_kaggle_relink.sh (the exact flow the operator runs locally):
-# register a one-job JIT runner, queue relink.yml with target=kaggle, push the private
-# kernel (GPU + internet) that boots into the runner and picks the job up. The session
-# dies with the job; nothing persists on Kaggle.
+# Durable intake only: validates and stores an immutable intent artifact, then wakes
+# kaggle-provisioner.yml.  The singleton provisioner runs the actual JIT + relink queue
+# + private-kernel push only when Linker capacity is free.
 #
 # Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
 # KAGGLE_API_TOKEN (a Kaggle API token, KGAT_…; the OAuth credentials file breaks on
 # expiry and on dataset APIs, the token does not).
 name: kaggle-relink
+# Same exact-match identity shape as relink.yml (request= + parent=). Do not change it
+# without updating the intent validator, provisioner and parent cleanup consumers.
+run-name: "kaggle-relink request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"
 
 on:
   workflow_dispatch:
@@ -20,6 +22,17 @@ on:
           that exact waiting build. Empty = standalone relink.
         required: false
         default: ''
+      relink_request_id:
+        description: >
+          Deterministic per-attempt correlation id (64-hex) from the dispatching build —
+          stamped into this run-name and forwarded to relink.yml. Empty (standalone) =
+          the dispatch script derives one itself.
+        required: false
+        default: ''
+      parent_run_attempt:
+        description: The dispatching build's run attempt — forwarded to relink.yml (serial mode).
+        required: false
+        default: ''
       sefaria_tag:
         description: Pinned SefariaExport tag — forwarded to relink.yml (serial mode).
         required: false
@@ -28,18 +41,45 @@ on:
         description: SHA-256 of lines_snapshot.db.zst — forwarded to relink.yml to verify the handoff.
         required: false
         default: ''
+      sefaria_release_metadata_sha256:
+        description: SHA-256 of the pinned SefariaExport release_metadata.json — forwarded to content-verify the changelog.
+        required: false
+        default: ''
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).
         required: false
         default: false
         type: boolean
+      recovery_mode:
+        description: >
+          Explicitly reuse the exact snapshot artifact of a failed terminal SeforimLibrary
+          attempt. The provisioner still requires an exact, unsuperseded parent attempt,
+          a non-success conclusion, one unexpired snapshot artifact, and no matching child.
+        required: false
+        default: false
+        type: boolean
+      adopt_fingerprint:
+        description: >
+          Operator-attested output-neutral engine migration OLD::NEW. Forwarded
+          unchanged to relink.yml; empty for normal runs.
+        required: false
+        default: ''
 
-permissions: {}
+permissions:
+  contents: read
+  actions: write
+
+# Intake is cheap and persist-all: every request becomes an immutable run artifact.
+# A separate singleton provisioner selects one pending intent only when capacity exists.
+concurrency:
+  group: kaggle-intent-intake
+  cancel-in-progress: false
+  queue: max
 
 jobs:
-  dispatch:
+  persist-intent:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
     steps:
@@ -50,15 +90,86 @@ jobs:
           token: ${{ secrets.PIPELINE_TOKEN }}
           persist-credentials: false
 
-      - name: Kaggle CLI
-        run: pip install --quiet kaggle
-
-      - name: Register JIT runner, queue relink, push kernel
+      # Inputs reach the shell ONLY via env (never interpolated into the script body —
+      # a crafted input would otherwise become a command before any validation runs;
+      # this job holds a PAT and the Kaggle token). Values are validated and passed as
+      # a quoted Bash argv array; the dispatch script re-validates every one of them.
+      - name: Validate and persist immutable intent
+        id: intent
         env:
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-        run: >
-          bash scripts/dispatch_kaggle_relink.sh
-          ${{ inputs.dry_run && '--dry-run' || '' }}
-          ${{ inputs.library_run_id != '' && format('--library-run-id {0}', inputs.library_run_id) || '' }}
-          ${{ inputs.sefaria_tag != '' && format('--sefaria-tag {0}', inputs.sefaria_tag) || '' }}
-          ${{ inputs.snapshot_sha256 != '' && format('--snapshot-sha256 {0}', inputs.snapshot_sha256) || '' }}
+          IN_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          IN_RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
+          IN_LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          IN_RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          IN_PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          IN_SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          IN_SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          IN_SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          IN_ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+        run: |
+          set -euo pipefail
+          [ -z "$IN_LIBRARY_RUN_ID" ] || [[ "$IN_LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::library_run_id must be a positive integer"; exit 1; }
+          [ -z "$IN_RELINK_REQUEST_ID" ] || [[ "$IN_RELINK_REQUEST_ID" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::relink_request_id must be 64-hex"; exit 1; }
+          [ -z "$IN_PARENT_RUN_ATTEMPT" ] || [[ "$IN_PARENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::parent_run_attempt must be a positive integer"; exit 1; }
+          [ -z "$IN_SEFARIA_TAG" ] || [[ "$IN_SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::sefaria_tag has an invalid shape"; exit 1; }
+          [ -z "$IN_SNAPSHOT_SHA256" ] || [[ "$IN_SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::snapshot_sha256 must be 64-hex"; exit 1; }
+          [ -z "$IN_SEFARIA_METADATA_SHA256" ] || [[ "$IN_SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
+          [ -z "$IN_ADOPT_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$IN_ADOPT_FINGERPRINT"
+          if [ -n "$IN_LIBRARY_RUN_ID" ]; then
+            [ -n "$IN_RELINK_REQUEST_ID" ] && [ -n "$IN_PARENT_RUN_ATTEMPT" ] && \
+              [ -n "$IN_SEFARIA_TAG" ] && [ -n "$IN_SNAPSHOT_SHA256" ] && \
+              [ -n "$IN_SEFARIA_METADATA_SHA256" ] || {
+                echo "::error::serial intent requires request id, parent attempt, Sefaria tag, snapshot digest, and metadata digest"
+                exit 1
+              }
+          elif [ -n "$IN_PARENT_RUN_ATTEMPT" ]; then
+            echo "::error::standalone intent must not carry parent_run_attempt"
+            exit 1
+          fi
+          if [ -n "$IN_RECOVERY_MODE" ] && [ -z "$IN_LIBRARY_RUN_ID" ]; then
+            echo "::error::recovery_mode requires an exact serial parent identity"
+            exit 1
+          fi
+          request_id="$IN_RELINK_REQUEST_ID"
+          if [ -z "$request_id" ]; then
+            request_id="$(printf 'standalone-kaggle-intent-v1\0%s\0%s\0%s' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha256sum | cut -d' ' -f1)"
+          fi
+          mkdir intent
+          jq -cS -n --arg request_id "$request_id" \
+            --arg library_run_id "$IN_LIBRARY_RUN_ID" --arg parent_run_attempt "$IN_PARENT_RUN_ATTEMPT" \
+            --arg sefaria_tag "$IN_SEFARIA_TAG" --arg snapshot_sha256 "$IN_SNAPSHOT_SHA256" \
+            --arg sefaria_metadata_sha256 "$IN_SEFARIA_METADATA_SHA256" \
+            --arg adopt_fingerprint "$IN_ADOPT_FINGERPRINT" \
+            --argjson dry_run "$( [ -n "$IN_DRY_RUN" ] && echo true || echo false )" \
+            --argjson recovery_mode "$( [ -n "$IN_RECOVERY_MODE" ] && echo true || echo false )" \
+            --argjson intake_run_id "$GITHUB_RUN_ID" --argjson intake_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schema_version:3,request_id:$request_id,library_run_id:$library_run_id,
+              parent_run_attempt:$parent_run_attempt,sefaria_tag:$sefaria_tag,
+              snapshot_sha256:$snapshot_sha256,sefaria_release_metadata_sha256:$sefaria_metadata_sha256,
+              adopt_fingerprint:$adopt_fingerprint,
+              dry_run:$dry_run,recovery_mode:$recovery_mode,
+              intake_run_id:$intake_run_id,intake_run_attempt:$intake_run_attempt}' \
+            > intent/kaggle-intent.json
+          sha256sum intent/kaggle-intent.json | cut -d' ' -f1 > intent/kaggle-intent.sha256
+          echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-intent-${{ steps.intent.outputs.request_id }}-${{ github.run_attempt }}
+          path: intent/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Wake singleton provisioner
+        env:
+          INTAKE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            gh workflow run kaggle-provisioner.yml -R "$GITHUB_REPOSITORY" \
+              -f intent_run_id="$INTAKE_RUN_ID" && exit 0
+            [ "$attempt" = 3 ] || sleep "$((attempt * 5))"
+          done
+          # The artifact is already durable and the scheduled provisioner scans it.
+          # A wake-up outage must not turn this artifact-bearing intake run red,
+          # because the scanner intentionally ignores failed pre-persist runs.
+          echo "::warning::intent persisted but immediate provisioner wake failed; scheduled tick will recover it"
