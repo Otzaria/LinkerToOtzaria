@@ -154,6 +154,7 @@ assert "compression-level: 0" in workflow_text
 assert "raw_ner_source_run_id:" in workflow_text
 assert "flock -w 3600 9" in workflow_text
 assert "Restore exact prior-attempt NER checkpoint" in workflow_text
+assert 'PYTHONPATH="$SEF_PROJECT${PYTHONPATH:+:$PYTHONPATH}"' in workflow_text
 producer = (Path(sys.argv[2]).parents[2] / "src/precompute_ner.py").read_text()
 assert "from sefaria.model" not in producer
 assert "django.setup" not in producer

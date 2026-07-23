@@ -513,7 +513,12 @@ jobs:
             [ -z "$LIBRARY_RUN_ID" ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
-            "$SEF_PROJECT/.venv/bin/python" src/precompute_ner.py \
+          # The prebuilt venv contains Sefaria's dependencies but intentionally does
+          # not install the checkout itself as a wheel. Expose the exact pinned
+          # checkout only to the raw-NER producer so its training-time normalizer is
+          # importable without reintroducing Django/Mongo into the GPU process.
+          PYTHONPATH="$SEF_PROJECT${PYTHONPATH:+:$PYTHONPATH}" \
+          "$SEF_PROJECT/.venv/bin/python" src/precompute_ner.py \
               --snapshot inputs/lines_snapshot.db \
               --plan "$PLAN" \
               --output "$RUN_DIR/ner-handoff" \
