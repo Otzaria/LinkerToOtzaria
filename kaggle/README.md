@@ -6,8 +6,11 @@
 ה-refs על CPU תחת ה-host lease, ורק אחריו מופעל ה-publisher.
 
 ל-job של Kaggle תקרה של 90 דקות, אך מפיק ה-NER עוצר אחרי 60 דקות כדי להשאיר זמן
-לאריזה ולהעלאה. אם לא סיים, נשמר checkpoint פר-ספר; rerun של אותו workflow
-databaseId ממשיך ממנו ולא מתחיל מאפס.
+לאריזה ולהעלאה. אם לא סיים, נשמר checkpoint פר-ספר וגם פר-אצווה בתוך ספר גדול;
+rerun של אותו workflow databaseId ממשיך ממנו ולא מתחיל מאפס. התאוששות מדויקת
+ל-databaseId חדש יכולה לשחזר checkpoint מריצה כושלת קודמת, לאחר אימות זהות המקור
+וההורה והצהרה מפורשת על fingerprint ה-engine שנרשם ב-checkpoint. כל batch משוחזר
+עדיין נבדק מול הטקסט המנורמל וה-engine הנוכחי לפני השימוש.
 
 ## שיגור
 
@@ -47,6 +50,11 @@ databaseId ממשיך ממנו ולא מתחיל מאפס.
 
 - כשל/timeout בזמן NER: הפעילו `Re-run failed jobs` על אותו run. attempt חדש מאתר
   checkpoint יחיד מן ה-attempt הקודם, מאמת את זהותו וממשיך ממנו.
+- אם נדרש תיקון קוד ולכן אי אפשר rerun לאותו commit, שגרו recovery חדש עם אותו
+  request/parent ועם `ner_checkpoint_source_run_id`,
+  `ner_checkpoint_source_run_attempt` ו-`ner_checkpoint_source_engine_fingerprint`.
+  ה-provisioner מתיר זאת רק כאשר המקור הוא הילד היחיד בעל אותה זהות והוא נכשל,
+  וה-workflow מאמת מחדש את ה-attempt, ההורה וה-artifact המדויק.
 - כשל בשלב `resolve` אחרי שה-handoff הגולמי עלה: אין להריץ NER שוב. שגרו
   `relink.yml` ישירות עם `target=kaggle`, ‏`recovery_mode=true`,
   ‏`raw_ner_source_run_id` ו-`raw_ner_source_run_attempt` של המפיק המקורי, יחד עם

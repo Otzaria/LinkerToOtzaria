@@ -58,17 +58,32 @@ def pairs(items):
  return out
 v=json.loads(path.read_text(),object_pairs_hook=pairs)
 base_keys={'schema_version','request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256','dry_run','intake_run_id','intake_run_attempt'}
-if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2,3): raise SystemExit('invalid intent schema version')
+if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2,3,4): raise SystemExit('invalid intent schema version')
 expected_keys=(base_keys if v['schema_version']==1 else
                base_keys|{'recovery_mode'} if v['schema_version']==2 else
-               base_keys|{'recovery_mode','adopt_fingerprint'})
+               base_keys|{'recovery_mode','adopt_fingerprint'} if v['schema_version']==3 else
+               base_keys|{'recovery_mode','adopt_fingerprint',
+                          'ner_checkpoint_source_run_id',
+                          'ner_checkpoint_source_run_attempt',
+                          'ner_checkpoint_source_engine_fingerprint'})
 if set(v)!=expected_keys or type(v['intake_run_id']) is not int or v['intake_run_id']!=expected_run: raise SystemExit('invalid intent schema/identity')
 string_fields=('request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256')
-if v['schema_version']==3: string_fields += ('adopt_fingerprint',)
+if v['schema_version']>=3: string_fields += ('adopt_fingerprint',)
+if v['schema_version']==4:
+ string_fields += ('ner_checkpoint_source_run_id','ner_checkpoint_source_run_attempt',
+                   'ner_checkpoint_source_engine_fingerprint')
 if any(type(v[k]) is not str for k in string_fields): raise SystemExit('invalid intent string types')
 if not re.fullmatch(r'[0-9a-f]{64}',v['request_id']): raise SystemExit('invalid request id')
 if type(v['dry_run']) is not bool or type(v.get('recovery_mode',False)) is not bool or type(v['intake_run_attempt']) is not int or v['intake_run_attempt'] != expected_attempt: raise SystemExit('invalid intent types/attempt')
 if not re.fullmatch(r'[ -~]{0,8192}',v.get('adopt_fingerprint','')): raise SystemExit('invalid adoption attestation')
+checkpoint=(v.get('ner_checkpoint_source_run_id',''),
+            v.get('ner_checkpoint_source_run_attempt',''),
+            v.get('ner_checkpoint_source_engine_fingerprint',''))
+if any(checkpoint):
+ if not all(checkpoint): raise SystemExit('incomplete checkpoint source identity')
+ if not re.fullmatch(r'[1-9][0-9]*',checkpoint[0]) or not re.fullmatch(r'[1-9][0-9]*',checkpoint[1]): raise SystemExit('invalid checkpoint source coordinates')
+ if not re.fullmatch(r'[ -~]{1,8192}',checkpoint[2]): raise SystemExit('invalid checkpoint source fingerprint')
+ if not v.get('recovery_mode',False): raise SystemExit('checkpoint recovery must be explicit recovery mode')
 serial=bool(v['library_run_id'])
 if serial:
  if not re.fullmatch(r'[1-9][0-9]*',v['library_run_id']) or not re.fullmatch(r'[1-9][0-9]*',v['parent_run_attempt']): raise SystemExit('invalid serial parent identity')
@@ -88,6 +103,9 @@ PY
   parent_attempt=$(jq -r .parent_run_attempt "$TMP/intent/kaggle-intent.json")
   recovery_mode=$(jq -r '.recovery_mode // false' "$TMP/intent/kaggle-intent.json")
   adopt_fingerprint=$(jq -r '.adopt_fingerprint // ""' "$TMP/intent/kaggle-intent.json")
+  checkpoint_source_run_id=$(jq -r '.ner_checkpoint_source_run_id // ""' "$TMP/intent/kaggle-intent.json")
+  checkpoint_source_run_attempt=$(jq -r '.ner_checkpoint_source_run_attempt // ""' "$TMP/intent/kaggle-intent.json")
+  checkpoint_source_engine_fingerprint=$(jq -r '.ner_checkpoint_source_engine_fingerprint // ""' "$TMP/intent/kaggle-intent.json")
   if [ -n "$library_run_id" ]; then
     if ! gh api "repos/$PARENT_REPO/actions/runs/$library_run_id" > "$TMP/parent.json" 2> "$TMP/parent.err"; then
       if grep -q 'HTTP 404' "$TMP/parent.err"; then
@@ -146,6 +164,22 @@ PY
   matches=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$legacy_title" -v b="$recovery_title" '$3==a || $3==b')
   count=$(printf '%s\n' "$matches" | awk 'NF' | wc -l | tr -d ' ')
   if [ "$count" -gt 1 ]; then
+    if [ -n "$checkpoint_source_run_id" ]; then
+      # The one intentional two-run shape is:
+      #   exact failed source + the recovery child created from its checkpoint.
+      # Once that child exists the durable intent is consumed (active or terminal);
+      # a later provisioner tick must not mistake the expected pair for duplicates.
+      source_count=$(printf '%s\n' "$matches" | awk -F'\t' -v id="$checkpoint_source_run_id" '$1==id {n++} END{print n+0}')
+      other_count=$(printf '%s\n' "$matches" | awk -F'\t' -v id="$checkpoint_source_run_id" '$1!=id {n++} END{print n+0}')
+      bad_other=$(printf '%s\n' "$matches" | awk -F'\t' -v id="$checkpoint_source_run_id" -v title="$recovery_title" '$1!=id && $3!=title {n++} END{print n+0}')
+      if [ "$count" -eq 2 ] && [ "$source_count" -eq 1 ] &&
+         [ "$other_count" -eq 1 ] && [ "$bad_other" -eq 0 ]; then
+        echo "checkpoint recovery intent $request_id already has its one recovery child; treating it as consumed"
+        continue
+      fi
+      echo "::error::checkpoint recovery intent $request_id has an unexpected correlated run set"
+      exit 1
+    fi
     # A short-lived pre-rollout bug allowed a failed child to be followed by a
     # recovery child with the same request id. Those historical runs are all
     # terminal and therefore cannot execute or be dispatched again; failing
@@ -165,15 +199,34 @@ PY
     [ "$status" != completed ] && exit 0
     rid=$(printf '%s\n' "$matches" | cut -f1)
     conclusion=$(gh api "repos/$REPO/actions/runs/$rid" --jq .conclusion)
-    [ "$conclusion" = success ] && continue
-    if [ -n "${INTENT_RUN_ID:-}" ]; then
-      echo "::error::explicit intent $request_id has a failed terminal child $rid ($conclusion)"; exit 1
+    if [ -n "$checkpoint_source_run_id" ]; then
+      # A producer-checkpoint recovery intentionally reuses the immutable request id
+      # encoded inside checkpoint.json. Authorize that one exception to the normal
+      # at-most-once intent rule only when the sole historical child is the explicitly
+      # named failed source. relink.yml independently revalidates source attempt/title,
+      # parent attempt and the one exact artifact before extracting any bytes.
+      [ "$rid" = "$checkpoint_source_run_id" ] || {
+        echo "::error::checkpoint source $checkpoint_source_run_id is not the sole correlated child $rid"
+        exit 1
+      }
+      case "$conclusion" in
+        failure|cancelled|timed_out|action_required|startup_failure|stale) ;;
+        *) echo "::error::checkpoint source child $rid has non-recoverable conclusion '$conclusion'"; exit 1 ;;
+      esac
+    else
+      [ "$conclusion" = success ] && continue
+      if [ -n "${INTENT_RUN_ID:-}" ]; then
+        echo "::error::explicit intent $request_id has a failed terminal child $rid ($conclusion)"; exit 1
+      fi
+      # A durable intent is at-most-once. A failed child consumes it just as a
+      # successful child does; recovery must mint a new correlated intent. Do not
+      # let one historical failure poison every scheduled queue scan forever.
+      echo "::warning::consumed intent $request_id has terminal child $rid ($conclusion); skipping"
+      continue
     fi
-    # A durable intent is at-most-once. A failed child consumes it just as a
-    # successful child does; recovery must mint a new correlated intent. Do not
-    # let one historical failure poison every scheduled queue scan forever.
-    echo "::warning::consumed intent $request_id has terminal child $rid ($conclusion); skipping"
-    continue
+  elif [ -n "$checkpoint_source_run_id" ]; then
+    echo "::error::checkpoint source $checkpoint_source_run_id is not the sole correlated child"
+    exit 1
   fi
   active=$(count_runs_active "$REPO" relink.yml)
   [ "$active" -eq 0 ] || { echo "linker busy; intent $request_id remains durable for the next tick"; exit 0; }
@@ -187,6 +240,14 @@ PY
   [ "$(jq -r .dry_run "$TMP/intent/kaggle-intent.json")" = true ] && args+=(--dry-run)
   [ "$recovery_mode" = true ] && args+=(--recovery-mode)
   [ -z "$adopt_fingerprint" ] || args+=(--adopt-fingerprint "$adopt_fingerprint")
+  [ -z "$checkpoint_source_run_id" ] || \
+    args+=(--ner-checkpoint-source-run-id "$checkpoint_source_run_id")
+  [ -z "$checkpoint_source_run_attempt" ] || \
+    args+=(--ner-checkpoint-source-run-attempt "$checkpoint_source_run_attempt")
+  [ -z "$checkpoint_source_engine_fingerprint" ] || \
+    args+=(
+      --ner-checkpoint-source-engine-fingerprint "$checkpoint_source_engine_fingerprint"
+    )
   bash "$DISPATCH_SCRIPT" "${args[@]}"
   exit 0
 done

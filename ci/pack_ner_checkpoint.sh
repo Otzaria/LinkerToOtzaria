@@ -9,8 +9,9 @@ test -f "$ROOT/checkpoint.json"
 test -d "$ROOT/ner-data"
 test -d "$ROOT/done"
 test -d "$ROOT/failed"
+test -d "$ROOT/partial"
 
-raw_bytes=$(python3 - "$ROOT/checkpoint.json" "$ROOT/ner-data" "$ROOT/done" "$ROOT/failed" <<'PY'
+raw_bytes=$(python3 - "$ROOT/checkpoint.json" "$ROOT/ner-data" "$ROOT/done" "$ROOT/failed" "$ROOT/partial" <<'PY'
 import pathlib, sys
 total = 0
 for raw in sys.argv[1:]:
@@ -27,7 +28,7 @@ if [ "$raw_bytes" -gt "$max_raw_bytes" ]; then
   echo "::error::NER checkpoint is ${raw_bytes} bytes, above safety cap ${max_raw_bytes}" >&2
   exit 1
 fi
-python3 "$(dirname "$0")/write_deterministic_tar.py" "$ROOT" checkpoint.json ner-data done failed \
+python3 "$(dirname "$0")/write_deterministic_tar.py" "$ROOT" checkpoint.json ner-data done failed partial \
   | zstd -8 -T0 -o "$OUT" -f
 sha256sum "$OUT" | cut -d' ' -f1 > "$OUT.sha256"
 packed_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$OUT")

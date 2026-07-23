@@ -9,6 +9,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import re
 from pathlib import Path
@@ -22,6 +23,7 @@ from ner_handoff import (  # noqa: E402
     safe_relative_path,
     sha256_bytes,
     sha256_file,
+    validate_batch,
     validate_book_key,
     validate_ner_result,
     validate_plan,
@@ -29,6 +31,7 @@ from ner_handoff import (  # noqa: E402
 )
 
 CLAIM_STALE_SEC = 600
+CLAIM_HEARTBEAT_SEC = 30
 NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -186,32 +189,98 @@ def _validate_completed_book(root: Path, book: BookKey, source_hash: str) -> Non
     if type(value["batches"]) is not list:
         raise RuntimeError(f"checkpoint book {book!r} batches must be an array")
     starts = []
+    expected_parent = (root / "ner-data" / cid).resolve()
     for index, descriptor in enumerate(value["batches"]):
-        _verify_descriptor(root, descriptor, f"checkpoint.book.batches[{index}]")
+        batch_path = _verify_descriptor(
+            root, descriptor, f"checkpoint.book.batches[{index}]"
+        )
+        if (
+            batch_path.parent != expected_parent
+            or not re.fullmatch(r"[0-9]{12}\.json", batch_path.name)
+        ):
+            raise RuntimeError(
+                f"checkpoint book {book!r} has a batch outside its data directory"
+            )
         starts.append(descriptor["batch_start"])
     if starts != sorted(set(starts)):
         raise RuntimeError(f"checkpoint book {book!r} batch starts are not sorted/unique")
+
+
+def _validate_partial_book(root: Path, book: BookKey, source_hash: str) -> dict:
+    cid = claim_id(book)
+    path = root / "partial" / cid / "partial_manifest.json"
+    value = load_json_strict(path)
+    required = {
+        "schema_version", "book", "source_book_hash", "line_count", "batches",
+    }
+    if type(value) is not dict or set(value) != required:
+        raise RuntimeError(f"partial checkpoint book {book!r} has an invalid manifest")
+    if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
+        raise RuntimeError(f"partial checkpoint book {book!r} has an unsupported schema")
+    if validate_book_key(value["book"], "partial_checkpoint.book") != (
+        book.source_name, book.canonical_he_title
+    ):
+        raise RuntimeError(f"partial checkpoint book {book!r} identity mismatch")
+    if value["source_book_hash"] != source_hash:
+        raise RuntimeError(f"partial checkpoint book {book!r} source hash mismatch")
+    if type(value["line_count"]) is not int or value["line_count"] < 0:
+        raise RuntimeError(f"partial checkpoint book {book!r} has invalid line_count")
+    if type(value["batches"]) is not list:
+        raise RuntimeError(f"partial checkpoint book {book!r} batches must be an array")
+    starts = []
+    expected_parent = (root / "partial" / cid).resolve()
+    for index, descriptor in enumerate(value["batches"]):
+        batch_path = _verify_descriptor(
+            root, descriptor, f"partial_checkpoint.book.batches[{index}]"
+        )
+        if (
+            batch_path.parent != expected_parent
+            or not re.fullmatch(r"[0-9]{12}\.json", batch_path.name)
+        ):
+            raise RuntimeError(
+                f"partial checkpoint book {book!r} has a batch outside its work directory"
+            )
+        starts.append(descriptor["batch_start"])
+    if starts != sorted(set(starts)):
+        raise RuntimeError(
+            f"partial checkpoint book {book!r} batch starts are not sorted/unique"
+        )
+    return value
 
 
 def _prepare_root(args, books, hashes) -> Path:
     root = Path(args.output)
     expected = _checkpoint_document(args, books, hashes)
     checkpoint = root / "checkpoint.json"
+    migrate_checkpoint = False
     if checkpoint.exists():
         actual = load_json_strict(checkpoint)
         if actual != expected:
-            raise RuntimeError("existing NER checkpoint belongs to different immutable inputs")
-        _log("driver", "resuming exact validated prior-attempt NER checkpoint")
+            source_fingerprint = getattr(args, "checkpoint_engine_fingerprint", None)
+            source_expected = {**expected, "engine_fingerprint": source_fingerprint}
+            if not source_fingerprint or actual != source_expected:
+                raise RuntimeError(
+                    "existing NER checkpoint belongs to different immutable inputs"
+                )
+            migrate_checkpoint = True
+            _log(
+                "driver",
+                "resuming operator-attested output-neutral engine migration checkpoint",
+            )
+        else:
+            _log("driver", "resuming exact validated prior-attempt NER checkpoint")
     else:
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True)
         write_json_atomic(checkpoint, expected)
-    for name in ("claims", "partial", "worker-heartbeats"):
+    for name in ("claims", "worker-heartbeats"):
         shutil.rmtree(root / name, ignore_errors=True)
     for name in ("claims", "done", "failed", "partial", "worker-heartbeats", "ner-data"):
         (root / name).mkdir(parents=True, exist_ok=True)
-    # A book-level engine/API failure is retryable on a new workflow attempt. A clean
-    # completed book is trusted only after every content descriptor is revalidated.
+    # A book-level engine/API failure is retryable on a new workflow attempt. Preserve
+    # any already-committed batches after revalidation; a malformed partial checkpoint
+    # fails closed instead of being silently discarded. A clean completed book is
+    # trusted only after every content descriptor is revalidated.
     for book in books:
         cid = claim_id(book)
         failed = root / "failed" / cid
@@ -220,13 +289,49 @@ def _prepare_root(args, books, hashes) -> Path:
             failed.unlink()
             done.unlink(missing_ok=True)
             shutil.rmtree(root / "ner-data" / cid, ignore_errors=True)
+            partial = root / "partial" / cid
+            manifest = partial / "partial_manifest.json"
+            if manifest.exists():
+                _validate_partial_book(
+                    root, book, hashes[(book.source_name, book.canonical_he_title)]
+                )
+            elif partial.exists():
+                shutil.rmtree(partial)
         elif done.exists():
             _validate_completed_book(
                 root, book, hashes[(book.source_name, book.canonical_he_title)]
             )
+            shutil.rmtree(root / "partial" / cid, ignore_errors=True)
+        else:
+            partial = root / "partial" / cid
+            manifest = partial / "partial_manifest.json"
+            if manifest.exists():
+                _validate_partial_book(
+                    root, book, hashes[(book.source_name, book.canonical_he_title)]
+                )
+            elif partial.exists():
+                # A kill between mkdir and the first atomic manifest write contains
+                # no committed progress. Discard only that uncommitted directory.
+                shutil.rmtree(partial)
+    expected_partial = {claim_id(book) for book in books}
+    unexpected_partial = {
+        item.name for item in (root / "partial").iterdir()
+        if item.name not in expected_partial
+    }
+    if unexpected_partial:
+        raise RuntimeError(
+            f"checkpoint contains partial data for unplanned books: "
+            f"{sorted(unexpected_partial)!r}"
+        )
     resumed = sum((root / "done" / claim_id(book)).exists() for book in books)
     if resumed:
         _log("driver", f"validated {resumed}/{len(books)} completed book checkpoint(s)")
+    if migrate_checkpoint:
+        # All completed and partial descriptors have now been content-verified against
+        # the exact request/snapshot/book hashes. Rebind only the engine fingerprint;
+        # the CPU resolver still validates every normalized line and NER result before
+        # consuming the handoff.
+        write_json_atomic(checkpoint, expected)
     return root
 
 
@@ -242,8 +347,19 @@ def _try_claim(root: Path, cid: str) -> bool:
         try:
             if time.time() - heartbeat.stat().st_mtime < CLAIM_STALE_SEC:
                 return False
+        except FileNotFoundError:
+            # mkdir() and heartbeat.touch() are two syscalls. A second worker can
+            # observe the fresh directory in between them; treating that tiny window
+            # as stale lets both workers process the same book. The directory mtime is
+            # the fail-safe creation heartbeat until the real heartbeat exists.
+            try:
+                if time.time() - claim.stat().st_mtime < CLAIM_STALE_SEC:
+                    return False
+            except FileNotFoundError:
+                # The owner may have completed and removed the claim while we looked.
+                return False
         except OSError:
-            pass
+            return False
         shutil.rmtree(claim, ignore_errors=True)
         try:
             claim.mkdir()
@@ -258,22 +374,66 @@ def _heartbeat(root: Path, cid: str, worker_heartbeat: Path) -> None:
     (root / "claims" / cid / "heartbeat").touch()
 
 
+def _claim_heartbeat_loop(
+    root: Path,
+    cid: str,
+    worker_heartbeat: Path,
+    stop: threading.Event,
+) -> None:
+    """Keep a claimed book leased while one GPU request is blocked.
+
+    A bulk request may legitimately occupy the HTTP timeout for as long as the stale
+    claim threshold. The worker's main loop therefore cannot be the lease clock: a
+    small daemon heartbeat keeps peers from stealing the stable partial/<claim_id>
+    directory while its owner is still blocked in transport/recovery.
+    """
+    while not stop.wait(CLAIM_HEARTBEAT_SEC):
+        try:
+            _heartbeat(root, cid, worker_heartbeat)
+        except FileNotFoundError:
+            # Completion removes the claim before the worker stops this helper.
+            return
+
+
 def _produce_book(args, recognizer, con, book: BookKey, source_hash: str, root: Path, worker_hb: Path) -> None:
     cid = claim_id(book)
     lines = book_lines(con, book)
     book_root = root / "ner-data" / cid
-    temporary = root / "partial" / f"{cid}-{os.getpid()}"
-    shutil.rmtree(temporary, ignore_errors=True)
-    temporary.mkdir(parents=True)
+    temporary = root / "partial" / cid
+    partial_manifest_path = temporary / "partial_manifest.json"
+    if partial_manifest_path.exists():
+        partial_manifest = _validate_partial_book(root, book, source_hash)
+        if partial_manifest["line_count"] != len(lines):
+            raise RuntimeError(f"partial checkpoint line count changed for {book!r}")
+        batch_descriptors = list(partial_manifest["batches"])
+    else:
+        shutil.rmtree(temporary, ignore_errors=True)
+        temporary.mkdir(parents=True)
+        batch_descriptors = []
+    by_start = {descriptor["batch_start"]: descriptor for descriptor in batch_descriptors}
     eligible_count = 0
-    batch_descriptors = []
+    expected_starts = set()
     for start in range(0, len(lines), BATCH_LINES):
         batch = [(line_index, content) for line_index, content in lines[start:start + BATCH_LINES]
                  if content and len(content.strip()) > 1]
         _heartbeat(root, cid, worker_hb)
         if not batch:
             continue
+        expected_starts.add(start)
         normalized = recognizer._normalize_input([content for _, content in batch])
+        existing = by_start.get(start)
+        if existing is not None:
+            value = load_json_strict(_verify_descriptor(
+                root, existing, f"partial_checkpoint.resume[{start}]"
+            ))
+            validate_batch(
+                value,
+                expected_book=(book.source_name, book.canonical_he_title),
+                expected_start=start,
+                normalized_lines=list(zip((line_index for line_index, _ in batch), normalized)),
+            )
+            eligible_count += len(batch)
+            continue
         try:
             results = _post_bulk(args.ner_url, normalized)
         except Exception as error:
@@ -297,25 +457,69 @@ def _produce_book(args, recognizer, con, book: BookKey, source_hash: str, root: 
             "batch_start": start,
             "lines": line_records,
         })
-        relative = f"ner-data/{cid}/{batch_path.name}"
-        batch_descriptors.append({
+        relative = f"partial/{cid}/{batch_path.name}"
+        descriptor = {
             "batch_start": start, "path": relative, "size": size, "sha256": digest,
+        }
+        batch_descriptors.append(descriptor)
+        batch_descriptors.sort(key=lambda item: item["batch_start"])
+        by_start[start] = descriptor
+        write_json_atomic(partial_manifest_path, {
+            "schema_version": SCHEMA_VERSION,
+            "book": book.to_dict(),
+            "source_book_hash": source_hash,
+            "line_count": len(lines),
+            "batches": batch_descriptors,
         })
         eligible_count += len(batch)
-    size, digest = write_json_atomic(temporary / "book_manifest.json", {
+    if set(by_start) != expected_starts:
+        raise RuntimeError(
+            f"partial checkpoint batch ledger differs from the current book for {book!r}"
+        )
+    final_descriptors = [
+        {
+            **descriptor,
+            "path": f"ner-data/{cid}/{Path(descriptor['path']).name}",
+        }
+        for descriptor in batch_descriptors
+    ]
+    write_json_atomic(temporary / "book_manifest.json", {
         "schema_version": SCHEMA_VERSION,
         "book": book.to_dict(),
         "source_book_hash": source_hash,
         "line_count": len(lines),
         "eligible_line_count": eligible_count,
-        "batches": batch_descriptors,
+        "batches": final_descriptors,
     })
+    partial_manifest_path.unlink(missing_ok=True)
     if book_root.exists():
         shutil.rmtree(book_root)
     os.replace(temporary, book_root)
     (root / "done" / cid).touch()
     shutil.rmtree(root / "claims" / cid, ignore_errors=True)
     _log(args.worker_label, f"done {book.source_name}/{book.canonical_he_title!r} lines={len(lines)}")
+
+
+def _largest_books_first(con: sqlite3.Connection, books: list[BookKey]) -> list[BookKey]:
+    """Start the longest immutable books first so the bounded GPU window is useful.
+
+    The snapshot index serves each COUNT without materialising book text. Every worker
+    computes the same deterministic order, while the claim directory still assigns a
+    book to exactly one worker. This prevents one unusually large book from starting
+    only after all short books and becoming the sole non-resumable tail at the deadline.
+    """
+    sized = []
+    for book in books:
+        row = con.execute(
+            "SELECT COUNT(*) FROM lines_snapshot "
+            "WHERE source_name=? AND canonical_he_title=?",
+            (book.source_name, book.canonical_he_title),
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] < 0:
+            raise RuntimeError(f"could not measure planned book {book!r}")
+        sized.append((row[0], book.source_name, book.canonical_he_title, book))
+    sized.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [item[3] for item in sized]
 
 
 def worker(args) -> int:
@@ -332,8 +536,12 @@ def worker(args) -> int:
     recognizer = build_producer_normalizer()
     con = sqlite3.connect(f"file:{os.path.abspath(args.snapshot)}?mode=ro", uri=True)
     try:
+        work_order = _largest_books_first(con, books)
         while True:
-            remaining = [book for book in books if not (root / "done" / claim_id(book)).exists()]
+            remaining = [
+                book for book in work_order
+                if not (root / "done" / claim_id(book)).exists()
+            ]
             if not remaining:
                 return 0
             made_progress = False
@@ -342,6 +550,14 @@ def worker(args) -> int:
                 if not _try_claim(root, cid):
                     continue
                 made_progress = True
+                heartbeat_stop = threading.Event()
+                heartbeat_thread = threading.Thread(
+                    target=_claim_heartbeat_loop,
+                    args=(root, cid, worker_hb, heartbeat_stop),
+                    name=f"claim-heartbeat-{cid[:12]}",
+                    daemon=True,
+                )
+                heartbeat_thread.start()
                 try:
                     _wait_for_ner(args.ner_url, args.worker_label)
                     _produce_book(args, recognizer, con, book, hashes[(book.source_name, book.canonical_he_title)], root, worker_hb)
@@ -352,6 +568,9 @@ def worker(args) -> int:
                     (root / "done" / cid).touch()
                     shutil.rmtree(root / "claims" / cid, ignore_errors=True)
                     _log(args.worker_label, f"ERROR {book.canonical_he_title!r}: {type(error).__name__}: {error}")
+                finally:
+                    heartbeat_stop.set()
+                    heartbeat_thread.join()
             if not made_progress:
                 worker_hb.touch()
                 time.sleep(15)
@@ -455,6 +674,13 @@ def main() -> None:
     parser.add_argument(
         "--deadline-seconds", type=int,
         help="stop before the runner ceiling so a partial checkpoint can be uploaded",
+    )
+    parser.add_argument(
+        "--checkpoint-engine-fingerprint",
+        help=(
+            "operator-attested old engine fingerprint accepted only for an otherwise "
+            "exact checkpoint; the checkpoint is rebound to the current fingerprint"
+        ),
     )
     parser.add_argument("--worker-label")
     args = parser.parse_args()

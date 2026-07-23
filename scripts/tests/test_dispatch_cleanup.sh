@@ -142,6 +142,19 @@ rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" \
 check "adoption attestation → quoted workflow input" \
   test "$rc" -eq 0 -a "$(grep -c 'adopt_fingerprint=old fingerprint::new fingerprint' "$MOCK_LOG")" -eq 1
 
+export MOCK_LOG="$WORK/t4-checkpoint.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" \
+  --recovery-mode \
+  --ner-checkpoint-source-run-id 123 \
+  --ner-checkpoint-source-run-attempt 2 \
+  --ner-checkpoint-source-engine-fingerprint 'old engine fingerprint' \
+  ) >/dev/null 2>&1 || rc=$?
+check "checkpoint recovery identity → forwarded atomically" \
+  test "$rc" -eq 0 \
+    -a "$(grep -c 'ner_checkpoint_source_run_id=123' "$MOCK_LOG")" -eq 1 \
+    -a "$(grep -c 'ner_checkpoint_source_run_attempt=2' "$MOCK_LOG")" -eq 1 \
+    -a "$(grep -c 'ner_checkpoint_source_engine_fingerprint=old engine fingerprint' "$MOCK_LOG")" -eq 1
+
 cat > "$WORK/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 exit 1

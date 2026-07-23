@@ -37,7 +37,7 @@ def main() -> None:
                         or not path.parts
                         or ".." in path.parts
                         or path.parts[0] not in {
-                            "checkpoint.json", "ner-data", "done", "failed"
+                            "checkpoint.json", "ner-data", "done", "failed", "partial"
                         }
                         or not (member.isdir() or member.isfile())
                     ):
@@ -62,6 +62,9 @@ def main() -> None:
             or not (temporary / "failed").is_dir()
         ):
             raise SystemExit("NER checkpoint archive is incomplete")
+        # Checkpoints written before batch-level resume have no partial/ root.
+        # They still contain valid completed-book progress; upgrade them in place.
+        (temporary / "partial").mkdir(exist_ok=True)
         shutil.rmtree(destination, ignore_errors=True)
         temporary.rename(destination)
 

@@ -132,6 +132,29 @@ on:
         required: false
         default: ''
         type: string
+      ner_checkpoint_source_run_id:
+        description: >
+          Producer recovery: exact failed relink workflow databaseId that uploaded this
+          request's resumable NER checkpoint. Requires recovery_mode, target=kaggle and
+          ner_checkpoint_source_run_attempt. Empty for normal runs and same-id reruns.
+        required: false
+        default: ''
+        type: string
+      ner_checkpoint_source_run_attempt:
+        description: >
+          Producer recovery: exact failed source attempt encoded in the checkpoint
+          artifact name. Requires ner_checkpoint_source_run_id; empty otherwise.
+        required: false
+        default: ''
+        type: string
+      ner_checkpoint_source_engine_fingerprint:
+        description: >
+          Producer recovery: operator-attested engine fingerprint recorded by the exact
+          source checkpoint. Required with ner_checkpoint_source_run_id. The restored
+          NER is still content-verified and replay-validated under the current engine.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -313,6 +336,10 @@ jobs:
           SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
           RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
+          TARGET: ${{ inputs.target }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
+          NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
         run: |
           set -euo pipefail
           # Shape-validate EVERY dispatch input once, fail-closed, before any step
@@ -324,6 +351,28 @@ jobs:
           [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
           [ -z "$ADOPT_FINGERPRINT" ] || \
             python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
+          [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || [[ "$NER_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::ner_checkpoint_source_run_id must be a positive integer"; exit 1;
+          }
+          [ -z "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || [[ "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::ner_checkpoint_source_run_attempt must be a positive integer"; exit 1;
+          }
+          [ -z "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py \
+              ner_checkpoint_source_engine_fingerprint 8192 \
+              "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+          if [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
+             [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] ||
+             [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ]; then
+            [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] &&
+              [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] &&
+              [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || {
+              echo "::error::checkpoint recovery requires both source coordinates and its engine fingerprint"; exit 1;
+            }
+            [ -n "$RECOVERY_MODE" ] && [ "$TARGET" = kaggle ] || {
+              echo "::error::checkpoint source coordinates require recovery_mode and target=kaggle"; exit 1;
+            }
+          fi
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
           # rewrites) and recorded lineage have to match the exact export the build was
           # pinned to. Never let a serial relink silently pick up a newer "Latest".
@@ -417,6 +466,10 @@ jobs:
         if: inputs.target == 'kaggle'
         env:
           RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
         run: bash ci/restore_ner_checkpoint.sh "$RUN_DIR/ner-handoff"
 
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
@@ -460,6 +513,8 @@ jobs:
           LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
           RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: |
           set -euo pipefail
@@ -513,6 +568,12 @@ jobs:
             [ -z "$LIBRARY_RUN_ID" ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
+          CHECKPOINT_ARGS=()
+          if [ -n "${NER_CHECKPOINT_SOURCE_RUN_ID:-}" ]; then
+            CHECKPOINT_ARGS+=(
+              --checkpoint-engine-fingerprint "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+            )
+          fi
           # The prebuilt venv contains Sefaria's dependencies but intentionally does
           # not install the checkout itself as a wheel. Expose the exact pinned
           # checkout only to the raw-NER producer so its training-time normalizer is
@@ -525,7 +586,8 @@ jobs:
               --relink-request-id "$RELINK_REQUEST_ID" \
               --engine-fingerprint "$FINGERPRINT" \
               --workers 2 \
-              --deadline-seconds 3600
+              --deadline-seconds 3600 \
+              "${CHECKPOINT_ARGS[@]}"
             exit 0
           fi
           if [ -n "$LIBRARY_RUN_ID" ]; then
