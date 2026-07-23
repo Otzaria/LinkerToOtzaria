@@ -160,15 +160,16 @@ jobs:
       - ${{ inputs.target == 'kaggle' && 'gpu' || 'ARM64' }}
       - ${{ inputs.target == 'kaggle' && format('request-{0}', inputs.relink_request_id) || 'server-2' }}
     # Timeout by mode. A SERIAL relink (library_run_id set) is always a bounded delta —
-    # it runs with --forbid-full-relink, so it can never do a full corpus. Cap it at 8h:
-    # far above the worst realistic weekly delta (~285 changed books ≈ 4h at 2 workers)
-    # yet 15× below the old uniform ceiling, so a hung serial run (like the 2026-07-13
-    # one that held the host for 5 days) is bounded to hours, not days. A MANUAL full
+    # it runs with --forbid-full-relink, so it can never do a full corpus. The server
+    # keeps the 8h cap. Kaggle gets 8h45: the 2026-07-23 canary proved that a healthy,
+    # checkpointing 137-book recovery was killed at exactly 8h while still advancing.
+    # 8h45 stays below the ephemeral session's ~9h lifetime and leaves cleanup time;
+    # adaptive workers below keep a large delta comfortably inside it. A MANUAL full
     # relink (no library_run_id: engine-pin bump / adopt) keeps the 5-day self-hosted
     # ceiling — a full corpus measured ~66h at 3 workers.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
     # this timeout remains the coarse backstop for failures outside the engine loop.
-    timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}
+    timeout-minutes: ${{ inputs.library_run_id != '' && (inputs.target == 'kaggle' && 525 || 480) || 7200 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
@@ -424,9 +425,11 @@ jobs:
       # freeing ~3GB of models for whatever resumes on the shared host either way.
       - name: Bring up the stack + incremental re-link (heavy phase, host-leased)
         env:
-          # Kaggle serial deltas use one NER process and smaller transport batches:
-          # the 31GB canary still OOM-killed a single engine inside one giant book
-          # when two model-serving workers and 100-line requests shared the VM.
+          # Kaggle serial deltas use one NER process and smaller transport batches.
+          # Engine parallelism is selected below from the *actual* VM memory after
+          # setup; every engine also self-recycles at a bounded RSS. This avoids both
+          # failure modes observed live: two unbounded engines OOM-killed the 31GB VM,
+          # while one bounded engine made healthy progress past the old 8h ceiling.
           # Standalone Kaggle and the 24GB server retain their measured parallelism.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.library_run_id != '' && '2' || '3') }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
@@ -480,12 +483,27 @@ jobs:
             --engine-fingerprint "$FINGERPRINT"
           )
           if [ -n "$LIBRARY_RUN_ID" ]; then
-            # Each worker owns a full Sefaria process.  Kaggle's host RAM is
-            # variable and two workers were OOM-killed together in canary
-            # 29922788210.  Keep the GPU fed with one durable producer there;
-            # the dedicated server has enough memory for two.
+            # Each worker owns a full Sefaria process. Kaggle host RAM varies.
+            # Two *unbounded* workers plus two NER workers OOM-killed canary
+            # 29922788210; one bounded worker then timed out while still healthy in
+            # 29944220789. With one NER worker, 25-line batches and the per-engine
+            # RSS recycle, a >=24GB VM has measured headroom for two producers.
+            # Smaller VMs remain serial instead of gambling on OOM.
             case "$TARGET" in
-              kaggle) ARGS+=(--engine-workers 1) ;;
+              kaggle)
+                MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+                [[ "$MEM_TOTAL_KIB" =~ ^[1-9][0-9]*$ ]] || {
+                  echo "::error::cannot determine Kaggle MemTotal for safe worker admission"
+                  exit 1
+                }
+                if [ "$MEM_TOTAL_KIB" -ge 24000000 ]; then
+                  ENGINE_WORKERS=2
+                else
+                  ENGINE_WORKERS=1
+                fi
+                echo "Kaggle memory admission: MemTotal=${MEM_TOTAL_KIB}KiB engine_workers=$ENGINE_WORKERS"
+                ARGS+=(--engine-workers "$ENGINE_WORKERS")
+                ;;
               *) ARGS+=(--engine-workers 2) ;;
             esac
             ARGS+=(--forbid-full-relink)

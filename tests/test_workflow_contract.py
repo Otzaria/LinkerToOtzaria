@@ -43,12 +43,14 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         segment = workflow.split('ARGS=(', 1)[1].split(
             '"$SEF_PROJECT/.venv/bin/python" src/incremental.py', 1
         )[0]
-        serial_branch, after_branch = segment.split("          fi\n", 1)
+        serial_branch, after_branch = segment.split(
+            "          # An explicit OLD::NEW attestation", 1
+        )
         self.assertIn("--forbid-full-relink", serial_branch)
         self.assertNotIn("--adopt-fingerprint", serial_branch)
         self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', after_branch)
 
-    def test_serial_kaggle_relink_uses_one_memory_heavy_engine_worker(self):
+    def test_serial_kaggle_relink_admits_bounded_workers_by_actual_memory(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
         )
@@ -56,14 +58,25 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             '"$SEF_PROJECT/.venv/bin/python" src/incremental.py', 1
         )[0]
         segment = args_segment.split('if [ -n "$LIBRARY_RUN_ID" ]; then', 1)[1].split(
-            "          else\n", 1
+            "          # An explicit OLD::NEW attestation", 1
         )[0]
         self.assertIn('case "$TARGET" in', segment)
-        self.assertIn("kaggle) ARGS+=(--engine-workers 1) ;;", segment)
+        self.assertIn("MEM_TOTAL_KIB=", segment)
+        self.assertIn('[ "$MEM_TOTAL_KIB" -ge 24000000 ]', segment)
+        self.assertIn("ENGINE_WORKERS=2", segment)
+        self.assertIn("ENGINE_WORKERS=1", segment)
+        self.assertIn('ARGS+=(--engine-workers "$ENGINE_WORKERS")', segment)
         self.assertIn("*) ARGS+=(--engine-workers 2) ;;", segment)
         self.assertIn("ARGS+=(--forbid-full-relink)", segment)
         self.assertIn("LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}", workflow)
         self.assertIn("inputs.library_run_id != '' && '1' || '2'", workflow)
+
+    def test_serial_kaggle_timeout_fits_ephemeral_session(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("inputs.target == 'kaggle' && 525 || 480", workflow)
+        self.assertIn("below the ephemeral session's ~9h lifetime", workflow)
 
 
 if __name__ == "__main__":
