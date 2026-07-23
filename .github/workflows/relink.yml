@@ -1,4 +1,4 @@
-name: relink
+name: Weekly 5b/6 · Linker CPU resolve and immutable publish
 # הבנייה הממתינה, ה-trap של ה-dispatcher וה-reconciler מזהים ריצה זו בהתאמה מדויקת
 # (==, לא contains) על הכותרת כולה — request= (זהות per-attempt) + parent= (קואורדינטות
 # ההורה עבור ה-reconciler). אל תשנו את התבנית בלי לעדכן את שלושת הצרכנים.
@@ -30,8 +30,8 @@ run-name: "${{ inputs.recovery_mode && 'relink-recovery' || 'relink' }} request=
 # next run simply re-links again (idempotent). The reverse order could advance the baseline
 # over artifacts that never shipped — books would never be retried (lost links).
 #
-# Runs on a SELF-HOSTED runner: the stack is heavy (MongoDB + Sefaria dump + gpu-server NER
-# models + Django), the same reason the SeforimLibrary DB build is self-hosted.
+# The split uses two self-hosted runners: Kaggle loads only the GPU NER runtime; Oracle
+# loads Mongo+Django for CPU resolution with NER explicitly disabled.
 
 on:
   workflow_dispatch:
@@ -87,11 +87,9 @@ on:
         type: string
       target:
         description: >
-          Runner to execute on. 'kaggle' = an ephemeral GPU session registered as a JIT
-          runner by scripts/dispatch_kaggle_relink.sh; session dies after ~9h. Owner
-          decision (2026-07-19): serial builds dispatch via kaggle-relink.yml (keeps the
-          relink off the DB build's host). 'server' = the Oracle ARM box — fallback for
-          manual dispatches when a Kaggle session is unavailable.
+          Compute topology. 'kaggle' = raw NER on an ephemeral GPU JIT runner, followed
+          by CPU resolution on the Oracle ARM box. 'server' = legacy unsplit fallback
+          on Oracle when Kaggle is unavailable.
         required: false
         default: 'server'
         type: choice
@@ -119,6 +117,52 @@ on:
         required: false
         default: ''
         type: string
+      seed_line_baseline:
+        description: >
+          One-time standalone/server migration: validate that the latest published
+          snapshot and every prior artifact exactly match the committed baseline, then
+          build the release-only line index without starting NER or running the linker.
+        required: false
+        default: false
+        type: boolean
+      raw_ner_source_run_id:
+        description: >
+          Resolver-only recovery: exact failed relink workflow databaseId that already
+          uploaded this request's verified raw-NER handoff. Requires recovery_mode,
+          target=kaggle and raw_ner_source_run_attempt. Empty for normal runs.
+        required: false
+        default: ''
+        type: string
+      raw_ner_source_run_attempt:
+        description: >
+          Resolver-only recovery: exact producer attempt encoded in the source raw-NER
+          artifact name. Requires raw_ner_source_run_id; empty for normal runs.
+        required: false
+        default: ''
+        type: string
+      ner_checkpoint_source_run_id:
+        description: >
+          Producer recovery: exact failed relink workflow databaseId that uploaded this
+          request's resumable NER checkpoint. Requires recovery_mode, target=kaggle and
+          ner_checkpoint_source_run_attempt. Empty for normal runs and same-id reruns.
+        required: false
+        default: ''
+        type: string
+      ner_checkpoint_source_run_attempt:
+        description: >
+          Producer recovery: exact failed source attempt encoded in the checkpoint
+          artifact name. Requires ner_checkpoint_source_run_id; empty otherwise.
+        required: false
+        default: ''
+        type: string
+      ner_checkpoint_source_engine_fingerprint:
+        description: >
+          Producer recovery: operator-attested engine fingerprint recorded by the exact
+          source checkpoint. Required with ner_checkpoint_source_run_id. The restored
+          NER is still content-verified and replay-validated under the current engine.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -143,14 +187,16 @@ concurrency:
 
 jobs:
   relink:
+    if: inputs.raw_ner_source_run_id == ''
+    outputs:
+      raw_ner_artifact_name: ${{ steps.pack_raw_handoff.outputs.artifact_name }}
+      raw_ner_producer_attempt: ${{ steps.pack_raw_handoff.outputs.producer_attempt }}
     permissions:
       contents: read
       actions: read
-    # server: the Oracle ARM box — the SAME host that runs the SeforimLibrary build. In
-    # serial mode the build is waiting on us while holding its RAM tmpfs (~8-11GB of the
-    # 24GB), so this job runs LEAN there (2 NER + 2 engine workers) and tears the NER
-    # down when done; a standalone dispatch has the box to itself.
-    # kaggle: a throwaway GPU VM (see kaggle/); NER on CUDA, host RAM varies 13-29GB.
+    # server: legacy unsplit fallback on the Oracle ARM box.
+    # kaggle: a throwaway GPU VM (see kaggle/) that plans + produces raw NER only;
+    # Mongo/Django resolution belongs to the separate `resolve` job on Oracle.
     # The request label binds this job to the one JIT configuration created for
     # it. A prior Kaggle listener that is still shutting down lacks this label
     # and therefore cannot steal the next recovery job.
@@ -159,17 +205,14 @@ jobs:
       - ${{ inputs.target == 'kaggle' && 'kaggle' || 'Linux' }}
       - ${{ inputs.target == 'kaggle' && 'gpu' || 'ARM64' }}
       - ${{ inputs.target == 'kaggle' && format('request-{0}', inputs.relink_request_id) || 'server-2' }}
-    # Timeout by mode. A SERIAL relink (library_run_id set) is always a bounded delta —
-    # it runs with --forbid-full-relink, so it can never do a full corpus. The server
-    # keeps the 8h cap. Kaggle gets 8h45: the 2026-07-23 canary proved that a healthy,
-    # checkpointing 137-book recovery was killed at exactly 8h while still advancing.
-    # 8h45 stays below the ephemeral session's ~9h lifetime and leaves cleanup time;
-    # adaptive workers below keep a large delta comfortably inside it. A MANUAL full
-    # relink (no library_run_id: engine-pin bump / adopt) keeps the 5-day self-hosted
-    # ceiling — a full corpus measured ~66h at 3 workers.
+    # Kaggle now performs NER only. Bound the GPU/JIT job to 90 minutes; the producer
+    # itself stops at 60 minutes so packaging + artifact upload retain real headroom.
+    # Its per-book checkpoints are uploaded on that bounded failure and an exact rerun
+    # of this databaseId resumes them instead of spending the next session from zero.
+    # Server-only legacy/manual runs keep their existing serial/full ceilings.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
     # this timeout remains the coarse backstop for failures outside the engine loop.
-    timeout-minutes: ${{ inputs.library_run_id != '' && (inputs.target == 'kaggle' && 525 || 480) || 7200 }}
+    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.library_run_id != '' && 480 || 7200) }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
@@ -216,14 +259,13 @@ jobs:
           echo "$LINKER_RUNTIME_SHA256  $LINKER_RUNTIME_ARCHIVE" | sha256sum -c -
           echo "prebuilt runtime handoff verified before large snapshot download"
 
-      # The artifact store is NOT in git (see .gitignore) — the release payload IS the
-      # store. Restore the full per-book artifact set from the latest published pack, or
-      # this run would re-pack ONLY the books it just relinked and every other book would
-      # lose its links at the next build. Fails loudly if no release exists.
+      # The artifact store and exact per-line reuse baseline are NOT in git — the release
+      # payload is the store. Kaggle needs the line baseline to send only unmatched lines
+      # to NER; the server also needs the artifacts to rebuild changed books atomically.
       - name: Restore artifact store from the latest release
         run: |
           set -euo pipefail
-          rm -rf artifacts
+          rm -rf artifacts line-baseline
           releases="$RUNNER_TEMP/linker-releases-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           selected="$RUNNER_TEMP/linker-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           payload="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
@@ -273,10 +315,20 @@ jobs:
                   if member.name == "meta.json" and member.isfile():
                       names.add(member.name)
                       continue
-                  if (path.is_absolute() or not path.parts or path.parts[0] != "artifacts"
+                  if (path.is_absolute() or not path.parts
+                          or path.parts[0] not in {"artifacts", "line-baseline"}
                           or ".." in path.parts
                           or not (member.isdir() or member.isfile())):
                       raise SystemExit(f"unsafe linker artifact member: {member.name!r}")
+                  if (member.isfile() and path.parts[0] == "line-baseline"
+                          and path.suffix != ".json"):
+                      raise SystemExit(f"unexpected line-baseline member: {member.name!r}")
+                  if (member.isfile() and path.parts[0] == "artifacts"
+                          and path.suffix != ".jsonl"):
+                      if path.name in {".DS_Store", ".gitkeep"} or path.name.startswith("._"):
+                          names.add(member.name)
+                          continue
+                      raise SystemExit(f"unexpected artifact member: {member.name!r}")
                   names.add(member.name)
                   jsonl += member.isfile() and path.suffix == ".jsonl"
                   artifact_members.append(member)
@@ -285,6 +337,11 @@ jobs:
               stream.extractall(path=".", members=artifact_members, filter="data")
           PY
           echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
+          if [ -f line-baseline/manifest.json ]; then
+            echo "restored exact per-line reuse baseline"
+          else
+            echo "legacy release has no line baseline; this run safely falls back to full changed books"
+          fi
 
       # Inputs reach the shell ONLY via env — never interpolated into the script body
       # (a crafted input would otherwise become a command before validation; this job
@@ -299,7 +356,12 @@ jobs:
           SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
           RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
+          TARGET: ${{ inputs.target }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
+          NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
         run: |
           set -euo pipefail
           # Shape-validate EVERY dispatch input once, fail-closed, before any step
@@ -311,6 +373,34 @@ jobs:
           [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
           [ -z "$ADOPT_FINGERPRINT" ] || \
             python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
+          if [ -n "$SEED_LINE_BASELINE" ]; then
+            [ "$TARGET" = server ] && [ -z "$LIBRARY_RUN_ID" ] &&
+              [ -z "$RECOVERY_MODE" ] && [ -z "$ADOPT_FINGERPRINT" ] || {
+              echo "::error::seed_line_baseline requires standalone target=server without recovery/adoption"; exit 1;
+            }
+          fi
+          [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || [[ "$NER_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::ner_checkpoint_source_run_id must be a positive integer"; exit 1;
+          }
+          [ -z "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || [[ "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::ner_checkpoint_source_run_attempt must be a positive integer"; exit 1;
+          }
+          [ -z "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py \
+              ner_checkpoint_source_engine_fingerprint 8192 \
+              "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+          if [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
+             [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] ||
+             [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ]; then
+            [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] &&
+              [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] &&
+              [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || {
+              echo "::error::checkpoint recovery requires both source coordinates and its engine fingerprint"; exit 1;
+            }
+            [ -n "$RECOVERY_MODE" ] && [ "$TARGET" = kaggle ] || {
+              echo "::error::checkpoint source coordinates require recovery_mode and target=kaggle"; exit 1;
+            }
+          fi
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
           # rewrites) and recorded lineage have to match the exact export the build was
           # pinned to. Never let a serial relink silently pick up a newer "Latest".
@@ -400,8 +490,19 @@ jobs:
           echo "snapshot_zst_sha256=$ACTUAL_SNAPSHOT_SHA" >> "$GITHUB_OUTPUT"
           unzstd -f inputs/lines_snapshot.db.zst
 
-      # The HEAVY phase — stack bring-up (Mongo + NER + Django) and the re-link itself —
-      # runs as ONE step under a host lease (server target): a kernel flock whose FD is
+      - name: Restore exact prior-attempt NER checkpoint
+        if: inputs.target == 'kaggle'
+        env:
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
+        run: bash ci/restore_ner_checkpoint.sh "$RUN_DIR/ner-handoff"
+
+      # The compute phase is role-specific: Kaggle starts only the GPU NER service;
+      # target=server retains the legacy Mongo+NER+Django path. The server path runs as
+      # ONE step under a host lease: a kernel flock whose FD is
       # held by this step's shell for the phase's whole life and released by the kernel
       # on ANY death — crash, cancel, OOM — so there is no stale-lock state and no
       # timestamp-based stealing, ever. The deliberately-persistent daemons setup_stack
@@ -410,9 +511,9 @@ jobs:
       # lease is held exactly as long as heavy work is actually alive. Busy → fail
       # loudly and immediately: re-dispatching beats squatting on a runner slot for
       # hours. No metadata file grants delegation or lock stealing. A Kaggle session
-      # owns its whole VM — no lease there. SeforimLibrary holds the same kernel lock
-      # across its multi-step build, explicitly releases it before a serial server
-      # relink, and reacquires only after this child is terminal.
+      # owns its whole VM — no lease there. SeforimLibrary releases the shared lock for
+      # the whole child lifetime because the later resolver needs the Oracle host too,
+      # and reacquires only after this child is terminal.
       #
       # Any per-book/per-line failure fails this step (and the waiting build) loudly —
       # see incremental.py + link_books.py. The fingerprint covers everything that
@@ -423,14 +524,13 @@ jobs:
       # NER teardown is bound to this same step's EXIT trap — still under the lease, so
       # it can never kill another run's fresh stack (that run needs the lease first) —
       # freeing ~3GB of models for whatever resumes on the shared host either way.
-      - name: Bring up the stack + incremental re-link (heavy phase, host-leased)
+      - name: GPU NER producer or complete server relink
+        id: compute
+        continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # Kaggle serial deltas use one NER process and smaller transport batches.
-          # Engine parallelism is selected below from the *actual* VM memory after
-          # setup; every engine also self-recycles at a bounded RSS. This avoids both
-          # failure modes observed live: two unbounded engines OOM-killed the 31GB VM,
-          # while one bounded engine made healthy progress past the old 8h ceiling.
-          # Standalone Kaggle and the 24GB server retain their measured parallelism.
+          # Kaggle runs two producer processes against one NER model server; it never
+          # starts resolution workers. The server fallback retains its measured NER
+          # process count and 100-line transport boundary.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.library_run_id != '' && '2' || '3') }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
           # Shared, pre-provisioned via /etc/tmpfiles.d/otzaria-pipeline.conf on the
@@ -439,7 +539,11 @@ jobs:
           HOST_LEASE_PATH: /run/lock/otzaria/host-heavy.lock
           TARGET: ${{ inputs.target }}
           LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
+          NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: |
           set -euo pipefail
@@ -465,9 +569,21 @@ jobs:
               echo "host lease acquired: $HOST_LEASE_PATH"
             fi
           fi
+          if [ -n "$SEED_LINE_BASELINE" ]; then
+            python3 ci/seed_line_baseline.py \
+              --repo "$PWD" \
+              --snapshot inputs/lines_snapshot.db \
+              --engine-components-output stack/engine_fingerprint.txt
+            exit 0
+          fi
           # Teardown by OWNED pid (gunicorn --pid via setup_stack), still under the
           # lease/serialization — never a broad pkill sweep of the whole host.
           trap 'bash ci/stop_ner.sh || true' EXIT
+          if [ "$TARGET" = kaggle ]; then
+            export LINKER_STACK_ROLE=ner
+          else
+            export LINKER_STACK_ROLE=full
+          fi
           bash ci/setup_stack.sh 9>&-
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
           echo "engine fingerprint: $FINGERPRINT"
@@ -482,30 +598,36 @@ jobs:
             --python "$SEF_PROJECT/.venv/bin/python"
             --engine-fingerprint "$FINGERPRINT"
           )
+          if [ "$TARGET" = kaggle ]; then
+            PLAN="$RUN_DIR/ner-plan.json"
+            PLAN_ARGS=("${ARGS[@]}" --plan-only "$PLAN" --relink-request-id "$RELINK_REQUEST_ID")
+            [ -z "$LIBRARY_RUN_ID" ] || PLAN_ARGS+=(--forbid-full-relink)
+            [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
+            "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
+          CHECKPOINT_ARGS=()
+          if [ -n "${NER_CHECKPOINT_SOURCE_RUN_ID:-}" ]; then
+            CHECKPOINT_ARGS+=(
+              --checkpoint-engine-fingerprint "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+            )
+          fi
+          # The prebuilt venv contains Sefaria's dependencies but intentionally does
+          # not install the checkout itself as a wheel. Expose the exact pinned
+          # checkout only to the raw-NER producer so its training-time normalizer is
+          # importable without reintroducing Django/Mongo into the GPU process.
+          PYTHONPATH="$SEF_PROJECT${PYTHONPATH:+:$PYTHONPATH}" \
+          "$SEF_PROJECT/.venv/bin/python" src/precompute_ner.py \
+              --snapshot inputs/lines_snapshot.db \
+              --plan "$PLAN" \
+              --output "$RUN_DIR/ner-handoff" \
+              --relink-request-id "$RELINK_REQUEST_ID" \
+              --engine-fingerprint "$FINGERPRINT" \
+              --workers 2 \
+              --deadline-seconds 3600 \
+              "${CHECKPOINT_ARGS[@]}"
+            exit 0
+          fi
           if [ -n "$LIBRARY_RUN_ID" ]; then
-            # Each worker owns a full Sefaria process. Kaggle host RAM varies.
-            # Two *unbounded* workers plus two NER workers OOM-killed canary
-            # 29922788210; one bounded worker then timed out while still healthy in
-            # 29944220789. With one NER worker, 25-line batches and the per-engine
-            # RSS recycle, a >=24GB VM has measured headroom for two producers.
-            # Smaller VMs remain serial instead of gambling on OOM.
-            case "$TARGET" in
-              kaggle)
-                MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-                [[ "$MEM_TOTAL_KIB" =~ ^[1-9][0-9]*$ ]] || {
-                  echo "::error::cannot determine Kaggle MemTotal for safe worker admission"
-                  exit 1
-                }
-                if [ "$MEM_TOTAL_KIB" -ge 24000000 ]; then
-                  ENGINE_WORKERS=2
-                else
-                  ENGINE_WORKERS=1
-                fi
-                echo "Kaggle memory admission: MemTotal=${MEM_TOTAL_KIB}KiB engine_workers=$ENGINE_WORKERS"
-                ARGS+=(--engine-workers "$ENGINE_WORKERS")
-                ;;
-              *) ARGS+=(--engine-workers 2) ;;
-            esac
+            ARGS+=(--engine-workers 2)
             ARGS+=(--forbid-full-relink)
           else
             ARGS+=(--engine-workers 3)
@@ -521,7 +643,7 @@ jobs:
       # Both are skipped on dry_run: a canary measures the engine, ships nothing.
 
       - name: Pack content-addressed linker_links.zst (compute only)
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
         run: bash ci/pack_and_publish.sh
 
       # Bind the payload to the exact inputs it was linked against so the waiting build
@@ -529,7 +651,7 @@ jobs:
       # + this run) before it injects the links. Everything comes from env — no
       # interpolation into the Python source.
       - name: Emit relink manifest
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
         env:
           SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
           SNAPSHOT_ZST_SHA256: ${{ steps.inputs.outputs.snapshot_zst_sha256 }}
@@ -568,6 +690,348 @@ jobs:
       # Transfer compute output and baseline delta to a short ubuntu publisher.
       # The heavy/GPU runner has read-only job permissions and never publishes.
       - name: Upload verified publisher handoff
+        if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linker-publisher-handoff-${{ github.run_attempt }}
+          path: |
+            linker_links.zst
+            linker_links.zst.sha256
+            relink_manifest.json
+            baseline/
+            meta.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Pack raw-NER handoff for the CPU resolver
+        id: pack_raw_handoff
+        if: inputs.target == 'kaggle' && steps.compute.outcome == 'success'
+        continue-on-error: true
+        env:
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+        run: |
+          set -euo pipefail
+          echo "artifact_name=raw-ner-handoff-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "producer_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          bash ci/pack_ner_handoff.sh "$RUN_DIR/ner-handoff" raw_ner_handoff.tar.zst
+
+      - name: Upload content-addressed raw-NER handoff
+        id: upload_raw_handoff
+        if: inputs.target == 'kaggle' && steps.pack_raw_handoff.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_raw_handoff.outputs.artifact_name }}
+          path: |
+            raw_ner_handoff.tar.zst
+            raw_ner_handoff.tar.zst.sha256
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Pack resumable NER checkpoint after bounded failure
+        id: ner_checkpoint
+        if: >-
+          ${{
+            always() && inputs.target == 'kaggle' &&
+            (
+              steps.compute.outcome == 'failure' ||
+              steps.pack_raw_handoff.outcome == 'failure' ||
+              steps.upload_raw_handoff.outcome == 'failure'
+            )
+          }}
+        env:
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUN_DIR/ner-handoff/checkpoint.json" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPU setup/planning failed before a resumable checkpoint existed"
+            exit 0
+          fi
+          bash ci/pack_ner_checkpoint.sh "$RUN_DIR/ner-handoff" raw_ner_checkpoint.tar.zst
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=raw-ner-checkpoint-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload resumable NER checkpoint
+        if: always() && steps.ner_checkpoint.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ner_checkpoint.outputs.artifact_name }}
+          path: |
+            raw_ner_checkpoint.tar.zst
+            raw_ner_checkpoint.tar.zst.sha256
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Fail only after preserving bounded NER progress
+        if: >-
+          ${{
+            always() && inputs.target == 'kaggle' &&
+            (
+              steps.compute.outcome == 'failure' ||
+              steps.pack_raw_handoff.outcome == 'failure' ||
+              steps.upload_raw_handoff.outcome == 'failure'
+            )
+          }}
+        run: |
+          echo "::error::GPU NER or its raw handoff failed; exact prior-attempt checkpoints were preserved when available"
+          exit 1
+
+      # (NER teardown — freeing ~3GB of models for the build that resumes on this
+      # shared host — happens in the heavy step's EXIT trap, under the lease; the next
+      # relink pays a ~1min model reload and setup_stack restarts it cleanly.)
+
+      # The workspace persists between runs on this self-hosted runner — without this,
+      # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
+      # removed here is re-fetched deterministically by the next run.
+      - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
+        if: always()
+        run: rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
+
+  resolve:
+    name: Resolve raw NER on the durable CPU host
+    needs: relink
+    if: >-
+      ${{
+        always() && inputs.target == 'kaggle' &&
+        (
+          (inputs.raw_ner_source_run_id == '' && needs.relink.result == 'success') ||
+          (inputs.raw_ner_source_run_id != '' && needs.relink.result == 'skipped')
+        )
+      }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: [self-hosted, Linux, ARM64, server-2]
+    timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      LINKER_MODELS_TAG: models-v1
+      LINKER_DUMP_TAG: dump-v1
+      SEFARIA_COMMIT: 59291d9f8754de0062711bc1cd49214b0e618fc5
+      GPU_SERVER_COMMIT: d9da16119e9c0de64224d7b187cd999b2ead4bad
+      SEF_PROJECT: ${{ github.workspace }}/stack/Sefaria-Project
+      RUN_DIR: ${{ github.workspace }}/run-resolver
+      HOST_LEASE_PATH: /run/lock/otzaria/host-heavy.lock
+    steps:
+      - name: Checkout exact linker source
+        uses: actions/checkout@v4
+
+      - name: Bootstrap durable cross-repo host lease
+        run: bash ci/bootstrap_host_lock.sh ci/otzaria-pipeline.tmpfiles.conf
+
+      - name: Validate resolver identity inputs
+        id: tags
+        env:
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SEFARIA_TAG_INPUT: ${{ inputs.sefaria_tag }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
+          RAW_NER_SOURCE_RUN_ID: ${{ inputs.raw_ner_source_run_id }}
+          RAW_NER_SOURCE_RUN_ATTEMPT: ${{ inputs.raw_ner_source_run_attempt }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ]
+          [ -z "$LIBRARY_RUN_ID" ] || [[ "$LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RELINK_REQUEST_ID" =~ ^[0-9a-f]{64}$ ]]
+          [ -z "$PARENT_RUN_ATTEMPT" ] || [[ "$PARENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [ -z "$SNAPSHOT_SHA256" ] || [[ "$SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ -z "$ADOPT_FINGERPRINT" ] || python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
+          [ -z "$RAW_NER_SOURCE_RUN_ID" ] || [[ "$RAW_NER_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ -z "$RAW_NER_SOURCE_RUN_ATTEMPT" ] || [[ "$RAW_NER_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          if [ -n "$RAW_NER_SOURCE_RUN_ID" ] || [ -n "$RAW_NER_SOURCE_RUN_ATTEMPT" ]; then
+            [ -n "$RAW_NER_SOURCE_RUN_ID" ] && [ -n "$RAW_NER_SOURCE_RUN_ATTEMPT" ] || {
+              echo "::error::resolver recovery requires both raw-NER source coordinates"; exit 1;
+            }
+            [ -n "$RECOVERY_MODE" ] || {
+              echo "::error::raw-NER source coordinates are accepted only in recovery_mode"; exit 1;
+            }
+          fi
+          if [ -n "$LIBRARY_RUN_ID" ]; then
+            [ -n "$PARENT_RUN_ATTEMPT" ] && [ -n "$SNAPSHOT_SHA256" ] && [ -n "$SEFARIA_METADATA_SHA256" ]
+          elif [ -n "$PARENT_RUN_ATTEMPT" ]; then
+            echo "::error::standalone resolver must not carry parent_run_attempt"; exit 1
+          fi
+          if [ -n "$SEFARIA_TAG_INPUT" ]; then
+            [[ "$SEFARIA_TAG_INPUT" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
+            SEF_TAG="$SEFARIA_TAG_INPUT"
+          else
+            SEF_TAG="$(gh release view -R Otzaria/SefariaExport --json tagName -q .tagName)"
+            [[ "$SEF_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
+          fi
+          echo "sefaria_tag=$SEF_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Validate exact raw-NER recovery source
+        if: inputs.raw_ner_source_run_id != ''
+        env:
+          SOURCE_RUN_ID: ${{ inputs.raw_ner_source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.raw_ner_source_run_attempt }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+        run: |
+          set -euo pipefail
+          expected_title="relink request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
+          source_json="$RUNNER_TEMP/raw-ner-source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$source_json"
+          jq -e --arg title "$expected_title" '
+            .status == "completed" and .conclusion != "success" and
+            .event == "workflow_dispatch" and
+            .path == ".github/workflows/relink.yml" and
+            .display_title == $title and
+            (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
+          ' "$source_json" >/dev/null || {
+            echo "::error::raw-NER recovery source is not the exact failed producer run"; exit 1;
+          }
+          # A recovery fix necessarily has a newer workflow commit than the failed
+          # producer. Accept only a forward descendant on main; the checksum-gated
+          # handoff then validates its schema/request/snapshot/engine independently.
+          SOURCE_HEAD="$(jq -r .head_sha "$source_json")"
+          compare_json="$RUNNER_TEMP/raw-ner-source-compare.json"
+          gh api "repos/$GITHUB_REPOSITORY/compare/${SOURCE_HEAD}...${GITHUB_SHA}" > "$compare_json"
+          jq -e --arg source "$SOURCE_HEAD" '
+            (.status == "ahead" or .status == "identical") and
+            .behind_by == 0 and .merge_base_commit.sha == $source
+          ' "$compare_json" >/dev/null || {
+            echo "::error::recovery commit is not a forward descendant of the failed raw-NER producer"; exit 1;
+          }
+          parent_json="$RUNNER_TEMP/raw-ner-parent-run.json"
+          gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID" > "$parent_json"
+          jq -e --argjson attempt "$PARENT_RUN_ATTEMPT" '
+            .status == "completed" and .conclusion == "failure" and
+            .event == "workflow_dispatch" and
+            .path == ".github/workflows/manual-generate-release.yml" and
+            .run_attempt == $attempt
+          ' "$parent_json" >/dev/null || {
+            echo "::error::resolver-only recovery parent is not the exact failed build attempt"; exit 1;
+          }
+          artifact_name="raw-ner-handoff-${RELINK_REQUEST_ID}-${SOURCE_RUN_ATTEMPT}"
+          count=$(gh api --paginate -X GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts" -f per_page=100 \
+            --jq ".artifacts[] | select(.name == \"$artifact_name\" and (.expired|not) and (.size_in_bytes > 0)) | .id" \
+            | grep -c . || true)
+          [ "$count" -eq 1 ] || {
+            echo "::error::recovery source must expose exactly one live $artifact_name artifact"; exit 1;
+          }
+
+      - name: Download and safely extract raw-NER handoff
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.raw_ner_source_run_id != '' && format('raw-ner-handoff-{0}-{1}', inputs.relink_request_id, inputs.raw_ner_source_run_attempt) || needs.relink.outputs.raw_ner_artifact_name }}
+          run-id: ${{ inputs.raw_ner_source_run_id || github.run_id }}
+          github-token: ${{ secrets.PIPELINE_TOKEN }}
+          path: raw-ner-download
+
+      - name: Verify raw-NER archive before extraction
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ner"
+          python3 ci/unpack_ner_handoff.py \
+            raw-ner-download/raw_ner_handoff.tar.zst \
+            raw-ner-download/raw_ner_handoff.tar.zst.sha256 \
+            "$RUNNER_TEMP/ner/handoff"
+
+      - name: Restore complete artifact store
+        run: bash ci/restore_artifact_store.sh
+
+      - name: Fetch the exact resolver inputs
+        id: inputs
+        env:
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+        run: bash ci/fetch_relink_inputs.sh
+
+      - name: Resolve under the shared host lease without GPU models in memory
+        env:
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+          NER_BUNDLE_DIR: ${{ runner.temp }}/ner/handoff
+          LINKER_BATCH_LINES: 25
+          LINKER_STACK_ROLE: resolver
+          LINKER_NER_SCOPE: /run/lock/otzaria/linker-ner.scope.json
+          LINKER_NER_SCOPE_MODE: 0644
+        run: |
+          set -euo pipefail
+          export LINKER_ENGINE_SCOPE_DIR="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/engine-scopes"
+          bash ci/reap_engine_scopes.sh
+          test -e "$HOST_LEASE_PATH" && test -w "$HOST_LEASE_PATH"
+          exec 9>>"$HOST_LEASE_PATH"
+          echo "waiting up to 60 minutes for the shared CPU host lease"
+          flock -w 3600 9 || {
+            echo "::error::host lease remained busy for 60 minutes after the paid GPU phase"; exit 1;
+          }
+          echo "host lease acquired for CPU resolution"
+          bash ci/setup_stack.sh 9>&-
+          FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
+          ARGS=(
+            --repo "$PWD"
+            --snapshot inputs/lines_snapshot.db
+            --changelog inputs/changelog_diff.json
+            --sefaria-tag "$SEF_TAG"
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --run-dir "$RUN_DIR"
+            --sef-project "$SEF_PROJECT"
+            --python "$SEF_PROJECT/.venv/bin/python"
+            --engine-fingerprint "$FINGERPRINT"
+            --ner-bundle-dir "$NER_BUNDLE_DIR"
+            --relink-request-id "$RELINK_REQUEST_ID"
+            --engine-workers 2
+          )
+          [ -z "$LIBRARY_RUN_ID" ] || ARGS+=(--forbid-full-relink)
+          [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
+          "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
+
+      - name: Pack final content-addressed linker payload
+        if: ${{ !inputs.dry_run }}
+        run: bash ci/pack_and_publish.sh
+
+      - name: Emit final relink manifest
+        if: ${{ !inputs.dry_run }}
+        env:
+          SEFARIA_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+          SNAPSHOT_ZST_SHA256: ${{ steps.inputs.outputs.snapshot_zst_sha256 }}
+          RELINK_RUN_ID: ${{ github.run_id }}
+          RELINK_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          PARENT_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+        run: |
+          set -euo pipefail
+          PAYLOAD_SHA256="$(sha256sum linker_links.zst | cut -d' ' -f1)" \
+          ENGINE_FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0" \
+          LINKER_COMMIT="$(git rev-parse HEAD)" \
+          python3 - <<'PY'
+          import json, os
+          manifest = {
+              "schema_version": 2,
+              "sefaria_tag": os.environ["SEFARIA_TAG"],
+              "snapshot_zst_sha256": os.environ["SNAPSHOT_ZST_SHA256"],
+              "engine_fingerprint": os.environ["ENGINE_FINGERPRINT"],
+              "payload_sha256": os.environ["PAYLOAD_SHA256"],
+              "linker_commit": os.environ["LINKER_COMMIT"],
+              "relink_run_id": int(os.environ["RELINK_RUN_ID"]),
+              "relink_run_attempt": int(os.environ["RELINK_RUN_ATTEMPT"]),
+              "relink_request_id": os.environ["RELINK_REQUEST_ID"],
+              "parent_run_id": int(os.environ["PARENT_RUN_ID"]) if os.environ["PARENT_RUN_ID"] else 0,
+              "parent_run_attempt": int(os.environ["PARENT_RUN_ATTEMPT"]) if os.environ["PARENT_RUN_ATTEMPT"] else 0,
+          }
+          with open("relink_manifest.json", "w", encoding="utf-8") as stream:
+              stream.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+
+      - name: Upload verified publisher handoff
         if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
@@ -581,21 +1045,27 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      # (NER teardown — freeing ~3GB of models for the build that resumes on this
-      # shared host — happens in the heavy step's EXIT trap, under the lease; the next
-      # relink pays a ~1min model reload and setup_stack restarts it cleanly.)
-
-      # The workspace persists between runs on this self-hosted runner — without this,
-      # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
-      # removed here is re-fetched deterministically by the next run.
-      - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
+      - name: Clean resolver workspace
         if: always()
-        run: rm -rf inputs artifacts linker_links.zst linker_links.zst.sha256 relink_manifest.json
+        run: rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
 
   publish:
     name: Verify and publish immutable linker payload
-    needs: relink
-    if: ${{ !inputs.dry_run }}
+    needs: [relink, resolve]
+    if: >-
+      ${{
+        always() && !inputs.dry_run &&
+        (
+          (needs.relink.result == 'success' && inputs.target != 'kaggle') ||
+          (
+            inputs.target == 'kaggle' && needs.resolve.result == 'success' &&
+            (
+              needs.relink.result == 'success' ||
+              (inputs.raw_ner_source_run_id != '' && needs.relink.result == 'skipped')
+            )
+          )
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

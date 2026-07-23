@@ -42,6 +42,12 @@ sys_path = os.path.dirname(os.path.abspath(__file__))
 import sys  # noqa: E402
 sys.path.insert(0, sys_path)
 from linker_artifact import BookKey, book_key_to_relpath, read_artifact, write_artifact  # noqa: E402
+from line_baseline import (  # noqa: E402
+    DIRECTORY_NAME as LINE_BASELINE_DIRECTORY,
+    build_line_baseline,
+    plan_changed_books,
+    validate_baseline_identity,
+)
 
 
 # ── target_ref rewrite for en-renames (no linking) ──────────────────────────
@@ -278,15 +284,16 @@ def _log(msg):
     print(f"[incremental] {msg}", flush=True)
 
 
-def run_incremental(args) -> int:
-    """End-to-end incremental update. Returns the number of books re-linked."""
+def compute_incremental_plan(args) -> dict:
+    """Compute the immutable work plan without touching artifacts or baseline state.
+
+    The GPU producer and CPU resolver both call this exact function.  Keeping one
+    planner is a correctness boundary: a transport split must never let Kaggle
+    recognize one set of books while the resolver advances a different set.
+    """
     repo = os.path.abspath(args.repo)
     baseline_dir = os.path.join(repo, "baseline")
-    os.makedirs(baseline_dir, exist_ok=True)
-    artifacts_dir = os.path.join(repo, "artifacts")
-    os.makedirs(artifacts_dir, exist_ok=True)
-
-    # 1. Diff the CURRENT snapshot's per-book content hashes against the baseline.
+    # Diff the CURRENT snapshot's per-book content hashes against the baseline.
     #    A changed engine fingerprint invalidates the WHOLE baseline (full relink):
     #    the engine version shapes the output, so a partial relink under a new engine
     #    would leave the artifact store a mix of engines. The `removed` plan still uses
@@ -299,6 +306,7 @@ def run_incremental(args) -> int:
     baseline, stored_fingerprint = _read_baseline_file(baseline_dir)
     fingerprint = getattr(args, "engine_fingerprint", None)
     changed, removed = plan_from_snapshot(current, baseline)
+    reuse_engine_compatible = True
     if baseline and fingerprint is not None and stored_fingerprint != fingerprint:
         adopt = getattr(args, "adopt_fingerprint", None)
         if adopt:
@@ -332,7 +340,129 @@ def run_incremental(args) -> int:
             _log("engine fingerprint changed "
                  f"({stored_fingerprint!r} -> {fingerprint!r}) — FULL relink")
             changed = [BookKey(s, t) for (s, t) in sorted(current)]
+            reuse_engine_compatible = False
+    line_baseline_root = os.path.join(repo, LINE_BASELINE_DIRECTORY)
+    previous_snapshot_sha = None
+    try:
+        with open(os.path.join(repo, "meta.json"), encoding="utf-8") as stream:
+            previous_meta = json.load(stream)
+        previous_snapshot_sha = previous_meta["snapshot"]["sha256"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        previous_snapshot_sha = None
+    line_identity_valid = bool(
+        reuse_engine_compatible
+        and baseline
+        and isinstance(previous_snapshot_sha, str)
+        and validate_baseline_identity(
+            line_baseline_root,
+            snapshot_sha256=previous_snapshot_sha,
+            engine_fingerprint=stored_fingerprint,
+            book_count=len(baseline),
+        )
+    )
+    line_deltas, reused_lines, ner_lines = plan_changed_books(
+        args.snapshot,
+        changed,
+        baseline_root=line_baseline_root,
+        baseline_hashes=baseline,
+        baseline_identity_valid=line_identity_valid,
+    )
     _log(f"snapshot: {len(current)} books | changed/new={len(changed)} removed={len(removed)}")
+    if changed:
+        mode = "exact line reuse" if line_identity_valid else "full-book fallback"
+        _log(
+            f"line plan ({mode}): reuse={reused_lines} NER={ner_lines} "
+            f"({(100.0 * ner_lines / (reused_lines + ner_lines)) if reused_lines + ner_lines else 0:.3f}% GPU)"
+        )
+    return {
+        "current": current,
+        "changed": changed,
+        "removed": removed,
+        "line_deltas": line_deltas,
+        "engine_fingerprint": fingerprint,
+        "stored_engine_fingerprint": stored_fingerprint,
+    }
+
+
+def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
+    """Write the GPU→resolver planning contract as canonical, duplicate-free JSON."""
+    import re
+
+    if not re.fullmatch(r"[0-9a-f]{64}", relink_request_id or ""):
+        raise RuntimeError("--relink-request-id must be exactly 64 lowercase hex characters")
+    plan = compute_incremental_plan(args)
+    current = plan["current"]
+    document = {
+        "schema_version": 2,
+        "relink_request_id": relink_request_id,
+        "snapshot_sha256": sha256_of_file(args.snapshot),
+        "changelog_sha256": sha256_of_file(args.changelog) if args.changelog else None,
+        "engine_fingerprint": plan["engine_fingerprint"],
+        "changed": [
+            {
+                **book.to_dict(),
+                "ner_ranges": [
+                    [start, end]
+                    for start, end in plan["line_deltas"][
+                        (book.source_name, book.canonical_he_title)
+                    ].ner_ranges
+                ],
+            }
+            for book in plan["changed"]
+        ],
+        "removed": [book.to_dict() for book in plan["removed"]],
+        "current_books": [
+            {"source_name": source, "canonical_he_title": title, "hash": digest}
+            for (source, title), digest in sorted(current.items())
+        ],
+    }
+    parent = os.path.dirname(os.path.abspath(output))
+    os.makedirs(parent, exist_ok=True)
+    tmp = output + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, output)
+    _log(f"wrote immutable split plan: {len(plan['changed'])} changed book(s) -> {output}")
+    return len(plan["changed"])
+
+
+def run_incremental(args) -> int:
+    """End-to-end incremental update. Returns the number of books re-linked."""
+    repo = os.path.abspath(args.repo)
+    baseline_dir = os.path.join(repo, "baseline")
+    os.makedirs(baseline_dir, exist_ok=True)
+    artifacts_dir = os.path.join(repo, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    plan = compute_incremental_plan(args)
+    current = plan["current"]
+    changed = plan["changed"]
+    removed = plan["removed"]
+    line_deltas = plan["line_deltas"]
+    fingerprint = plan["engine_fingerprint"]
+
+    # The release line baseline records whether each prior book had an artifact
+    # and, when present, its exact digest. Validate that before any target-ref
+    # rewrite mutates the store. Reusing an identical source line from a missing
+    # or drifted artifact could otherwise turn corruption into silent link loss.
+    for book in changed:
+        delta = line_deltas[(book.source_name, book.canonical_he_title)]
+        if not delta.reuse:
+            continue
+        artifact_path = os.path.join(repo, book_key_to_relpath(book))
+        expected = delta.prior_artifact_sha256
+        if expected is None:
+            if os.path.exists(artifact_path):
+                raise RuntimeError(
+                    f"line baseline expected no prior artifact for "
+                    f"{book.source_name}/{book.canonical_he_title!r}"
+                )
+        elif not os.path.isfile(artifact_path) or sha256_of_file(artifact_path) != expected:
+            raise RuntimeError(
+                f"prior artifact digest differs from the exact line baseline for "
+                f"{book.source_name}/{book.canonical_he_title!r}"
+            )
 
     # 2. Target en-renames: rewrite target_ref across ALL artifacts (no linking). Target-only.
     # The changelog_diff.json contract (SefariaExport generate_changelog.py) nests the book
@@ -366,8 +496,37 @@ def run_incremental(args) -> int:
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         with open(only, "w", encoding="utf-8") as fh:
-            json.dump([b.to_dict() for b in changed], fh, ensure_ascii=False)
-        _log(f"re-linking {len(changed)} changed books")
+            json.dump([
+                {
+                    **book.to_dict(),
+                    "hash": current[(book.source_name, book.canonical_he_title)],
+                    "ner_ranges": [
+                        [start, end]
+                        for start, end in line_deltas[
+                            (book.source_name, book.canonical_he_title)
+                        ].ner_ranges
+                    ],
+                    "reuse": [
+                        [old_index, new_index]
+                        for old_index, new_index in line_deltas[
+                            (book.source_name, book.canonical_he_title)
+                        ].reuse
+                    ],
+                }
+                for book in changed
+            ], fh, ensure_ascii=False)
+        requested_ner_lines = sum(
+            line_deltas[(book.source_name, book.canonical_he_title)].ner_line_count
+            for book in changed
+        )
+        reused_lines = sum(
+            line_deltas[(book.source_name, book.canonical_he_title)].reused_line_count
+            for book in changed
+        )
+        _log(
+            f"updating {len(changed)} changed books: "
+            f"{requested_ner_lines} line(s) require NER, {reused_lines} reused"
+        )
         codes = _run_engine(args, only)
         failed = read_failed_books(args.run_dir)
 
@@ -410,17 +569,28 @@ def run_incremental(args) -> int:
 
     # 5. Advance baseline + lineage. Any failure never reaches here (raised above), so the
     #    baseline advances to exactly the snapshot hashes that were fully linked.
+    snapshot_sha256 = sha256_of_file(args.snapshot)
+    # Build the next exact reuse baseline before advancing the committed book clock.
+    # A failure here leaves both clocks on the previous accepted release.
+    build_line_baseline(
+        args.snapshot,
+        os.path.join(repo, LINE_BASELINE_DIRECTORY),
+        current_hashes=current,
+        snapshot_sha256=snapshot_sha256,
+        engine_fingerprint=fingerprint,
+        artifacts_root=artifacts_dir,
+    )
     write_snapshot_baseline(baseline_dir, dict(current), engine_fingerprint=fingerprint)
     write_meta(
         repo,
         sefaria_export_tag=args.sefaria_tag,
-        snapshot_sha256=sha256_of_file(args.snapshot),
+        snapshot_sha256=snapshot_sha256,
         book_count=len(current),
         bavli_convention=args.bavli_convention,
         generated_at=args.generated_at,
         engine_fingerprint=fingerprint,
     )
-    _log("baseline + meta.json updated")
+    _log("book baseline + exact line baseline + meta.json updated")
     return len(changed)
 
 
@@ -472,6 +642,13 @@ def _run_engine(args, only_books_path):
                 "--run-dir", os.path.abspath(args.run_dir), "--only-books", os.path.abspath(only_books_path)]
     if args.bavli_convention:
         base_cmd.append("--bavli-convention")
+    ner_bundle_dir = getattr(args, "ner_bundle_dir", None)
+    if ner_bundle_dir:
+        base_cmd += [
+            "--ner-bundle-dir", os.path.abspath(ner_bundle_dir),
+            "--expected-engine-fingerprint", args.engine_fingerprint or "",
+            "--expected-relink-request-id", args.relink_request_id or "",
+        ]
     env = dict(os.environ, PYTHONPATH=args.sef_project + ":" + os.environ.get("PYTHONPATH", ""))
     workers = max(1, int(getattr(args, "engine_workers", 1) or 1))
     _log(f"running engine ({workers} worker(s)): " + " ".join(base_cmd))
@@ -621,8 +798,20 @@ def main():
     ap.add_argument("--adopt-fingerprint", default=None, metavar="OLD::NEW",
                     help="operator-attested migration: re-stamp the baseline fingerprint "
                          "WITHOUT a full relink; both strings must match exactly")
+    ap.add_argument("--ner-bundle-dir", default=None,
+                    help="verified raw-NER bundle directory; resolve without a live GPU service")
+    ap.add_argument("--plan-only", default=None, metavar="PATH",
+                    help="write the immutable changed-book plan and exit without mutation")
+    ap.add_argument("--relink-request-id", default=None,
+                    help="64-hex correlation key embedded in --plan-only output")
     args = ap.parse_args()
     install_terminate_handler()
+    if args.plan_only:
+        n = write_incremental_plan(args, args.plan_only, args.relink_request_id)
+        _log(f"plan complete: {n} books require NER")
+        return
+    if args.relink_request_id and not args.ner_bundle_dir:
+        ap.error("--relink-request-id without --plan-only requires --ner-bundle-dir")
     n = run_incremental(args)
     _log(f"done: {n} books re-linked")
 

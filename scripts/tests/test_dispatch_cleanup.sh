@@ -87,6 +87,11 @@ cat > "$WORK/bin/kaggle" <<'EOF'
 #!/usr/bin/env bash
 echo "kaggle $*" >> "$MOCK_LOG"
 /bin/sleep "${MOCK_KAGGLE_SLEEP:-0}"
+[ -z "${MOCK_KAGGLE_PUSH_ERROR:-}" ] || {
+  echo "Kernel push error: Maximum weekly GPU quota reached."
+  exit 0
+}
+[ "${MOCK_KAGGLE_RC:-0}" -ne 0 ] || echo "Kernel version 99 successfully pushed."
 exit "${MOCK_KAGGLE_RC:-0}"
 EOF
 cat > "$WORK/bin/sleep" <<'EOF'
@@ -120,6 +125,10 @@ export MOCK_LOG="$WORK/t3.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_RC=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
 check "push failure → child cancelled once, rc!=0" test "$rc" -ne 0 -a "$(cancels)" -eq 1
 
+export MOCK_LOG="$WORK/t3-semantic.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_PUSH_ERROR=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
+check "semantic push error with rc=0 → child cancelled" test "$rc" -ne 0 -a "$(cancels)" -eq 1
+
 export MOCK_LOG="$WORK/t4.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
 check "success → no cancel, rc=0" test "$rc" -eq 0 -a "$(cancels)" -eq 0
@@ -141,6 +150,19 @@ rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" \
   --recovery-mode --adopt-fingerprint 'old fingerprint::new fingerprint' ) >/dev/null 2>&1 || rc=$?
 check "adoption attestation → quoted workflow input" \
   test "$rc" -eq 0 -a "$(grep -c 'adopt_fingerprint=old fingerprint::new fingerprint' "$MOCK_LOG")" -eq 1
+
+export MOCK_LOG="$WORK/t4-checkpoint.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" \
+  --recovery-mode \
+  --ner-checkpoint-source-run-id 123 \
+  --ner-checkpoint-source-run-attempt 2 \
+  --ner-checkpoint-source-engine-fingerprint 'old engine fingerprint' \
+  ) >/dev/null 2>&1 || rc=$?
+check "checkpoint recovery identity → forwarded atomically" \
+  test "$rc" -eq 0 \
+    -a "$(grep -c 'ner_checkpoint_source_run_id=123' "$MOCK_LOG")" -eq 1 \
+    -a "$(grep -c 'ner_checkpoint_source_run_attempt=2' "$MOCK_LOG")" -eq 1 \
+    -a "$(grep -c 'ner_checkpoint_source_engine_fingerprint=old engine fingerprint' "$MOCK_LOG")" -eq 1
 
 cat > "$WORK/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash

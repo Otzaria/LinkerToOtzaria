@@ -8,27 +8,28 @@ triggers SefariaExport, the library update, and the SeforimLibrary build).
 
 ```
 weekly-pipeline (Thu):
-  upstreams  ── SefariaExport release + otzaria-library update (wait for both)
-       │
-       ├── build   → fire SeforimLibrary manual-generate-release.yml
-       │              (build publishes seforim.db.zst + lines_snapshot.db.zst + linker_links → Phase-2)
-       └── linker  → fire LinkerToOtzaria relink.yml
-                      (self-hosted: Mongo+NER+Django; re-link changed books; publish linker_links.zst)
+  upstreams → SeforimLibrary manual-generate-release.yml
+                │ build DB + upload exact lines_snapshot
+                │ release shared host lease
+                ▼
+           kaggle-relink intent/provisioner
+                │ relink job on Kaggle: plan + GPU NER only (≤60m producer)
+                │ content-addressed raw-NER artifact
+                ▼
+           resolve job on Oracle ARM
+                │ bounded wait for shared host lease
+                │ Mongo + Django CPU resolution (NER models disabled)
+                │ immutable payload + manifest
+                ▼
+           publisher → waiting build verifies exact identity and applies links
 ```
 
-`build` and `linker` run in parallel after `upstreams`. They are **cross-cycle** by design:
-
-- `linker` consumes `lines_snapshot.db.zst` from the **latest** SeforimLibrary release
-  (the previous build) and publishes `linker_links.zst`.
-- `build`'s Phase-2 (`generateLinkerLinks`, stage 5) consumes the **latest** `linker_links.zst`
-  (the previous linker run).
-
-So a newly-changed source book's links land one weekly cycle later. This avoids any
-intra-build orchestration and keeps each component independently retriable. The delta
-design makes this safe on **both** sides: target-side (Sefaria content) updates are
-resolved fresh every build; source-side drift (the offsets index a snapshot that may be up
-to two cycles old) is caught by the per-record `source_hash` — Phase-2 safe-drops any link
-whose source line no longer matches, and it reappears once that source book is re-linked.
+The serial build waits for its exact correlated child. There is no cross-cycle “Latest”
+handoff: request id, parent run+attempt, snapshot digest, pinned Sefaria metadata,
+engine fingerprint and payload digest are checked end-to-end before Phase-2 mutates the DB.
+The parent releases the kernel host lease for both targets because the split Kaggle path
+also needs the Oracle box for CPU resolution, and reacquires it only after the child is
+terminal.
 
 ## What each repo contributes
 
@@ -37,20 +38,31 @@ whose source line no longer matches, and it reappears once that source book is r
 | SefariaExport | publishes `changelog_diff.json` (stage 0) | rename hint for target_ref rewrite |
 | SeforimLibrary | `dumpLines` step publishes `lines_snapshot.db.zst` (stage 4) | the linker's offset-accurate input |
 | SeforimLibrary | `generateLinkerLinks` Phase-2 (stage 5) | resolves target_ref → line, writes clickable links |
-| otzaria-library | `weekly-pipeline.yml` `linker` job | triggers the re-link |
-| LinkerToOtzaria | `relink.yml` + `ci/*.sh` | the re-link itself |
+| otzaria-library | `weekly-pipeline.yml` | orchestrates the single serial saga |
+| LinkerToOtzaria | `relink.yml` + `ci/*.sh` | GPU NER handoff, CPU resolution, immutable publish |
 
 ## Secrets / runner
 
 - `PIPELINE_TOKEN` (PAT) — already used by the pipeline to trigger cross-repo workflows.
 - `LINKER_DUMP_URL` — pinned URL of the Sefaria Mongo dump archive (lineage; used by
   `ci/setup_stack.sh`).
-- Runner: `[self-hosted, Linux, X64, server-2]` — the heavy stack (Mongo + NER models +
-  Django) needs the same class of runner as the DB build, not a hosted `ubuntu-latest`.
+- Kaggle JIT runner: GPU NER only; no Mongo restore and no `sefaria.model` import.
+- Oracle runner: `[self-hosted, Linux, ARM64, server-2]`; Mongo+Django resolution under
+  `/run/lock/otzaria/host-heavy.lock`, without GPU/NER models in memory.
 
 ## Bootstrap (cold start)
 
 First run has no prior snapshot/zst. Stage 6 seeds them: a full linker run over the whole
 corpus populates `artifacts/` + `baseline/` + `meta.json` and publishes the first
-`linker_links.zst`; the first SeforimLibrary build with the `dumpLines` step publishes the
-first snapshot. After that the steady-state cross-cycle loop holds.
+`linker_links.zst`; the first SeforimLibrary build with `dumpLines` publishes the first
+snapshot. After that every build uses the same-cycle serial contract above.
+
+## Recovery
+
+- NER exceeded its 60-minute producer budget: rerun failed jobs on the same relink
+  databaseId; the next attempt restores the newest unique prior checkpoint.
+- Resolver failed after raw NER upload: dispatch `relink.yml` in resolver-only recovery
+  mode using the exact source run+attempt. This skips Kaggle and revalidates the source
+  run, parent, commit, artifact, snapshot and engine fingerprint.
+- A busy Oracle host is not an immediate loss of paid GPU work: resolver waits up to
+  60 minutes on the real kernel lease, then fails loudly for bounded recovery.

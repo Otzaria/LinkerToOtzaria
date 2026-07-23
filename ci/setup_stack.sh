@@ -17,6 +17,14 @@ CACHE="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}"
 SEF="$STACK/Sefaria-Project"
 GPU="$STACK/gpu-server"
 NER_URL="http://127.0.0.1:5051/recognize-entities"
+STACK_ROLE="${LINKER_STACK_ROLE:-full}"
+RUNTIME_LOCK_DIR="${LINKER_REPO:-$PWD}/ci/runtime-lock"
+RUNTIME_LOCK_MANIFEST="$RUNTIME_LOCK_DIR/runtime-manifest.json"
+RUNTIME_LOCK_SEFARIA="$RUNTIME_LOCK_DIR/sefaria.txt"
+case "$STACK_ROLE" in
+  full|ner|resolver) ;;
+  *) echo "::error::LINKER_STACK_ROLE must be full, ner, or resolver"; exit 2 ;;
+esac
 mkdir -p "$STACK" "$CACHE"
 
 # Kaggle chooses the mount directory for a kernel output. Discover by the pinned
@@ -89,8 +97,27 @@ fi
 # ── 2. Python venv (numpy<2 — thinc/spaCy binary compat, learned in the POC) ─
 # The venv carries an identity (python + requirements hash + commit); any change
 # rebuilds it from scratch — a SEFARIA_COMMIT bump must never run on a stale venv.
-SEF_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
+SEF_VENV_BASE_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
 GPU_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$GPU/app/requirements.txt" | cut -c1-12):${GPU_SERVER_COMMIT:-head}"
+SEF_VENV_ID="$SEF_VENV_BASE_ID"
+CANONICAL_PYTHON_RUNTIME_ID=
+if [ "$STACK_ROLE" = resolver ]; then
+  # Kaggle's x86_64 wheels cannot be copied into the ARM resolver, but resolving
+  # unpinned transitive dependencies again is not equivalent either.  Install the
+  # exact Sefaria package versions from the verified Kaggle runtime manifest and
+  # use that manifest's combined NER+resolver identity.  The GPU half is represented
+  # by the checksum-gated raw-NER handoff and is deliberately not installed on ARM.
+  CANONICAL_PYTHON_RUNTIME_ID=$(
+    python3 "${LINKER_REPO:-$PWD}/ci/validate_runtime_lock.py" \
+      --manifest "$RUNTIME_LOCK_MANIFEST" \
+      --sefaria-freeze "$RUNTIME_LOCK_SEFARIA" \
+      --sefaria-repo "$SEF" \
+      --gpu-repo "$GPU" \
+      --python-version "$($PYBIN --version 2>&1)"
+  )
+  [[ "$CANONICAL_PYTHON_RUNTIME_ID" =~ ^[0-9a-f]{16}$ ]]
+  SEF_VENV_ID="$SEF_VENV_BASE_ID:resolver-lock-$(sha256sum "$RUNTIME_LOCK_SEFARIA" | cut -c1-12)"
+fi
 
 # Ephemeral Kaggle sessions receive both complete venvs as one immutable kernel
 # output. Verify and install them together before either slow network fallback can
@@ -110,8 +137,12 @@ if [ ! -x "$SEF/.venv/bin/python" ] || [ "$(cat "$SEF/.venv/.identity" 2>/dev/nu
   rm -rf "$SEF/.venv"
   "$PYBIN" -m venv "$SEF/.venv"
   "$SEF/.venv/bin/pip" install --upgrade pip
-  "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
-  "$SEF/.venv/bin/pip" install "numpy<2"
+  if [ "$STACK_ROLE" = resolver ]; then
+    "$SEF/.venv/bin/pip" install -r "$RUNTIME_LOCK_SEFARIA"
+  else
+    "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
+    "$SEF/.venv/bin/pip" install "numpy<2"
+  fi
   printf '%s' "$SEF_VENV_ID" > "$SEF/.venv/.identity"
 fi
 # local_settings: point Django at the local Mongo; secrets stay empty (offline linking).
@@ -135,7 +166,6 @@ grep -q "^ENABLE_LINKER = True$" "$LS" && grep -q "^GPU_SERVER_URL = 'http://loc
 # new dump, must not survive into the restored state.
 DUMP_TAG="${LINKER_DUMP_TAG:-dump-v1}"
 DUMP_REPO="${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}"
-pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
 # Content-addressed dump identity: ALWAYS computed from the SHA256SUMS asset,
 # BEFORE any cache decision. A tag-keyed marker once let a stale server cache
 # fingerprint the same dump differently than a fresh Kaggle session (empty
@@ -146,7 +176,10 @@ rm -rf "$CACHE/dump-sums" && mkdir -p "$CACHE/dump-sums"
 gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p SHA256SUMS -D "$CACHE/dump-sums"
 DUMP_CONTENT_ID="$(sha256sum "$CACHE/dump-sums/SHA256SUMS" | cut -c1-16)"
 DUMP_MARKER="$CACHE/.dump-restored-content-$DUMP_CONTENT_ID"
-if [ ! -f "$DUMP_MARKER" ]; then
+if [ "$STACK_ROLE" != ner ]; then
+  pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
+fi
+if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
   rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
   gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
   cp "$CACHE/dump-sums/SHA256SUMS" "$CACHE/dump-dl/SHA256SUMS"
@@ -193,7 +226,8 @@ SUBREF_MODEL=$(model_path he_subref_ner)
 
 # ── 5. gpu-server venv + generated config + gunicorn on :5051 ────────────────
 # app/local_config.py is generated here (it is machine-specific, never committed).
-if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; then
+if [ "$STACK_ROLE" != resolver ] && \
+   { [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; }; then
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
   "$GPU/.venv/bin/pip" install --upgrade pip
@@ -203,26 +237,41 @@ if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/
 fi
 
 # Resolve and verify the semantic Python environment identity. The bundle SHA is
-# a supply-chain pin; the freeze hashes are the engine identity, so an equivalent
-# server cache and the Kaggle bundle fingerprint identically while package drift
-# on either target forces an explicit full/adopt decision.
-for venv in "$SEF/.venv" "$GPU/.venv"; do
+# a supply-chain pin; the freeze hashes are the engine identity, so package drift
+# on either target forces an explicit full/adopt decision.  The split resolver
+# verifies its locally installed Sefaria environment byte-for-byte against the
+# producer runtime lock; its unused CUDA environment is represented by the exact
+# handoff/runtime manifest rather than being installed on ARM.
+if [ "$STACK_ROLE" = resolver ]; then
   freeze_tmp=$(mktemp)
-  "$venv/bin/python" -m pip freeze --all > "$freeze_tmp"
-  if [ -f "$venv/.freeze" ]; then
-    cmp -s "$freeze_tmp" "$venv/.freeze" || {
-      echo "::error::installed packages disagree with the verified runtime freeze: $venv"
-      rm -f "$freeze_tmp"
-      exit 1
-    }
+  "$SEF/.venv/bin/python" -m pip freeze --all > "$freeze_tmp"
+  cmp -s "$freeze_tmp" "$RUNTIME_LOCK_SEFARIA" || {
+    echo "::error::ARM resolver packages disagree with the verified Kaggle Sefaria freeze"
+    diff -u "$RUNTIME_LOCK_SEFARIA" "$freeze_tmp" || true
     rm -f "$freeze_tmp"
-  else
-    mv "$freeze_tmp" "$venv/.freeze"
-  fi
-done
-SEF_FREEZE_SHA256=$(sha256sum "$SEF/.venv/.freeze" | cut -d' ' -f1)
-GPU_FREEZE_SHA256=$(sha256sum "$GPU/.venv/.freeze" | cut -d' ' -f1)
-PYTHON_RUNTIME_ID=$(printf '%s\n%s\n' "$SEF_FREEZE_SHA256" "$GPU_FREEZE_SHA256" | sha256sum | cut -c1-16)
+    exit 1
+  }
+  mv "$freeze_tmp" "$SEF/.venv/.freeze"
+  PYTHON_RUNTIME_ID="$CANONICAL_PYTHON_RUNTIME_ID"
+else
+  for venv in "$SEF/.venv" "$GPU/.venv"; do
+    freeze_tmp=$(mktemp)
+    "$venv/bin/python" -m pip freeze --all > "$freeze_tmp"
+    if [ -f "$venv/.freeze" ]; then
+      cmp -s "$freeze_tmp" "$venv/.freeze" || {
+        echo "::error::installed packages disagree with the verified runtime freeze: $venv"
+        rm -f "$freeze_tmp"
+        exit 1
+      }
+      rm -f "$freeze_tmp"
+    else
+      mv "$freeze_tmp" "$venv/.freeze"
+    fi
+  done
+  SEF_FREEZE_SHA256=$(sha256sum "$SEF/.venv/.freeze" | cut -d' ' -f1)
+  GPU_FREEZE_SHA256=$(sha256sum "$GPU/.venv/.freeze" | cut -d' ' -f1)
+  PYTHON_RUNTIME_ID=$(printf '%s\n%s\n' "$SEF_FREEZE_SHA256" "$GPU_FREEZE_SHA256" | sha256sum | cut -c1-16)
+fi
 cat > "$GPU/app/local_config.py" <<EOF
 MODEL_PATHS = [
     {"arch": "spacy", "lang": "he", "path": "$REF_MODEL", "type": "named_entity"},
@@ -240,7 +289,13 @@ NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
 NER_SCOPE_MODE="${LINKER_NER_SCOPE_MODE:-0600}"
 PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
-if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
+if [ "$STACK_ROLE" = resolver ]; then
+  # The CPU resolver deliberately has no model server in memory.  This runs under
+  # the shared host lease, so stopping the exact owned group cannot race another job.
+  if [ -f "$NER_SCOPE" ]; then
+    bash "$(dirname "$0")/stop_ner.sh"
+  fi
+elif [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
   # Stop only an identity-bound process group.  A pre-migration gunicorn without
   # scope state is never killed heuristically; a live port below fails loudly and
   # requires one explicit operator cleanup.
@@ -257,7 +312,7 @@ if [ "$(cat "$NER_MARKER" 2>/dev/null)" != "$NER_ID" ]; then
     exit 1
   fi
 fi
-if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
+if [ "$STACK_ROLE" != resolver ] && ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
       -d '{"text":"בדיקה","lang":"he"}' >/dev/null 2>&1; then
   # A same-fingerprint master may have become unhealthy while descendants still
   # exist. Reap its verified group before starting a replacement; never overlap
@@ -290,13 +345,15 @@ if ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
   done
   curl -fsS -m 5 -X POST "$NER_URL" -H 'Content-Type: application/json' \
     -d '{"text":"בדיקה","lang":"he"}' >/dev/null || { echo "::error::NER did not come up"; tail -50 "$CACHE/gunicorn.log"; exit 1; }
-else
+elif [ "$STACK_ROLE" != resolver ]; then
   python3 "$PROCESS_SCOPE" check --state "$NER_SCOPE" --expect 'app:create_app()' || {
     echo "::error::healthy :5051 service lacks valid process ownership state; refusing to adopt it"
     exit 1
   }
 fi
-printf '%s' "$NER_ID" > "$NER_MARKER"
+if [ "$STACK_ROLE" != resolver ]; then
+  printf '%s' "$NER_ID" > "$NER_MARKER"
+fi
 
 # ── 6. Engine fingerprint (consumed by relink.yml → incremental --engine-fingerprint) ─
 # Everything that shapes linker OUTPUT: the two upstream checkouts, the model wheels,
@@ -308,12 +365,19 @@ printf '%s' "$NER_ID" > "$NER_MARKER"
   echo "gpu-server=$(git -C "$GPU" rev-parse HEAD)"
   echo "python_runtime=$PYTHON_RUNTIME_ID"
   echo "dump=$DUMP_CONTENT_ID"
-  echo "engine_src=$(cat "${LINKER_REPO:-$PWD}/src/link_books.py" "${LINKER_REPO:-$PWD}/src/linker_artifact.py" "${LINKER_REPO:-$PWD}/src/incremental.py" | sha256sum | cut -c1-16)"
+  echo "engine_src=$(cat \
+    "${LINKER_REPO:-$PWD}/src/link_books.py" \
+    "${LINKER_REPO:-$PWD}/src/linker_artifact.py" \
+    "${LINKER_REPO:-$PWD}/src/line_baseline.py" \
+    "${LINKER_REPO:-$PWD}/src/incremental.py" \
+    "${LINKER_REPO:-$PWD}/src/ner_handoff.py" \
+    "${LINKER_REPO:-$PWD}/src/precompute_ner.py" \
+    | sha256sum | cut -c1-16)"
   for name in he_ref_ner he_subref_ner; do
     whl=$(find "$MODELS" -name "${name}-*.whl" | head -1)
     echo "${name}=$(sha256sum "$whl" | cut -c1-16)"
   done
 } > "$STACK/engine_fingerprint.txt"
 
-echo "stack up: Sefaria venv=$SEF/.venv, NER=$NER_URL"
+echo "stack up: role=$STACK_ROLE Sefaria venv=$SEF/.venv NER=$([ "$STACK_ROLE" = resolver ] && echo disabled || echo "$NER_URL")"
 echo "engine fingerprint:"; cat "$STACK/engine_fingerprint.txt"

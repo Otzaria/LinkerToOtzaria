@@ -37,6 +37,7 @@ class IncrementalE2ETest(unittest.TestCase):
         self.snap = os.path.join(self.tmp, "snap.db")
         # capture what the engine is asked to link, instead of really linking
         self.requested = []
+        self.requested_payloads = []
         self.fail_engine = False        # whole-process failure (engine raises)
         self.fail_books = set()         # per-book failures (engine writes a failed marker, exits 0)
         self.skip_done_books = set()    # books left with NO marker at all (the outage gap)
@@ -52,7 +53,9 @@ class IncrementalE2ETest(unittest.TestCase):
         from link_books import claim_id
         from linker_artifact import BookKey
         with open(only_books_path, encoding="utf-8") as fh:
-            req = {(b["source_name"], b["canonical_he_title"]) for b in json.load(fh)}
+            payload = json.load(fh)
+            req = {(b["source_name"], b["canonical_he_title"]) for b in payload}
+        self.requested_payloads.append(payload)
         self.requested.append(req)
         if self.fail_engine:
             raise RuntimeError("simulated engine failure")
@@ -114,6 +117,47 @@ class IncrementalE2ETest(unittest.TestCase):
 
         # run4: same v2 snapshot -> baseline advanced only for what was linked -> 0.
         self.assertEqual(inc.run_incremental(self._args()), 0)
+
+    def test_changed_book_sends_only_unmatched_lines_to_ner(self):
+        _snapshot(self.snap, [
+            (*self.A, 0, "א"),
+            (*self.A, 1, "ב"),
+            (*self.A, 2, "ג"),
+        ])
+        self.assertEqual(inc.run_incremental(self._args()), 1)
+        os.remove(self.snap)
+        _snapshot(self.snap, [
+            (*self.A, 0, "א"),
+            (*self.A, 1, "חדש"),
+            (*self.A, 2, "ג"),
+        ])
+        self.assertEqual(inc.run_incremental(self._args()), 1)
+        item = self.requested_payloads[-1][0]
+        self.assertEqual(item["ner_ranges"], [[1, 2]])
+        self.assertEqual(item["reuse"], [[0, 0], [2, 2]])
+
+    def test_line_reuse_refuses_unexpected_prior_artifact(self):
+        _snapshot(self.snap, [
+            (*self.A, 0, "א"),
+            (*self.A, 1, "ב"),
+        ])
+        inc.run_incremental(self._args())
+        # The fake engine emitted no artifact, so the accepted line baseline records
+        # that absence. Injecting a file afterwards must not be treated as a valid store.
+        artifact = os.path.join(self.repo, book_key_to_relpath(BookKey(*self.A)))
+        write_artifact(artifact, [
+            LinkRecord(
+                BookKey(*self.A), 0, 0, 1, "Genesis 1:1",
+                source_hash="0" * 16,
+            )
+        ])
+        os.remove(self.snap)
+        _snapshot(self.snap, [
+            (*self.A, 0, "א"),
+            (*self.A, 1, "חדש"),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "expected no prior artifact"):
+            inc.run_incremental(self._args())
 
     def test_failed_engine_does_not_advance_baseline(self):
         # A book linked against a snapshot must NOT be marked done unless the run succeeded —

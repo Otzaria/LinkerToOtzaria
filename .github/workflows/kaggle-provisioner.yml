@@ -1,4 +1,4 @@
-name: Provision pending Kaggle relink intent
+name: Recovery guard · Provision pending Kaggle intent (not a build stage)
 run-name: kaggle-provisioner intent-run=${{ inputs.intent_run_id || 'oldest' }}
 
 on:

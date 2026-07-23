@@ -7,7 +7,7 @@
 # Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
 # KAGGLE_API_TOKEN (a Kaggle API token, KGAT_…; the OAuth credentials file breaks on
 # expiry and on dataset APIs, the token does not).
-name: kaggle-relink
+name: Weekly 5a/6 · Linker incremental GPU NER
 # Same exact-match identity shape as relink.yml (request= + parent=). Do not change it
 # without updating the intent validator, provisioner and parent cleanup consumers.
 run-name: "kaggle-relink request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"
@@ -64,6 +64,18 @@ on:
           unchanged to relink.yml; empty for normal runs.
         required: false
         default: ''
+      ner_checkpoint_source_run_id:
+        description: Exact failed relink run databaseId that owns the producer checkpoint.
+        required: false
+        default: ''
+      ner_checkpoint_source_run_attempt:
+        description: Exact failed relink attempt encoded in the producer checkpoint name.
+        required: false
+        default: ''
+      ner_checkpoint_source_engine_fingerprint:
+        description: Operator-attested engine fingerprint recorded by that checkpoint.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -106,6 +118,9 @@ jobs:
           IN_SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           IN_SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           IN_ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          IN_NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
+          IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
+          IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
         run: |
           set -euo pipefail
           [ -z "$IN_LIBRARY_RUN_ID" ] || [[ "$IN_LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::library_run_id must be a positive integer"; exit 1; }
@@ -116,6 +131,32 @@ jobs:
           [ -z "$IN_SEFARIA_METADATA_SHA256" ] || [[ "$IN_SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
           [ -z "$IN_ADOPT_FINGERPRINT" ] || \
             python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$IN_ADOPT_FINGERPRINT"
+          [ -z "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
+            [[ "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::ner_checkpoint_source_run_id must be a positive integer"; exit 1;
+            }
+          [ -z "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || \
+            [[ "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::ner_checkpoint_source_run_attempt must be a positive integer"; exit 1;
+            }
+          [ -z "$IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || \
+            python3 ci/validate_printable_ascii.py \
+              ner_checkpoint_source_engine_fingerprint 8192 \
+              "$IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+          if [ -n "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
+             [ -n "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] ||
+             [ -n "$IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ]; then
+            [ -n "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" ] &&
+              [ -n "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] &&
+              [ -n "$IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || {
+                echo "::error::checkpoint recovery requires both source coordinates and its engine fingerprint"
+                exit 1
+              }
+            [ -n "$IN_RECOVERY_MODE" ] && [ -n "$IN_LIBRARY_RUN_ID" ] || {
+              echo "::error::checkpoint recovery requires recovery_mode and an exact serial parent"
+              exit 1
+            }
+          fi
           if [ -n "$IN_LIBRARY_RUN_ID" ]; then
             [ -n "$IN_RELINK_REQUEST_ID" ] && [ -n "$IN_PARENT_RUN_ATTEMPT" ] && \
               [ -n "$IN_SEFARIA_TAG" ] && [ -n "$IN_SNAPSHOT_SHA256" ] && \
@@ -141,13 +182,19 @@ jobs:
             --arg sefaria_tag "$IN_SEFARIA_TAG" --arg snapshot_sha256 "$IN_SNAPSHOT_SHA256" \
             --arg sefaria_metadata_sha256 "$IN_SEFARIA_METADATA_SHA256" \
             --arg adopt_fingerprint "$IN_ADOPT_FINGERPRINT" \
+            --arg ner_checkpoint_source_run_id "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" \
+            --arg ner_checkpoint_source_run_attempt "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" \
+            --arg ner_checkpoint_source_engine_fingerprint "$IN_NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" \
             --argjson dry_run "$( [ -n "$IN_DRY_RUN" ] && echo true || echo false )" \
             --argjson recovery_mode "$( [ -n "$IN_RECOVERY_MODE" ] && echo true || echo false )" \
             --argjson intake_run_id "$GITHUB_RUN_ID" --argjson intake_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{schema_version:3,request_id:$request_id,library_run_id:$library_run_id,
+            '{schema_version:4,request_id:$request_id,library_run_id:$library_run_id,
               parent_run_attempt:$parent_run_attempt,sefaria_tag:$sefaria_tag,
               snapshot_sha256:$snapshot_sha256,sefaria_release_metadata_sha256:$sefaria_metadata_sha256,
               adopt_fingerprint:$adopt_fingerprint,
+              ner_checkpoint_source_run_id:$ner_checkpoint_source_run_id,
+              ner_checkpoint_source_run_attempt:$ner_checkpoint_source_run_attempt,
+              ner_checkpoint_source_engine_fingerprint:$ner_checkpoint_source_engine_fingerprint,
               dry_run:$dry_run,recovery_mode:$recovery_mode,
               intake_run_id:$intake_run_id,intake_run_attempt:$intake_run_attempt}' \
             > intent/kaggle-intent.json

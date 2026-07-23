@@ -4,7 +4,10 @@
 #   scripts/dispatch_kaggle_relink.sh [--dry-run] [--recovery-mode] [--library-run-id <id>] \
 #       [--relink-request-id <64-hex>] [--parent-run-attempt <n>] \
 #       [--sefaria-tag <tag>] [--snapshot-sha256 <sha>] \
-#       [--sefaria-release-metadata-sha256 <sha>] [--adopt-fingerprint <OLD::NEW>]
+#       [--sefaria-release-metadata-sha256 <sha>] [--adopt-fingerprint <OLD::NEW>] \
+#       [--ner-checkpoint-source-run-id <id>] \
+#       [--ner-checkpoint-source-run-attempt <n>] \
+#       [--ner-checkpoint-source-engine-fingerprint <fingerprint>]
 #
 # --library-run-id: serial mode — the relink takes lines_snapshot.db.zst from that
 # SeforimLibrary run and the waiting build downloads the artifacts back from it.
@@ -38,6 +41,9 @@ SEFARIA_METADATA_SHA256=""
 RELINK_REQUEST_ID=""
 PARENT_RUN_ATTEMPT=""
 ADOPT_FINGERPRINT=""
+NER_CHECKPOINT_SOURCE_RUN_ID=""
+NER_CHECKPOINT_SOURCE_RUN_ATTEMPT=""
+NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
@@ -49,6 +55,10 @@ while [ $# -gt 0 ]; do
     --snapshot-sha256) SNAPSHOT_SHA256="$2"; shift 2 ;;
     --sefaria-release-metadata-sha256) SEFARIA_METADATA_SHA256="$2"; shift 2 ;;
     --adopt-fingerprint) ADOPT_FINGERPRINT="$2"; shift 2 ;;
+    --ner-checkpoint-source-run-id) NER_CHECKPOINT_SOURCE_RUN_ID="$2"; shift 2 ;;
+    --ner-checkpoint-source-run-attempt) NER_CHECKPOINT_SOURCE_RUN_ATTEMPT="$2"; shift 2 ;;
+    --ner-checkpoint-source-engine-fingerprint)
+      NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -61,6 +71,32 @@ done
 [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--sefaria-release-metadata-sha256 must be 64-hex" >&2; exit 2; }
 [ -z "$ADOPT_FINGERPRINT" ] || \
   python3 "$HERE/ci/validate_printable_ascii.py" adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
+[ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
+  [[ "$NER_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+    echo "--ner-checkpoint-source-run-id must be a positive integer" >&2; exit 2;
+  }
+[ -z "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || \
+  [[ "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+    echo "--ner-checkpoint-source-run-attempt must be a positive integer" >&2; exit 2;
+  }
+[ -z "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || \
+  python3 "$HERE/ci/validate_printable_ascii.py" \
+    ner_checkpoint_source_engine_fingerprint 8192 \
+    "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+if [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
+   [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] ||
+   [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ]; then
+  [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] &&
+    [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] &&
+    [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || {
+    echo "checkpoint recovery requires both source coordinates and its engine fingerprint" >&2
+    exit 2
+  }
+  [ -n "$RECOVERY_MODE" ] && [ -n "$LIBRARY_RUN_ID" ] || {
+    echo "checkpoint recovery requires --recovery-mode and an exact serial parent" >&2
+    exit 2
+  }
+fi
 
 # Identity contract: EVERY dispatch carries a request id so the child is addressable
 # by exact run-name equality (never contains / head -1). Serial mode must receive the
@@ -209,6 +245,14 @@ DISPATCH_ARGS=(workflow run relink.yml -R "$REPO" -f target=kaggle
 [ -z "$SEFARIA_METADATA_SHA256" ] || \
   DISPATCH_ARGS+=(-f "sefaria_release_metadata_sha256=$SEFARIA_METADATA_SHA256")
 [ -z "$ADOPT_FINGERPRINT" ] || DISPATCH_ARGS+=(-f "adopt_fingerprint=$ADOPT_FINGERPRINT")
+[ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
+  DISPATCH_ARGS+=(-f "ner_checkpoint_source_run_id=$NER_CHECKPOINT_SOURCE_RUN_ID")
+[ -z "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || \
+  DISPATCH_ARGS+=(-f "ner_checkpoint_source_run_attempt=$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT")
+[ -z "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || \
+  DISPATCH_ARGS+=(
+    -f "ner_checkpoint_source_engine_fingerprint=$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+  )
 [ -z "$RECOVERY_MODE" ] || DISPATCH_ARGS+=(-f recovery_mode=true)
 [ -z "$DRY" ] || DISPATCH_ARGS+=(-f dry_run=true)
 python3 "$HERE/scripts/exec_new_session.py" gh "${DISPATCH_ARGS[@]}" &
@@ -279,10 +323,19 @@ JSON
 # Managed push: run it as a tracked child and sit in `wait` — bash delivers a signal
 # to the trap immediately while waiting on a builtin, and the handler kills the push
 # before cancelling the queued child (a push left running could still boot a session).
-python3 "$HERE/scripts/exec_new_session.py" kaggle kernels push -p "$PUSH" &
+PUSH_LOG=$(mktemp)
+python3 "$HERE/scripts/exec_new_session.py" kaggle kernels push -p "$PUSH" >"$PUSH_LOG" 2>&1 &
 ACTIVE_PID=$!
 wait "$ACTIVE_PID"
 ACTIVE_PID=""
+cat "$PUSH_LOG"
+if grep -q 'Kernel push error:' "$PUSH_LOG" ||
+   ! grep -Eq 'Kernel version [0-9]+ successfully pushed' "$PUSH_LOG"; then
+  echo "::error::Kaggle did not accept the kernel push" >&2
+  rm -f "$PUSH_LOG"
+  exit 1
+fi
+rm -f "$PUSH_LOG"
 # Success: a session will boot and pick the child up. From this point a late signal or
 # a failure in the tail must NOT cancel a live handoff — disarm everything.
 trap - EXIT HUP INT TERM

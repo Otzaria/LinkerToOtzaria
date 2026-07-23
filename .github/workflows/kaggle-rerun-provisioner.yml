@@ -1,0 +1,38 @@
+name: Recovery guard · Provision bounded Kaggle rerun (not a build stage)
+run-name: kaggle-rerun-provisioner run=${{ inputs.run_id || 'scan' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '8,18,28,38,48,58 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: kaggle-rerun-provisioner
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PIPELINE_TOKEN }}
+          persist-credentials: false
+      - run: pip install --quiet kaggle
+      - name: Attach one fresh JIT runner to an exact queued rerun
+        run: |
+          args=()
+          [ -z "$RUN_ID" ] || args+=(--run-id "$RUN_ID")
+          bash scripts/provision_kaggle_rerun.sh "${args[@]}"
