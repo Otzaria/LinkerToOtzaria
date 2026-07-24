@@ -2,7 +2,7 @@
 # Restore the one authoritative complete linker artifact store, fail-closed.
 set -euo pipefail
 
-rm -rf artifacts
+rm -rf artifacts line-baseline
 TMP_ROOT="${RUNNER_TEMP:-/tmp}/linker-restore-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
 rm -rf "$TMP_ROOT"
 mkdir -p "$TMP_ROOT"
@@ -52,9 +52,19 @@ with tarfile.open(archive, "r:") as stream:
             names.add(member.name)
             selected.append(member)
             continue
-        if (path.is_absolute() or not path.parts or path.parts[0] != "artifacts"
+        if (path.is_absolute() or not path.parts
+                or path.parts[0] not in {"artifacts", "line-baseline"}
                 or ".." in path.parts or not (member.isdir() or member.isfile())):
             raise SystemExit(f"unsafe linker artifact member: {member.name!r}")
+        if (member.isfile() and path.parts[0] == "line-baseline"
+                and path.suffix != ".json"):
+            raise SystemExit(f"unexpected line-baseline member: {member.name!r}")
+        if (member.isfile() and path.parts[0] == "artifacts"
+                and path.suffix != ".jsonl"):
+            if path.name in {".DS_Store", ".gitkeep"} or path.name.startswith("._"):
+                names.add(member.name)
+                continue
+            raise SystemExit(f"unexpected artifact member: {member.name!r}")
         names.add(member.name)
         jsonl += bool(member.isfile() and path.suffix == ".jsonl")
         selected.append(member)
@@ -63,3 +73,8 @@ with tarfile.open(archive, "r:") as stream:
     stream.extractall(path=".", members=selected, filter="data")
 PY
 echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
+if [ -f line-baseline/manifest.json ]; then
+  echo "restored exact per-line reuse baseline"
+else
+  echo "no per-line reuse baseline in legacy release; changed books will use full NER"
+fi

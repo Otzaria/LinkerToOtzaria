@@ -64,7 +64,7 @@ def main() -> None:
         cid = "c" * 40
         batch_path = root / "ner-data" / cid / "000000000000.json"
         size, digest = write_json_atomic(batch_path, {
-            "schema_version": 1,
+            "schema_version": 2,
             "book": book.to_dict(),
             "batch_start": 0,
             "lines": [
@@ -80,11 +80,12 @@ def main() -> None:
         })
         book_path = root / "ner-data" / cid / "book_manifest.json"
         book_size, book_digest = write_json_atomic(book_path, {
-            "schema_version": 1,
+            "schema_version": 2,
             "book": book.to_dict(),
             "source_book_hash": "1" * 16,
             "line_count": len(contents),
             "eligible_line_count": len(contents),
+            "ner_ranges": [[0, len(contents)]],
             "batches": [{
                 "batch_start": 0,
                 "path": f"ner-data/{cid}/{batch_path.name}",
@@ -93,7 +94,7 @@ def main() -> None:
             }],
         })
         write_json_atomic(root / "ner_manifest.json", {
-            "schema_version": 1,
+            "schema_version": 2,
             "relink_request_id": request_id,
             "snapshot_sha256": snapshot_digest,
             "engine_fingerprint": fingerprint,
@@ -110,7 +111,9 @@ def main() -> None:
             request_id=request_id,
             snapshot_sha256=snapshot_digest,
             engine_fingerprint=fingerprint,
-            changed_books=[book.to_dict()],
+            changed_books=[
+                {**book.to_dict(), "ner_ranges": [[0, len(contents)]]}
+            ],
             expected_book_hashes={(book.source_name, book.canonical_he_title): "1" * 16},
             expected_batch_lines=25,
         )

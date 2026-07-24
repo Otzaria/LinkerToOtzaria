@@ -326,6 +326,7 @@ fi
   echo "engine_src=$(cat \
     "${LINKER_REPO:-$PWD}/src/link_books.py" \
     "${LINKER_REPO:-$PWD}/src/linker_artifact.py" \
+    "${LINKER_REPO:-$PWD}/src/line_baseline.py" \
     "${LINKER_REPO:-$PWD}/src/incremental.py" \
     "${LINKER_REPO:-$PWD}/src/ner_handoff.py" \
     "${LINKER_REPO:-$PWD}/src/precompute_ner.py" \

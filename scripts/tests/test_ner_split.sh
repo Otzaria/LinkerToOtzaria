@@ -29,7 +29,7 @@ result = {
     }],
 }
 batch = {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": book.to_dict(),
     "batch_start": 0,
     "lines": [{
@@ -41,11 +41,12 @@ batch = {
 batch_path = root / "ner-data" / cid / "000000000000.json"
 batch_size, batch_sha = write_json_atomic(batch_path, batch)
 book_manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": book.to_dict(),
     "source_book_hash": "1" * 16,
     "line_count": 1,
     "eligible_line_count": 1,
+    "ner_ranges": [[7, 8]],
     "batches": [{
         "batch_start": 0,
         "path": f"ner-data/{cid}/000000000000.json",
@@ -59,7 +60,7 @@ request = "2" * 64
 snapshot = "3" * 64
 fingerprint = "engine=x;policy=drop;bavli=0"
 write_json_atomic(root / "ner_manifest.json", {
-    "schema_version": 1,
+    "schema_version": 2,
     "relink_request_id": request,
     "snapshot_sha256": snapshot,
     "engine_fingerprint": fingerprint,
@@ -96,7 +97,7 @@ bundle = NerBundle(
     request_id=request,
     snapshot_sha256=snapshot,
     engine_fingerprint=fingerprint,
-    changed_books=[book.to_dict()],
+    changed_books=[{**book.to_dict(), "ner_ranges": [[7, 8]]}],
     expected_book_hashes={(book.source_name, book.canonical_he_title): "1" * 16},
 )
 assert bundle.resolve_batch(FakeLinker(), book, [(7, original)], 0) == ["resolved-doc"]
@@ -124,7 +125,7 @@ try:
         request_id=request,
         snapshot_sha256=snapshot,
         engine_fingerprint=fingerprint,
-        changed_books=[book.to_dict()],
+        changed_books=[{**book.to_dict(), "ner_ranges": [[7, 8]]}],
     )
 except RuntimeError:
     pass
@@ -203,15 +204,16 @@ args = argparse.Namespace(
     engine_fingerprint="engine=x;policy=drop;bavli=0",
 )
 hashes = {(book.source_name, book.canonical_he_title): "1" * 16}
+ranges = {(book.source_name, book.canonical_he_title): ((0, 1),)}
 from ner_handoff import write_json_atomic
-write_json_atomic(root / "checkpoint.json", _checkpoint_document(args, [book], hashes))
+write_json_atomic(root / "checkpoint.json", _checkpoint_document(args, [book], hashes, ranges))
 for name in ("done", "failed"):
     (root / name).mkdir(exist_ok=True)
 cid = claim_id(book)
 (root / "ner-data" / cid).mkdir(exist_ok=True)
 (root / "done" / cid).touch()
 (root / "failed" / cid).write_text("{}\n")
-prepared = _prepare_root(args, [book], hashes)
+prepared = _prepare_root(args, [book], hashes, ranges)
 assert not (prepared / "done" / cid).exists()
 assert not (prepared / "failed" / cid).exists()
 assert not (prepared / "ner-data" / cid).exists()
@@ -273,9 +275,10 @@ partial_args = argparse.Namespace(
     engine_fingerprint="engine=x;policy=drop;bavli=0",
 )
 partial_hashes = {(book.source_name, book.canonical_he_title): "5" * 16}
+partial_ranges = {(book.source_name, book.canonical_he_title): ((0, 1),)}
 write_json_atomic(
     partial_root / "checkpoint.json",
-    _checkpoint_document(partial_args, [book], partial_hashes),
+    _checkpoint_document(partial_args, [book], partial_hashes, partial_ranges),
 )
 for name in ("ner-data", "done", "failed", "partial"):
     (partial_root / name).mkdir(parents=True, exist_ok=True)
@@ -283,16 +286,17 @@ partial_dir = partial_root / "partial" / cid
 partial_dir.mkdir()
 batch_path = partial_dir / "000000000000.json"
 batch_size, batch_sha = write_json_atomic(batch_path, {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": book.to_dict(),
     "batch_start": 0,
     "lines": [],
 })
 write_json_atomic(partial_dir / "partial_manifest.json", {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": book.to_dict(),
     "source_book_hash": "5" * 16,
     "line_count": 1,
+    "ner_ranges": [[0, 1]],
     "batches": [{
         "batch_start": 0,
         "path": f"partial/{cid}/000000000000.json",
@@ -300,11 +304,11 @@ write_json_atomic(partial_dir / "partial_manifest.json", {
         "sha256": batch_sha,
     }],
 })
-_prepare_root(partial_args, [book], partial_hashes)
+_prepare_root(partial_args, [book], partial_hashes, partial_ranges)
 assert batch_path.is_file()
 (partial_root / "failed" / cid).write_text("{}\n")
 (partial_root / "done" / cid).touch()
-_prepare_root(partial_args, [book], partial_hashes)
+_prepare_root(partial_args, [book], partial_hashes, partial_ranges)
 assert batch_path.is_file()
 assert not (partial_root / "failed" / cid).exists()
 assert not (partial_root / "done" / cid).exists()
@@ -321,6 +325,7 @@ migration_args = argparse.Namespace(
     checkpoint_engine_fingerprint="engine=old;policy=drop;bavli=0",
 )
 migration_hashes = {(book.source_name, book.canonical_he_title): "8" * 16}
+migration_ranges = {(book.source_name, book.canonical_he_title): ((0, 1),)}
 old_args = argparse.Namespace(
     **{
         **vars(migration_args),
@@ -329,12 +334,12 @@ old_args = argparse.Namespace(
 )
 write_json_atomic(
     migration_root / "checkpoint.json",
-    _checkpoint_document(old_args, [book], migration_hashes),
+    _checkpoint_document(old_args, [book], migration_hashes, migration_ranges),
 )
-_prepare_root(migration_args, [book], migration_hashes)
+_prepare_root(migration_args, [book], migration_hashes, migration_ranges)
 assert __import__("json").loads(
     (migration_root / "checkpoint.json").read_text()
-) == _checkpoint_document(migration_args, [book], migration_hashes)
+) == _checkpoint_document(migration_args, [book], migration_hashes, migration_ranges)
 
 # Resume inside a large book: committed batches are validated against the current
 # normalized lines and only the missing batch reaches the GPU transport.
@@ -362,16 +367,17 @@ first_lines = [{
 } for index in range(BATCH_LINES)]
 first_path = resume_partial / "000000000000.json"
 first_size, first_sha = write_json_atomic(first_path, {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": resume_book.to_dict(),
     "batch_start": 0,
     "lines": first_lines,
 })
 write_json_atomic(resume_partial / "partial_manifest.json", {
-    "schema_version": 1,
+    "schema_version": 2,
     "book": resume_book.to_dict(),
     "source_book_hash": "6" * 16,
     "line_count": BATCH_LINES + 5,
+    "ner_ranges": [[0, BATCH_LINES + 5]],
     "batches": [{
         "batch_start": 0,
         "path": f"partial/{resume_cid}/000000000000.json",
@@ -392,7 +398,8 @@ class IdentityNormalizer:
         return values
 _produce_book(
     argparse.Namespace(ner_url="http://unused", worker_label="test"),
-    IdentityNormalizer(), resume_db, resume_book, "6" * 16, resume_root, worker_hb,
+    IdentityNormalizer(), resume_db, resume_book, "6" * 16,
+    ((0, BATCH_LINES + 5),), resume_root, worker_hb,
 )
 resume_db.close()
 assert len(calls) == 1 and len(calls[0]) == 5
@@ -424,7 +431,8 @@ empty_hb = empty_root / "worker-heartbeats" / "test"
 empty_hb.touch()
 _produce_book(
     argparse.Namespace(ner_url="http://unused", worker_label="test"),
-    IdentityNormalizer(), empty_db, empty_book, "9" * 16, empty_root, empty_hb,
+    IdentityNormalizer(), empty_db, empty_book, "9" * 16,
+    ((0, 1),), empty_root, empty_hb,
 )
 empty_db.close()
 empty_manifest = __import__("json").loads(

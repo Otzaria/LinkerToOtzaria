@@ -42,6 +42,12 @@ sys_path = os.path.dirname(os.path.abspath(__file__))
 import sys  # noqa: E402
 sys.path.insert(0, sys_path)
 from linker_artifact import BookKey, book_key_to_relpath, read_artifact, write_artifact  # noqa: E402
+from line_baseline import (  # noqa: E402
+    DIRECTORY_NAME as LINE_BASELINE_DIRECTORY,
+    build_line_baseline,
+    plan_changed_books,
+    validate_baseline_identity,
+)
 
 
 # ── target_ref rewrite for en-renames (no linking) ──────────────────────────
@@ -300,6 +306,7 @@ def compute_incremental_plan(args) -> dict:
     baseline, stored_fingerprint = _read_baseline_file(baseline_dir)
     fingerprint = getattr(args, "engine_fingerprint", None)
     changed, removed = plan_from_snapshot(current, baseline)
+    reuse_engine_compatible = True
     if baseline and fingerprint is not None and stored_fingerprint != fingerprint:
         adopt = getattr(args, "adopt_fingerprint", None)
         if adopt:
@@ -333,11 +340,45 @@ def compute_incremental_plan(args) -> dict:
             _log("engine fingerprint changed "
                  f"({stored_fingerprint!r} -> {fingerprint!r}) — FULL relink")
             changed = [BookKey(s, t) for (s, t) in sorted(current)]
+            reuse_engine_compatible = False
+    line_baseline_root = os.path.join(repo, LINE_BASELINE_DIRECTORY)
+    previous_snapshot_sha = None
+    try:
+        with open(os.path.join(repo, "meta.json"), encoding="utf-8") as stream:
+            previous_meta = json.load(stream)
+        previous_snapshot_sha = previous_meta["snapshot"]["sha256"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        previous_snapshot_sha = None
+    line_identity_valid = bool(
+        reuse_engine_compatible
+        and baseline
+        and isinstance(previous_snapshot_sha, str)
+        and validate_baseline_identity(
+            line_baseline_root,
+            snapshot_sha256=previous_snapshot_sha,
+            engine_fingerprint=stored_fingerprint,
+            book_count=len(baseline),
+        )
+    )
+    line_deltas, reused_lines, ner_lines = plan_changed_books(
+        args.snapshot,
+        changed,
+        baseline_root=line_baseline_root,
+        baseline_hashes=baseline,
+        baseline_identity_valid=line_identity_valid,
+    )
     _log(f"snapshot: {len(current)} books | changed/new={len(changed)} removed={len(removed)}")
+    if changed:
+        mode = "exact line reuse" if line_identity_valid else "full-book fallback"
+        _log(
+            f"line plan ({mode}): reuse={reused_lines} NER={ner_lines} "
+            f"({(100.0 * ner_lines / (reused_lines + ner_lines)) if reused_lines + ner_lines else 0:.3f}% GPU)"
+        )
     return {
         "current": current,
         "changed": changed,
         "removed": removed,
+        "line_deltas": line_deltas,
         "engine_fingerprint": fingerprint,
         "stored_engine_fingerprint": stored_fingerprint,
     }
@@ -352,12 +393,23 @@ def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
     plan = compute_incremental_plan(args)
     current = plan["current"]
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "relink_request_id": relink_request_id,
         "snapshot_sha256": sha256_of_file(args.snapshot),
         "changelog_sha256": sha256_of_file(args.changelog) if args.changelog else None,
         "engine_fingerprint": plan["engine_fingerprint"],
-        "changed": [book.to_dict() for book in plan["changed"]],
+        "changed": [
+            {
+                **book.to_dict(),
+                "ner_ranges": [
+                    [start, end]
+                    for start, end in plan["line_deltas"][
+                        (book.source_name, book.canonical_he_title)
+                    ].ner_ranges
+                ],
+            }
+            for book in plan["changed"]
+        ],
         "removed": [book.to_dict() for book in plan["removed"]],
         "current_books": [
             {"source_name": source, "canonical_he_title": title, "hash": digest}
@@ -387,7 +439,30 @@ def run_incremental(args) -> int:
     current = plan["current"]
     changed = plan["changed"]
     removed = plan["removed"]
+    line_deltas = plan["line_deltas"]
     fingerprint = plan["engine_fingerprint"]
+
+    # The release line baseline records whether each prior book had an artifact
+    # and, when present, its exact digest. Validate that before any target-ref
+    # rewrite mutates the store. Reusing an identical source line from a missing
+    # or drifted artifact could otherwise turn corruption into silent link loss.
+    for book in changed:
+        delta = line_deltas[(book.source_name, book.canonical_he_title)]
+        if not delta.reuse:
+            continue
+        artifact_path = os.path.join(repo, book_key_to_relpath(book))
+        expected = delta.prior_artifact_sha256
+        if expected is None:
+            if os.path.exists(artifact_path):
+                raise RuntimeError(
+                    f"line baseline expected no prior artifact for "
+                    f"{book.source_name}/{book.canonical_he_title!r}"
+                )
+        elif not os.path.isfile(artifact_path) or sha256_of_file(artifact_path) != expected:
+            raise RuntimeError(
+                f"prior artifact digest differs from the exact line baseline for "
+                f"{book.source_name}/{book.canonical_he_title!r}"
+            )
 
     # 2. Target en-renames: rewrite target_ref across ALL artifacts (no linking). Target-only.
     # The changelog_diff.json contract (SefariaExport generate_changelog.py) nests the book
@@ -425,10 +500,33 @@ def run_incremental(args) -> int:
                 {
                     **book.to_dict(),
                     "hash": current[(book.source_name, book.canonical_he_title)],
+                    "ner_ranges": [
+                        [start, end]
+                        for start, end in line_deltas[
+                            (book.source_name, book.canonical_he_title)
+                        ].ner_ranges
+                    ],
+                    "reuse": [
+                        [old_index, new_index]
+                        for old_index, new_index in line_deltas[
+                            (book.source_name, book.canonical_he_title)
+                        ].reuse
+                    ],
                 }
                 for book in changed
             ], fh, ensure_ascii=False)
-        _log(f"re-linking {len(changed)} changed books")
+        requested_ner_lines = sum(
+            line_deltas[(book.source_name, book.canonical_he_title)].ner_line_count
+            for book in changed
+        )
+        reused_lines = sum(
+            line_deltas[(book.source_name, book.canonical_he_title)].reused_line_count
+            for book in changed
+        )
+        _log(
+            f"updating {len(changed)} changed books: "
+            f"{requested_ner_lines} line(s) require NER, {reused_lines} reused"
+        )
         codes = _run_engine(args, only)
         failed = read_failed_books(args.run_dir)
 
@@ -471,17 +569,28 @@ def run_incremental(args) -> int:
 
     # 5. Advance baseline + lineage. Any failure never reaches here (raised above), so the
     #    baseline advances to exactly the snapshot hashes that were fully linked.
+    snapshot_sha256 = sha256_of_file(args.snapshot)
+    # Build the next exact reuse baseline before advancing the committed book clock.
+    # A failure here leaves both clocks on the previous accepted release.
+    build_line_baseline(
+        args.snapshot,
+        os.path.join(repo, LINE_BASELINE_DIRECTORY),
+        current_hashes=current,
+        snapshot_sha256=snapshot_sha256,
+        engine_fingerprint=fingerprint,
+        artifacts_root=artifacts_dir,
+    )
     write_snapshot_baseline(baseline_dir, dict(current), engine_fingerprint=fingerprint)
     write_meta(
         repo,
         sefaria_export_tag=args.sefaria_tag,
-        snapshot_sha256=sha256_of_file(args.snapshot),
+        snapshot_sha256=snapshot_sha256,
         book_count=len(current),
         bavli_convention=args.bavli_convention,
         generated_at=args.generated_at,
         engine_fingerprint=fingerprint,
     )
-    _log("baseline + meta.json updated")
+    _log("book baseline + exact line baseline + meta.json updated")
     return len(changed)
 
 

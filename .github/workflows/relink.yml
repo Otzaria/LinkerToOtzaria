@@ -117,6 +117,14 @@ on:
         required: false
         default: ''
         type: string
+      seed_line_baseline:
+        description: >
+          One-time standalone/server migration: validate that the latest published
+          snapshot and every prior artifact exactly match the committed baseline, then
+          build the release-only line index without starting NER or running the linker.
+        required: false
+        default: false
+        type: boolean
       raw_ner_source_run_id:
         description: >
           Resolver-only recovery: exact failed relink workflow databaseId that already
@@ -251,15 +259,13 @@ jobs:
           echo "$LINKER_RUNTIME_SHA256  $LINKER_RUNTIME_ARCHIVE" | sha256sum -c -
           echo "prebuilt runtime handoff verified before large snapshot download"
 
-      # The artifact store is NOT in git (see .gitignore) — the release payload IS the
-      # store. Restore the full per-book artifact set from the latest published pack, or
-      # this run would re-pack ONLY the books it just relinked and every other book would
-      # lose its links at the next build. Fails loudly if no release exists.
+      # The artifact store and exact per-line reuse baseline are NOT in git — the release
+      # payload is the store. Kaggle needs the line baseline to send only unmatched lines
+      # to NER; the server also needs the artifacts to rebuild changed books atomically.
       - name: Restore artifact store from the latest release
-        if: inputs.target != 'kaggle'
         run: |
           set -euo pipefail
-          rm -rf artifacts
+          rm -rf artifacts line-baseline
           releases="$RUNNER_TEMP/linker-releases-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           selected="$RUNNER_TEMP/linker-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           payload="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
@@ -309,10 +315,20 @@ jobs:
                   if member.name == "meta.json" and member.isfile():
                       names.add(member.name)
                       continue
-                  if (path.is_absolute() or not path.parts or path.parts[0] != "artifacts"
+                  if (path.is_absolute() or not path.parts
+                          or path.parts[0] not in {"artifacts", "line-baseline"}
                           or ".." in path.parts
                           or not (member.isdir() or member.isfile())):
                       raise SystemExit(f"unsafe linker artifact member: {member.name!r}")
+                  if (member.isfile() and path.parts[0] == "line-baseline"
+                          and path.suffix != ".json"):
+                      raise SystemExit(f"unexpected line-baseline member: {member.name!r}")
+                  if (member.isfile() and path.parts[0] == "artifacts"
+                          and path.suffix != ".jsonl"):
+                      if path.name in {".DS_Store", ".gitkeep"} or path.name.startswith("._"):
+                          names.add(member.name)
+                          continue
+                      raise SystemExit(f"unexpected artifact member: {member.name!r}")
                   names.add(member.name)
                   jsonl += member.isfile() and path.suffix == ".jsonl"
                   artifact_members.append(member)
@@ -321,6 +337,11 @@ jobs:
               stream.extractall(path=".", members=artifact_members, filter="data")
           PY
           echo "restored $(find artifacts -name '*.jsonl' | wc -l) artifact files"
+          if [ -f line-baseline/manifest.json ]; then
+            echo "restored exact per-line reuse baseline"
+          else
+            echo "legacy release has no line baseline; this run safely falls back to full changed books"
+          fi
 
       # Inputs reach the shell ONLY via env — never interpolated into the script body
       # (a crafted input would otherwise become a command before validation; this job
@@ -335,6 +356,7 @@ jobs:
           SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
           RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
           TARGET: ${{ inputs.target }}
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
@@ -351,6 +373,12 @@ jobs:
           [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
           [ -z "$ADOPT_FINGERPRINT" ] || \
             python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
+          if [ -n "$SEED_LINE_BASELINE" ]; then
+            [ "$TARGET" = server ] && [ -z "$LIBRARY_RUN_ID" ] &&
+              [ -z "$RECOVERY_MODE" ] && [ -z "$ADOPT_FINGERPRINT" ] || {
+              echo "::error::seed_line_baseline requires standalone target=server without recovery/adoption"; exit 1;
+            }
+          fi
           [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || [[ "$NER_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
             echo "::error::ner_checkpoint_source_run_id must be a positive integer"; exit 1;
           }
@@ -513,6 +541,7 @@ jobs:
           LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
           RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
+          SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
@@ -539,6 +568,13 @@ jobs:
             else
               echo "host lease acquired: $HOST_LEASE_PATH"
             fi
+          fi
+          if [ -n "$SEED_LINE_BASELINE" ]; then
+            python3 ci/seed_line_baseline.py \
+              --repo "$PWD" \
+              --snapshot inputs/lines_snapshot.db \
+              --engine-components-output stack/engine_fingerprint.txt
+            exit 0
           fi
           # Teardown by OWNED pid (gunicorn --pid via setup_stack), still under the
           # lease/serialization — never a broad pkill sweep of the whole host.
@@ -752,7 +788,7 @@ jobs:
       # removed here is re-fetched deterministically by the next run.
       - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
         if: always()
-        run: rm -rf inputs artifacts linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
+        run: rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
 
   resolve:
     name: Resolve raw NER on the durable CPU host
@@ -998,7 +1034,7 @@ jobs:
 
       - name: Clean resolver workspace
         if: always()
-        run: rm -rf inputs artifacts raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
+        run: rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
 
   publish:
     name: Verify and publish immutable linker payload

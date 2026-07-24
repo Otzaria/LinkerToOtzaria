@@ -7,10 +7,12 @@
 set -euo pipefail
 
 OUT="linker_links.zst"
+test -f line-baseline/manifest.json
 
 # Deterministic tar (sorted, fixed mtimes/owner) so an unchanged corpus packs byte-identically.
 tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
-    -cf - artifacts meta.json | zstd -19 -T0 -o "$OUT" -f
+    --exclude='*/.DS_Store' --exclude='*/.gitkeep' --exclude='*/._*' \
+    -cf - artifacts line-baseline meta.json | zstd -19 -T0 -o "$OUT" -f
 
 SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
 echo "packed $OUT ($(du -h "$OUT" | cut -f1)) sha256=$SHA"

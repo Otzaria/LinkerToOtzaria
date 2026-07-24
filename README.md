@@ -16,13 +16,16 @@ A link has two ends:
 We store the **ref**, not a resolved target line. The build resolves it to a line
 every time (via `resolveRefs`). Because Sefaria line ids are keyed on `REF:$heRef`,
 a Sefaria content update keeps the same line id → the link survives with **zero**
-delta churn. The expensive step (NER) runs only on **source** books that changed.
+delta churn. The expensive step (NER) runs only on **source lines** that are new or
+changed. An exact release-only line baseline reuses prior artifacts for identical
+lines, including lines that moved inside an edited book.
 
 ## Layout
 
 ```
 artifacts/<source_name>/<canonical_he_title>.jsonl   # one file per source book
 baseline/snapshot_hashes.json                        # per-book content hash of the snapshot last linked
+line-baseline/                                       # release-only exact line fingerprints + artifact digests
 meta.json                                            # lineage of the last run
 schema/artifact.schema.json                          # JSON Schema for one record
 src/linker_artifact.py                               # THE format contract (shared code)
@@ -30,8 +33,9 @@ tests/                                               # contract tests
 examples/                                            # a validated sample artifact
 ```
 
-`artifacts/` and `baseline/` are populated by the linker engine (stage 2) and the
-incremental driver (stage 3); they start empty.
+`artifacts/` and `line-baseline/` are generated release payload state and are not
+committed. `baseline/` and `meta.json` are committed only after the immutable
+payload is published.
 
 ## Record format
 

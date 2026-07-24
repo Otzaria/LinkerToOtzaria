@@ -33,9 +33,13 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("releases/assets/$asset_id", segment)
         self.assertIn('[[ "$remote_digest" =~ ^sha256:', segment)
         self.assertIn('filter="data"', segment)
-        self.assertIn('path.parts[0] != "artifacts"', segment)
+        self.assertIn('path.parts[0] not in {"artifacts", "line-baseline"}', segment)
         self.assertIn('member.name == "meta.json" and member.isfile()', segment)
+        self.assertIn('path.suffix != ".jsonl"', segment)
+        self.assertIn('path.name in {".DS_Store", ".gitkeep"}', segment)
+        self.assertIn('path.name.startswith("._")', segment)
         self.assertIn("members=artifact_members", segment)
+        self.assertNotIn("if: inputs.target != 'kaggle'", segment)
         self.assertNotIn('latest_tag="$(gh release view', segment)
 
     def test_attested_fingerprint_adoption_reaches_serial_recovery(self):
@@ -72,6 +76,19 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("Restore exact prior-attempt NER checkpoint", workflow)
         self.assertIn("Kaggle now performs NER only", workflow)
 
+    def test_line_baseline_seed_never_starts_the_linker(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("seed_line_baseline:", workflow)
+        self.assertIn("ci/seed_line_baseline.py", workflow)
+        seed = workflow.index('if [ -n "$SEED_LINE_BASELINE" ]; then', workflow.index("id: compute"))
+        setup = workflow.index("bash ci/setup_stack.sh 9>&-", seed)
+        self.assertLess(seed, setup)
+        segment = workflow[seed:setup]
+        self.assertIn("exit 0", segment)
+        self.assertNotIn("src/incremental.py", segment)
+
     def test_resolver_only_recovery_uses_exact_producer_artifact(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
@@ -97,6 +114,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         for relative_path in (
             "src/link_books.py",
             "src/linker_artifact.py",
+            "src/line_baseline.py",
             "src/incremental.py",
             "src/ner_handoff.py",
             "src/precompute_ner.py",

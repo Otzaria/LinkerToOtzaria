@@ -14,3 +14,5 @@ lines_snapshot.db
 # NOT committed. Keep the dir via .gitkeep but ignore everything the linker writes into it.
 /artifacts/*
 !/artifacts/.gitkeep
+# Exact per-line reuse state is generated into the immutable release payload.
+/line-baseline/

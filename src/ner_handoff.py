@@ -13,7 +13,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -96,15 +96,33 @@ def validate_plan(value: Any, *, request_id: str, snapshot_sha256: str, engine_f
     changelog = value["changelog_sha256"]
     if changelog is not None and (type(changelog) is not str or not HEX64.fullmatch(changelog)):
         raise RuntimeError("NER plan changelog_sha256 is invalid")
-    for field in ("changed", "removed"):
-        if type(value[field]) is not list:
-            raise RuntimeError(f"NER plan {field} must be an array")
-        seen = set()
-        for index, item in enumerate(value[field]):
-            key = validate_book_key(item, f"plan.{field}[{index}]")
-            if key in seen:
-                raise RuntimeError(f"NER plan {field} contains a duplicate book")
-            seen.add(key)
+    if type(value["changed"]) is not list:
+        raise RuntimeError("NER plan changed must be an array")
+    seen = set()
+    for index, item in enumerate(value["changed"]):
+        if type(item) is not dict or set(item) != {
+            "source_name", "canonical_he_title", "ner_ranges",
+        }:
+            raise RuntimeError(f"plan.changed[{index}] has an invalid shape")
+        key = validate_book_key(
+            {
+                "source_name": item["source_name"],
+                "canonical_he_title": item["canonical_he_title"],
+            },
+            f"plan.changed[{index}]",
+        )
+        if key in seen:
+            raise RuntimeError("NER plan changed contains a duplicate book")
+        _validate_ner_ranges(item["ner_ranges"], f"plan.changed[{index}].ner_ranges")
+        seen.add(key)
+    if type(value["removed"]) is not list:
+        raise RuntimeError("NER plan removed must be an array")
+    seen = set()
+    for index, item in enumerate(value["removed"]):
+        key = validate_book_key(item, f"plan.removed[{index}]")
+        if key in seen:
+            raise RuntimeError("NER plan removed contains a duplicate book")
+        seen.add(key)
     if type(value["current_books"]) is not list:
         raise RuntimeError("NER plan current_books must be an array")
     seen = set()
@@ -119,6 +137,28 @@ def validate_plan(value: Any, *, request_id: str, snapshot_sha256: str, engine_f
             raise RuntimeError(f"plan.current_books[{index}] is duplicate or has an invalid hash")
         seen.add(key)
     return value
+
+
+def _validate_ner_ranges(value: Any, where: str) -> tuple[tuple[int, int], ...]:
+    if type(value) is not list:
+        raise RuntimeError(f"{where}: must be an array")
+    result = []
+    previous_end = -1
+    for index, item in enumerate(value):
+        if (
+            type(item) is not list
+            or len(item) != 2
+            or any(type(number) is not int for number in item)
+        ):
+            raise RuntimeError(f"{where}[{index}]: must be an integer pair")
+        start, end = item
+        if start < 0 or end <= start or start < previous_end:
+            raise RuntimeError(
+                f"{where}: ranges must be sorted, positive and non-overlapping"
+            )
+        result.append((start, end))
+        previous_end = end
+    return tuple(result)
 
 
 def _validate_range(value: Any, limit: int, where: str) -> tuple[int, int]:
@@ -229,8 +269,22 @@ class NerBundle:
             raise RuntimeError("NER manifest batch_lines is invalid")
         if expected_batch_lines is not None and manifest["batch_lines"] != expected_batch_lines:
             raise RuntimeError("NER manifest batch size differs from resolver transport boundary")
-        expected = [validate_book_key(item, f"changed_books[{index}]")
-                    for index, item in enumerate(changed_books)]
+        expected = []
+        expected_ranges = {}
+        for index, item in enumerate(changed_books):
+            if type(item) is not dict:
+                raise RuntimeError(f"changed_books[{index}] is not an object")
+            key = validate_book_key(
+                {
+                    "source_name": item.get("source_name"),
+                    "canonical_he_title": item.get("canonical_he_title"),
+                },
+                f"changed_books[{index}]",
+            )
+            expected.append(key)
+            expected_ranges[key] = _validate_ner_ranges(
+                item.get("ner_ranges"), f"changed_books[{index}].ner_ranges"
+            )
         books = manifest["books"]
         if type(books) is not list:
             raise RuntimeError("NER manifest books must be an array")
@@ -245,7 +299,7 @@ class NerBundle:
             path = self._below_root(relative)
             self._verify_descriptor(path, descriptor, f"manifest.books[{index}]")
             book_manifest = load_json_strict(path)
-            self._validate_book_manifest(book_manifest, key)
+            self._validate_book_manifest(book_manifest, key, expected_ranges.get(key))
             if expected_book_hashes is not None and book_manifest["source_book_hash"] != expected_book_hashes.get(key):
                 raise RuntimeError(f"NER book manifest source hash differs from snapshot: {key!r}")
             self.books[key] = book_manifest
@@ -274,8 +328,16 @@ class NerBundle:
         if size != descriptor["size"] or sha256_file(path) != descriptor["sha256"]:
             raise RuntimeError(f"{where}: content descriptor mismatch")
 
-    def _validate_book_manifest(self, value: Any, expected_book: tuple[str, str]) -> None:
-        required = {"schema_version", "book", "source_book_hash", "line_count", "eligible_line_count", "batches"}
+    def _validate_book_manifest(
+        self,
+        value: Any,
+        expected_book: tuple[str, str],
+        expected_ner_ranges: tuple[tuple[int, int], ...] | None,
+    ) -> None:
+        required = {
+            "schema_version", "book", "source_book_hash", "line_count",
+            "eligible_line_count", "ner_ranges", "batches",
+        }
         if type(value) is not dict or set(value) != required:
             raise RuntimeError("NER book manifest has an invalid key set")
         if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
@@ -284,6 +346,11 @@ class NerBundle:
             raise RuntimeError("NER book manifest identity mismatch")
         if type(value["source_book_hash"]) is not str or not re.fullmatch(r"[0-9a-f]{16}", value["source_book_hash"]):
             raise RuntimeError("NER book manifest source_book_hash is invalid")
+        actual_ranges = _validate_ner_ranges(
+            value["ner_ranges"], "book_manifest.ner_ranges"
+        )
+        if expected_ner_ranges is None or actual_ranges != expected_ner_ranges:
+            raise RuntimeError("NER book manifest line plan differs from resolver plan")
         for field in ("line_count", "eligible_line_count"):
             if type(value[field]) is not int or value[field] < 0:
                 raise RuntimeError(f"NER book manifest {field} is invalid")

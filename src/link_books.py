@@ -30,6 +30,7 @@ import time
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
+from line_baseline import indices_from_ranges  # noqa: E402
 
 # Lines per bulk NER call. Transport granularity only — per-line output is independent
 # of batching. Tunable per host: GPU serving OOMs on 100-line batches of monster books
@@ -255,7 +256,7 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
 
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
-    precomputed=None,
+    precomputed=None, ner_indices=None, reuse=(),
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -270,23 +271,80 @@ def process_book_checkpointed(
     from itertools import chain
     from linker_artifact import read_artifact
 
+    if ner_indices is None:
+        ner_indices = {line_index for line_index, _ in lines}
+    else:
+        ner_indices = set(ner_indices)
+    current_by_index = {line_index: content for line_index, content in lines}
+    reuse_by_old = {}
+    reused_destinations = set()
+    for old_index, new_index in reuse:
+        if (
+            type(old_index) is not int
+            or type(new_index) is not int
+            or old_index < 0
+            or new_index < 0
+            or old_index in reuse_by_old
+            or new_index in reused_destinations
+        ):
+            raise RuntimeError(f"invalid/duplicate line reuse mapping for {bk!r}")
+        reuse_by_old[old_index] = new_index
+        reused_destinations.add(new_index)
+    current_indices = set(current_by_index)
+    if (
+        ner_indices & reused_destinations
+        or ner_indices | reused_destinations != current_indices
+    ):
+        raise RuntimeError(f"line plan does not exactly partition {bk!r}")
+    reused_records = []
+    if reuse_by_old and os.path.exists(out_path):
+        for record in read_artifact(out_path):
+            if record.book_key != bk:
+                raise RuntimeError(
+                    f"prior artifact contains a different book identity for {bk!r}"
+                )
+            new_index = reuse_by_old.get(record.line_index)
+            if new_index is None:
+                continue
+            expected_source_hash = content_hash(current_by_index[new_index])
+            if record.source_hash != expected_source_hash:
+                raise RuntimeError(
+                    f"reused artifact source hash mismatch for "
+                    f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
+                )
+            reused_records.append(LinkRecord(
+                book_key=bk,
+                line_index=new_index,
+                start=record.start,
+                end=record.end,
+                target_ref=record.target_ref,
+                line_index_base=record.line_index_base,
+                source_path=record.source_path,
+                source_hash=record.source_hash,
+            ))
     os.makedirs(checkpoint_dir, exist_ok=True)
     shard_paths = []
     total_words = 0
     batches_this_life = 0
     for i in range(0, len(lines), BATCH_LINES):
-        batch = [(li, c) for li, c in lines[i:i + BATCH_LINES] if c and len(c.strip()) > 1]
+        batch = [
+            (li, c)
+            for li, c in lines[i:i + BATCH_LINES]
+            if li in ner_indices and c and len(c.strip()) > 1
+        ]
         total_words += sum(len(c.split()) for _, c in batch)
         heartbeat()
+        # A large changed book may reuse almost every line.  Do not create thousands
+        # of empty checkpoint shards for batches that contain no requested NER work;
+        # the exact line partition above already proves those lines are accounted for.
+        if not batch:
+            continue
         shard = os.path.join(checkpoint_dir, f"{i:012d}.jsonl")
         shard_paths.append(shard)
         if os.path.exists(shard):
             continue
-        records, _ = (
-            process_batch(
-                linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
-            )
-            if batch else ([], 0)
+        records, _ = process_batch(
+            linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
         )
         write_artifact(shard, records)
         batches_this_life += 1
@@ -300,7 +358,9 @@ def process_book_checkpointed(
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 
-    records = chain.from_iterable(read_artifact(path) for path in shard_paths)
+    records = list(reused_records)
+    records.extend(chain.from_iterable(read_artifact(path) for path in shard_paths))
+    records.sort(key=lambda record: (record.line_index, record.start, record.end, record.target_ref))
     count = write_artifact(out_path, records)
     return count, total_words
 
@@ -412,6 +472,7 @@ def main():
     con = sqlite3.connect(f"file:{args.snapshot}?mode=ro", uri=True)
     books = all_book_keys(con)
     requested_items = None
+    requested_plans = {}
     if args.only_books:
         import json as _json
         with open(args.only_books, encoding="utf-8") as fh:
@@ -420,9 +481,16 @@ def main():
             raise RuntimeError("--only-books must contain a JSON array")
         wanted = set()
         for index, item in enumerate(requested_items):
+            allowed_shapes = (
+                {"source_name", "canonical_he_title"},
+                {"source_name", "canonical_he_title", "hash"},
+                {
+                    "source_name", "canonical_he_title", "hash",
+                    "ner_ranges", "reuse",
+                },
+            )
             if (not isinstance(item, dict)
-                    or set(item) not in ({"source_name", "canonical_he_title"},
-                                         {"source_name", "canonical_he_title", "hash"})
+                    or set(item) not in allowed_shapes
                     or not isinstance(item.get("source_name"), str)
                     or not isinstance(item.get("canonical_he_title"), str)):
                 raise RuntimeError(f"--only-books entry {index} has an invalid shape")
@@ -430,6 +498,7 @@ def main():
             if key in wanted:
                 raise RuntimeError(f"--only-books contains duplicate book {key!r}")
             wanted.add(key)
+            requested_plans[key] = item
         books = [bk for bk in books if (bk.source_name, bk.canonical_he_title) in wanted]
         if len(books) != len(wanted):
             missing = wanted - {(book.source_name, book.canonical_he_title) for book in books}
@@ -448,13 +517,25 @@ def main():
             digest = item.get("hash")
             if not isinstance(digest, str):
                 raise RuntimeError(f"precomputed NER requires source hash on --only-books entry {index}")
+            if "ner_ranges" not in item or "reuse" not in item:
+                raise RuntimeError(
+                    f"precomputed NER requires the exact line plan on --only-books entry {index}"
+                )
             expected_hashes[(item["source_name"], item["canonical_he_title"])] = digest
         precomputed = NerBundle(
             args.ner_bundle_dir,
             request_id=args.expected_relink_request_id,
             snapshot_sha256=sha256_of_file(args.snapshot),
             engine_fingerprint=args.expected_engine_fingerprint,
-            changed_books=[book.to_dict() for book in books],
+            changed_books=[
+                {
+                    **book.to_dict(),
+                    "ner_ranges": requested_plans[
+                        (book.source_name, book.canonical_he_title)
+                    ]["ner_ranges"],
+                }
+                for book in books
+            ],
             expected_book_hashes=expected_hashes,
             expected_batch_lines=BATCH_LINES,
         )
@@ -492,12 +573,32 @@ def main():
             if not try_claim(cid):
                 break  # another live worker owns it — it will mark done/failed
             lines = book_lines(con, bk)
+            item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
+            if "ner_ranges" in item:
+                ner_indices = indices_from_ranges(item["ner_ranges"])
+                reuse_value = item.get("reuse")
+                if type(reuse_value) is not list:
+                    raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
+                reuse = []
+                for index, pair in enumerate(reuse_value):
+                    if (
+                        type(pair) is not list
+                        or len(pair) != 2
+                        or any(type(value) is not int for value in pair)
+                    ):
+                        raise RuntimeError(
+                            f"invalid line reuse pair {index} for {bk!r}"
+                        )
+                    reuse.append(tuple(pair))
+            else:
+                ner_indices = {line_index for line_index, _ in lines}
+                reuse = []
             out_path = os.path.join(args.repo, book_key_to_relpath(bk))
             checkpoint_dir = os.path.join(run, "checkpoints", cid)
             t0 = time.time()
             try:
                 worker_heartbeat()
-                if precomputed is None:
+                if precomputed is None and ner_indices:
                     wait_for_ner(log)
 
                 def recycle_worker(current_rss, batches):
@@ -513,10 +614,13 @@ def main():
 
                 record_count, words = process_book_checkpointed(
                     linker, bk, lines, skipped_log, lambda: heartbeat(cid),
-                    checkpoint_dir, out_path, recycle_worker, precomputed=precomputed,
+                    checkpoint_dir, out_path, recycle_worker,
+                    precomputed=precomputed,
+                    ner_indices=ner_indices,
+                    reuse=reuse,
                 )
             except Exception as e:
-                if precomputed is None and not ner_alive():
+                if precomputed is None and ner_indices and not ner_alive():
                     # Infrastructure outage, not a book problem: release the claim, wait
                     # for NER, and retry this book (any worker may pick it up meanwhile).
                     log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
