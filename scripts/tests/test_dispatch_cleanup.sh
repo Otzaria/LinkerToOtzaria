@@ -87,6 +87,11 @@ cat > "$WORK/bin/kaggle" <<'EOF'
 #!/usr/bin/env bash
 echo "kaggle $*" >> "$MOCK_LOG"
 /bin/sleep "${MOCK_KAGGLE_SLEEP:-0}"
+[ -z "${MOCK_KAGGLE_PUSH_ERROR:-}" ] || {
+  echo "Kernel push error: Maximum weekly GPU quota reached."
+  exit 0
+}
+[ "${MOCK_KAGGLE_RC:-0}" -ne 0 ] || echo "Kernel version 99 successfully pushed."
 exit "${MOCK_KAGGLE_RC:-0}"
 EOF
 cat > "$WORK/bin/sleep" <<'EOF'
@@ -119,6 +124,10 @@ check "admission: listing failure → refuse (fail-closed)" \
 export MOCK_LOG="$WORK/t3.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_RC=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
 check "push failure → child cancelled once, rc!=0" test "$rc" -ne 0 -a "$(cancels)" -eq 1
+
+export MOCK_LOG="$WORK/t3-semantic.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_PUSH_ERROR=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
+check "semantic push error with rc=0 → child cancelled" test "$rc" -ne 0 -a "$(cancels)" -eq 1
 
 export MOCK_LOG="$WORK/t4.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?

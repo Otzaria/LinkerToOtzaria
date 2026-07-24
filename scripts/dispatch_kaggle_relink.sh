@@ -323,10 +323,19 @@ JSON
 # Managed push: run it as a tracked child and sit in `wait` — bash delivers a signal
 # to the trap immediately while waiting on a builtin, and the handler kills the push
 # before cancelling the queued child (a push left running could still boot a session).
-python3 "$HERE/scripts/exec_new_session.py" kaggle kernels push -p "$PUSH" &
+PUSH_LOG=$(mktemp)
+python3 "$HERE/scripts/exec_new_session.py" kaggle kernels push -p "$PUSH" >"$PUSH_LOG" 2>&1 &
 ACTIVE_PID=$!
 wait "$ACTIVE_PID"
 ACTIVE_PID=""
+cat "$PUSH_LOG"
+if grep -q 'Kernel push error:' "$PUSH_LOG" ||
+   ! grep -Eq 'Kernel version [0-9]+ successfully pushed' "$PUSH_LOG"; then
+  echo "::error::Kaggle did not accept the kernel push" >&2
+  rm -f "$PUSH_LOG"
+  exit 1
+fi
+rm -f "$PUSH_LOG"
 # Success: a session will boot and pick the child up. From this point a late signal or
 # a failure in the tail must NOT cancel a live handoff — disarm everything.
 trap - EXIT HUP INT TERM
