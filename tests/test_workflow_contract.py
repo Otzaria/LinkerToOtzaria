@@ -99,6 +99,36 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("raw-ner-handoff-{0}-{1}", workflow)
         self.assertIn("run-id: ${{ inputs.raw_ner_source_run_id || github.run_id }}", workflow)
         self.assertIn("needs.relink.outputs.raw_ner_artifact_name", workflow)
+        self.assertIn(
+            'repos/$GITHUB_REPOSITORY/compare/${SOURCE_HEAD}...${GITHUB_SHA}',
+            workflow,
+        )
+        self.assertIn(".merge_base_commit.sha == $source", workflow)
+
+    def test_arm_resolver_uses_the_verified_kaggle_runtime_lock(self):
+        root = Path(__file__).parents[1]
+        setup = (root / "ci/setup_stack.sh").read_text(encoding="utf-8")
+        manifest = json.loads(
+            (root / "ci/runtime-lock/runtime-manifest.json").read_text(encoding="utf-8")
+        )
+        freeze = root / "ci/runtime-lock/sefaria.txt"
+        self.assertEqual(
+            hashlib.sha256(freeze.read_bytes()).hexdigest(),
+            manifest["sefaria_freeze_sha256"],
+        )
+        combined = hashlib.sha256(
+            (
+                manifest["sefaria_freeze_sha256"]
+                + "\n"
+                + manifest["gpu_server_freeze_sha256"]
+                + "\n"
+            ).encode()
+        ).hexdigest()[:16]
+        self.assertEqual(combined, "10b6deacbc183772")
+        self.assertIn("ci/validate_runtime_lock.py", setup)
+        self.assertIn('if [ "$STACK_ROLE" = resolver ]; then', setup)
+        self.assertIn('pip" install -r "$RUNTIME_LOCK_SEFARIA"', setup)
+        self.assertIn('PYTHON_RUNTIME_ID="$CANONICAL_PYTHON_RUNTIME_ID"', setup)
 
     def test_gpu_producer_does_not_import_mongo_bound_sefaria_model(self):
         producer = (Path(__file__).parents[1] / "src/precompute_ner.py").read_text(

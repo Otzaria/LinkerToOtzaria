@@ -881,13 +881,26 @@ jobs:
           expected_title="relink request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
           source_json="$RUNNER_TEMP/raw-ner-source-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$source_json"
-          jq -e --arg title "$expected_title" --arg head "$GITHUB_SHA" '
+          jq -e --arg title "$expected_title" '
             .status == "completed" and .conclusion != "success" and
             .event == "workflow_dispatch" and
             .path == ".github/workflows/relink.yml" and
-            .display_title == $title and .head_sha == $head
+            .display_title == $title and
+            (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
           ' "$source_json" >/dev/null || {
-            echo "::error::raw-NER recovery source is not the exact failed producer run at this commit"; exit 1;
+            echo "::error::raw-NER recovery source is not the exact failed producer run"; exit 1;
+          }
+          # A recovery fix necessarily has a newer workflow commit than the failed
+          # producer. Accept only a forward descendant on main; the checksum-gated
+          # handoff then validates its schema/request/snapshot/engine independently.
+          SOURCE_HEAD="$(jq -r .head_sha "$source_json")"
+          compare_json="$RUNNER_TEMP/raw-ner-source-compare.json"
+          gh api "repos/$GITHUB_REPOSITORY/compare/${SOURCE_HEAD}...${GITHUB_SHA}" > "$compare_json"
+          jq -e --arg source "$SOURCE_HEAD" '
+            (.status == "ahead" or .status == "identical") and
+            .behind_by == 0 and .merge_base_commit.sha == $source
+          ' "$compare_json" >/dev/null || {
+            echo "::error::recovery commit is not a forward descendant of the failed raw-NER producer"; exit 1;
           }
           parent_json="$RUNNER_TEMP/raw-ner-parent-run.json"
           gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID" > "$parent_json"

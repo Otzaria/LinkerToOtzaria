@@ -18,6 +18,9 @@ SEF="$STACK/Sefaria-Project"
 GPU="$STACK/gpu-server"
 NER_URL="http://127.0.0.1:5051/recognize-entities"
 STACK_ROLE="${LINKER_STACK_ROLE:-full}"
+RUNTIME_LOCK_DIR="${LINKER_REPO:-$PWD}/ci/runtime-lock"
+RUNTIME_LOCK_MANIFEST="$RUNTIME_LOCK_DIR/runtime-manifest.json"
+RUNTIME_LOCK_SEFARIA="$RUNTIME_LOCK_DIR/sefaria.txt"
 case "$STACK_ROLE" in
   full|ner|resolver) ;;
   *) echo "::error::LINKER_STACK_ROLE must be full, ner, or resolver"; exit 2 ;;
@@ -94,8 +97,27 @@ fi
 # ── 2. Python venv (numpy<2 — thinc/spaCy binary compat, learned in the POC) ─
 # The venv carries an identity (python + requirements hash + commit); any change
 # rebuilds it from scratch — a SEFARIA_COMMIT bump must never run on a stale venv.
-SEF_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
+SEF_VENV_BASE_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
 GPU_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$GPU/app/requirements.txt" | cut -c1-12):${GPU_SERVER_COMMIT:-head}"
+SEF_VENV_ID="$SEF_VENV_BASE_ID"
+CANONICAL_PYTHON_RUNTIME_ID=
+if [ "$STACK_ROLE" = resolver ]; then
+  # Kaggle's x86_64 wheels cannot be copied into the ARM resolver, but resolving
+  # unpinned transitive dependencies again is not equivalent either.  Install the
+  # exact Sefaria package versions from the verified Kaggle runtime manifest and
+  # use that manifest's combined NER+resolver identity.  The GPU half is represented
+  # by the checksum-gated raw-NER handoff and is deliberately not installed on ARM.
+  CANONICAL_PYTHON_RUNTIME_ID=$(
+    python3 "${LINKER_REPO:-$PWD}/ci/validate_runtime_lock.py" \
+      --manifest "$RUNTIME_LOCK_MANIFEST" \
+      --sefaria-freeze "$RUNTIME_LOCK_SEFARIA" \
+      --sefaria-repo "$SEF" \
+      --gpu-repo "$GPU" \
+      --python-version "$($PYBIN --version 2>&1)"
+  )
+  [[ "$CANONICAL_PYTHON_RUNTIME_ID" =~ ^[0-9a-f]{16}$ ]]
+  SEF_VENV_ID="$SEF_VENV_BASE_ID:resolver-lock-$(sha256sum "$RUNTIME_LOCK_SEFARIA" | cut -c1-12)"
+fi
 
 # Ephemeral Kaggle sessions receive both complete venvs as one immutable kernel
 # output. Verify and install them together before either slow network fallback can
@@ -115,8 +137,12 @@ if [ ! -x "$SEF/.venv/bin/python" ] || [ "$(cat "$SEF/.venv/.identity" 2>/dev/nu
   rm -rf "$SEF/.venv"
   "$PYBIN" -m venv "$SEF/.venv"
   "$SEF/.venv/bin/pip" install --upgrade pip
-  "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
-  "$SEF/.venv/bin/pip" install "numpy<2"
+  if [ "$STACK_ROLE" = resolver ]; then
+    "$SEF/.venv/bin/pip" install -r "$RUNTIME_LOCK_SEFARIA"
+  else
+    "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
+    "$SEF/.venv/bin/pip" install "numpy<2"
+  fi
   printf '%s' "$SEF_VENV_ID" > "$SEF/.venv/.identity"
 fi
 # local_settings: point Django at the local Mongo; secrets stay empty (offline linking).
@@ -200,7 +226,8 @@ SUBREF_MODEL=$(model_path he_subref_ner)
 
 # ── 5. gpu-server venv + generated config + gunicorn on :5051 ────────────────
 # app/local_config.py is generated here (it is machine-specific, never committed).
-if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; then
+if [ "$STACK_ROLE" != resolver ] && \
+   { [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; }; then
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
   "$GPU/.venv/bin/pip" install --upgrade pip
@@ -210,26 +237,41 @@ if [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/
 fi
 
 # Resolve and verify the semantic Python environment identity. The bundle SHA is
-# a supply-chain pin; the freeze hashes are the engine identity, so an equivalent
-# server cache and the Kaggle bundle fingerprint identically while package drift
-# on either target forces an explicit full/adopt decision.
-for venv in "$SEF/.venv" "$GPU/.venv"; do
+# a supply-chain pin; the freeze hashes are the engine identity, so package drift
+# on either target forces an explicit full/adopt decision.  The split resolver
+# verifies its locally installed Sefaria environment byte-for-byte against the
+# producer runtime lock; its unused CUDA environment is represented by the exact
+# handoff/runtime manifest rather than being installed on ARM.
+if [ "$STACK_ROLE" = resolver ]; then
   freeze_tmp=$(mktemp)
-  "$venv/bin/python" -m pip freeze --all > "$freeze_tmp"
-  if [ -f "$venv/.freeze" ]; then
-    cmp -s "$freeze_tmp" "$venv/.freeze" || {
-      echo "::error::installed packages disagree with the verified runtime freeze: $venv"
-      rm -f "$freeze_tmp"
-      exit 1
-    }
+  "$SEF/.venv/bin/python" -m pip freeze --all > "$freeze_tmp"
+  cmp -s "$freeze_tmp" "$RUNTIME_LOCK_SEFARIA" || {
+    echo "::error::ARM resolver packages disagree with the verified Kaggle Sefaria freeze"
+    diff -u "$RUNTIME_LOCK_SEFARIA" "$freeze_tmp" || true
     rm -f "$freeze_tmp"
-  else
-    mv "$freeze_tmp" "$venv/.freeze"
-  fi
-done
-SEF_FREEZE_SHA256=$(sha256sum "$SEF/.venv/.freeze" | cut -d' ' -f1)
-GPU_FREEZE_SHA256=$(sha256sum "$GPU/.venv/.freeze" | cut -d' ' -f1)
-PYTHON_RUNTIME_ID=$(printf '%s\n%s\n' "$SEF_FREEZE_SHA256" "$GPU_FREEZE_SHA256" | sha256sum | cut -c1-16)
+    exit 1
+  }
+  mv "$freeze_tmp" "$SEF/.venv/.freeze"
+  PYTHON_RUNTIME_ID="$CANONICAL_PYTHON_RUNTIME_ID"
+else
+  for venv in "$SEF/.venv" "$GPU/.venv"; do
+    freeze_tmp=$(mktemp)
+    "$venv/bin/python" -m pip freeze --all > "$freeze_tmp"
+    if [ -f "$venv/.freeze" ]; then
+      cmp -s "$freeze_tmp" "$venv/.freeze" || {
+        echo "::error::installed packages disagree with the verified runtime freeze: $venv"
+        rm -f "$freeze_tmp"
+        exit 1
+      }
+      rm -f "$freeze_tmp"
+    else
+      mv "$freeze_tmp" "$venv/.freeze"
+    fi
+  done
+  SEF_FREEZE_SHA256=$(sha256sum "$SEF/.venv/.freeze" | cut -d' ' -f1)
+  GPU_FREEZE_SHA256=$(sha256sum "$GPU/.venv/.freeze" | cut -d' ' -f1)
+  PYTHON_RUNTIME_ID=$(printf '%s\n%s\n' "$SEF_FREEZE_SHA256" "$GPU_FREEZE_SHA256" | sha256sum | cut -c1-16)
+fi
 cat > "$GPU/app/local_config.py" <<EOF
 MODEL_PATHS = [
     {"arch": "spacy", "lang": "he", "path": "$REF_MODEL", "type": "named_entity"},
