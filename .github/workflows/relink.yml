@@ -1,4 +1,4 @@
-name: relink
+name: Weekly 5b/6 · Linker CPU resolve and immutable publish
 # הבנייה הממתינה, ה-trap של ה-dispatcher וה-reconciler מזהים ריצה זו בהתאמה מדויקת
 # (==, לא contains) על הכותרת כולה — request= (זהות per-attempt) + parent= (קואורדינטות
 # ההורה עבור ה-reconciler). אל תשנו את התבנית בלי לעדכן את שלושת הצרכנים.

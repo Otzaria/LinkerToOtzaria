@@ -7,7 +7,7 @@
 # Auth: PIPELINE_TOKEN (repo-admin — JIT registration + workflow dispatch) and
 # KAGGLE_API_TOKEN (a Kaggle API token, KGAT_…; the OAuth credentials file breaks on
 # expiry and on dataset APIs, the token does not).
-name: kaggle-relink
+name: Weekly 5a/6 · Linker incremental GPU NER
 # Same exact-match identity shape as relink.yml (request= + parent=). Do not change it
 # without updating the intent validator, provisioner and parent cleanup consumers.
 run-name: "kaggle-relink request=${{ inputs.relink_request_id || 'none' }} parent=${{ inputs.library_run_id != '' && format('{0}:{1}', inputs.library_run_id, inputs.parent_run_attempt) || 'standalone' }}"

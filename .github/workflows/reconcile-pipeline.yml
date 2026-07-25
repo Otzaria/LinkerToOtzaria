@@ -10,7 +10,7 @@
 #
 # Every action is idempotent and keyed on the per-attempt request id, so a tick can
 # never touch a live attempt's runs or anything manual/standalone.
-name: reconcile-pipeline
+name: Recovery guard · Reconcile Linker pipeline (not a build stage)
 run-name: reconcile-pipeline
 
 on:

@@ -1,4 +1,4 @@
-name: Provision queued Kaggle rerun
+name: Recovery guard · Provision bounded Kaggle rerun (not a build stage)
 run-name: kaggle-rerun-provisioner run=${{ inputs.run_id || 'scan' }}
 
 on:
