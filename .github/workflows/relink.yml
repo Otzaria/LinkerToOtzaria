@@ -915,7 +915,7 @@ jobs:
           artifact_name="raw-ner-handoff-${RELINK_REQUEST_ID}-${SOURCE_RUN_ATTEMPT}"
           count=$(gh api --paginate -X GET \
             "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts" -f per_page=100 \
-            --jq ".artifacts[] | select(.name == \\\"$artifact_name\\\" and (.expired|not) and (.size_in_bytes > 0)) | .id" \
+            --jq ".artifacts[] | select(.name == \"$artifact_name\" and (.expired|not) and (.size_in_bytes > 0)) | .id" \
             | grep -c . || true)
           [ "$count" -eq 1 ] || {
             echo "::error::recovery source must expose exactly one live $artifact_name artifact"; exit 1;

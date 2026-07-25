@@ -104,6 +104,14 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             workflow,
         )
         self.assertIn(".merge_base_commit.sha == $source", workflow)
+        self.assertIn(
+            '--jq ".artifacts[] | select(.name == \\"$artifact_name\\"',
+            workflow,
+        )
+        self.assertNotIn(
+            '--jq ".artifacts[] | select(.name == \\\\\\"$artifact_name\\\\\\"',
+            workflow,
+        )
 
     def test_arm_resolver_uses_the_verified_kaggle_runtime_lock(self):
         root = Path(__file__).parents[1]
