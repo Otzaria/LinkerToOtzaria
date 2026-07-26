@@ -145,22 +145,31 @@ def _with_book_key(rec, bk):
 # ── snapshot content hashing: the ONLY source-change clock ───────────────────
 
 def snapshot_book_hashes(snapshot_db: str) -> dict[tuple[str, str], str]:
-    """Per-book content hash over the snapshot's lines, keyed by (source_name, he_title).
+    """Per-book input hash over the snapshot's lines, keyed by (source_name, he_title).
 
-    Streams rows ordered by book then line_index and folds each book's (line_index, content)
-    into one sha1 — so any content or line change flips the hash, and it never materialises a
-    whole book in memory. This is the exact content the linker links and stamps `source_hash`
-    from, so a hash change here is precisely "this book must be re-linked"."""
+    Streams rows ordered by book then line_index and folds each book's
+    (line_index, content, context_ref) into one sha1. Resolver context shapes
+    relative citations just as source content does, so either kind of change
+    must trigger a re-link.
+    """
     con = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
     try:
+        columns = {
+            row[1] for row in con.execute("PRAGMA table_info(lines_snapshot)")
+        }
+        context_column = (
+            "context_ref"
+            if "context_ref" in columns
+            else "canonical_he_title AS context_ref"
+        )
         rows = con.execute(
-            "SELECT source_name, canonical_he_title, line_index, content "
+            f"SELECT source_name, canonical_he_title, line_index, content, {context_column} "
             "FROM lines_snapshot ORDER BY source_name, canonical_he_title, line_index"
         )
         hashes: dict[tuple[str, str], str] = {}
         cur_key = None
         h = None
-        for s, t, li, content in rows:
+        for s, t, li, content, context_ref in rows:
             key = (s, t)
             if key != cur_key:
                 if cur_key is not None:
@@ -170,6 +179,8 @@ def snapshot_book_hashes(snapshot_db: str) -> dict[tuple[str, str], str]:
             h.update(str(li).encode("ascii"))
             h.update(b"\0")
             h.update((content or "").encode("utf-8"))
+            h.update(b"\0")
+            h.update((context_ref or "").encode("utf-8"))
             h.update(b"\0")
         if cur_key is not None:
             hashes[cur_key] = h.hexdigest()[:16]
@@ -642,6 +653,8 @@ def _run_engine(args, only_books_path):
                 "--run-dir", os.path.abspath(args.run_dir), "--only-books", os.path.abspath(only_books_path)]
     if args.bavli_convention:
         base_cmd.append("--bavli-convention")
+    if getattr(args, "accumulate_existing", False):
+        base_cmd.append("--accumulate-existing")
     ner_bundle_dir = getattr(args, "ner_bundle_dir", None)
     if ner_bundle_dir:
         base_cmd += [
@@ -800,6 +813,11 @@ def main():
                          "WITHOUT a full relink; both strings must match exactly")
     ap.add_argument("--ner-bundle-dir", default=None,
                     help="verified raw-NER bundle directory; resolve without a live GPU service")
+    ap.add_argument(
+        "--accumulate-existing",
+        action="store_true",
+        help="retain the union of valid prior and newly resolved citation records",
+    )
     ap.add_argument("--plan-only", default=None, metavar="PATH",
                     help="write the immutable changed-book plan and exit without mutation")
     ap.add_argument("--relink-request-id", default=None,

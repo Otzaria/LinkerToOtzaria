@@ -34,11 +34,21 @@ class RewriteTest(unittest.TestCase):
 
 
 def _mk_snapshot(path, rows):
-    """rows: list of (source_name, canonical_he_title, line_index, content)."""
+    """Rows are v1 4-tuples or v2 tuples with a final context_ref."""
     import sqlite3
     con = sqlite3.connect(path)
-    con.execute("CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT)")
-    con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?)", rows)
+    if rows and len(rows[0]) == 5:
+        con.execute(
+            "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+            "line_index INTEGER, content TEXT, context_ref TEXT)"
+        )
+        con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?,?)", rows)
+    else:
+        con.execute(
+            "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+            "line_index INTEGER, content TEXT)"
+        )
+        con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?)", rows)
     con.commit()
     con.close()
 
@@ -62,6 +72,21 @@ class SnapshotHashTest(unittest.TestCase):
             h2 = inc.snapshot_book_hashes(p2)
             self.assertNotEqual(h1[("Sefaria", "בראשית")], h2[("Sefaria", "בראשית")])
             self.assertEqual(h1[("MoreBooks", "ספר")], h2[("MoreBooks", "ספר")])
+
+    def test_hash_changes_when_relative_citation_context_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = os.path.join(tmp, "first.db")
+            second = os.path.join(tmp, "second.db")
+            _mk_snapshot(first, [
+                ("Sefaria", "משנה ברכות", 4, "ראה לקמן", "משנה ברכות א, א"),
+            ])
+            _mk_snapshot(second, [
+                ("Sefaria", "משנה ברכות", 4, "ראה לקמן", "משנה ברכות ב, א"),
+            ])
+            self.assertNotEqual(
+                inc.snapshot_book_hashes(first),
+                inc.snapshot_book_hashes(second),
+            )
 
     def test_plan_from_snapshot_changed_and_removed(self):
         base = {("s", "a"): "h1", ("s", "b"): "h2", ("s", "gone"): "h3"}

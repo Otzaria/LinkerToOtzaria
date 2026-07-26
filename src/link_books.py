@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import resource
 import sqlite3
 import sys
@@ -29,7 +30,14 @@ import time
 
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
+from linker_artifact import (  # noqa: E402
+    BookKey,
+    LinkRecord,
+    book_key_to_relpath,
+    content_hash,
+    read_artifact,
+    write_artifact,
+)
 from line_baseline import indices_from_ranges  # noqa: E402
 
 # Lines per bulk NER call. Transport granularity only — per-line output is independent
@@ -44,6 +52,28 @@ NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
+_HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+_HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
+
+
+def is_heading_line(content: str) -> bool:
+    """Whether a stored line is a structural heading, never linkable prose."""
+    return bool(_HEADING_RE.match(content or ""))
+
+
+def is_ner_eligible_line(content: str) -> bool:
+    """Whether a stored line contains visible Hebrew prose worth sending to NER.
+
+    Image-only rows can contain multi-megabyte base64 data URIs. Sending those
+    invisible bytes to spaCy wastes accelerator time and can OOM a whole batch.
+    """
+    if not content or len(content.strip()) <= 1 or is_heading_line(content):
+        return False
+    visible = _HTML_TAG_RE.sub(" ", content)
+    return len(_HEBREW_RE.findall(visible)) >= 2
+
+
 def rss_bytes() -> int:
     """Return the process's *current* resident set, not its historical maximum.
 
@@ -132,9 +162,15 @@ def all_book_keys(con) -> list[BookKey]:
     return [BookKey(s, t) for s, t in rows]
 
 
-def book_lines(con, bk: BookKey) -> list[tuple[int, str]]:
+def book_lines(con, bk: BookKey) -> list[tuple[int, str, str]]:
+    columns = {row[1] for row in con.execute("PRAGMA table_info(lines_snapshot)")}
+    context_column = (
+        "context_ref"
+        if "context_ref" in columns
+        else "canonical_he_title AS context_ref"
+    )
     return con.execute(
-        "SELECT line_index, content FROM lines_snapshot "
+        f"SELECT line_index, content, {context_column} FROM lines_snapshot "
         "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index",
         (bk.source_name, bk.canonical_he_title),
     ).fetchall()
@@ -170,7 +206,10 @@ def _same_location(one, others) -> bool:
     return any(o.index.title.replace("Jerusalem Talmud ", "") == base for o in others)
 
 
-def process_book(linker, bk, lines, skipped_log, heartbeat, precomputed=None):
+def process_book(
+    linker, bk, lines, skipped_log, heartbeat, precomputed=None,
+    context_ref_factory=None,
+):
     """Link one book's lines into a list of LinkRecord (unambiguous only).
 
     Calls heartbeat() once per batch so a long book keeps its claim fresh and is
@@ -179,26 +218,51 @@ def process_book(linker, bk, lines, skipped_log, heartbeat, precomputed=None):
     records: list[LinkRecord] = []
     words = 0
     for i in range(0, len(lines), BATCH_LINES):
-        batch = [(li, c) for li, c in lines[i:i + BATCH_LINES] if c and len(c.strip()) > 1]
+        batch = [
+            (li, c, context_ref)
+            for li, c, context_ref in lines[i:i + BATCH_LINES]
+            if is_ner_eligible_line(c)
+        ]
         heartbeat()
         if not batch:
             continue
         batch_records, batch_words = process_batch(
             linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+            context_ref_factory=context_ref_factory,
         )
         records.extend(batch_records)
         words += batch_words
     return records, words
 
 
-def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None):
+def process_batch(
+    linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None,
+    context_ref_factory=None,
+):
     """Link one transport batch. Output is independent of neighbouring batches."""
-    words = sum(len(c.split()) for _, c in batch)
+    words = sum(len(c.split()) for _, c, _ in batch)
+    book_context_refs = None
+    if context_ref_factory is not None:
+        book_context_refs = []
+        for _line_index, _content, context_ref in batch:
+            try:
+                book_context_refs.append(
+                    context_ref_factory(context_ref) if context_ref else None
+                )
+            except Exception:
+                # Non-Sefaria books legitimately have titles unknown to Ref. They
+                # still link context-free; known refs retain exact line context.
+                book_context_refs.append(None)
     try:
         if precomputed is not None:
-            docs = precomputed.resolve_batch(linker, bk, batch, batch_start)
+            docs = precomputed.resolve_batch(
+                linker, bk, batch, batch_start, book_context_refs=book_context_refs,
+            )
         else:
-            docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
+            kwargs = {"type_filter": "citation"}
+            if book_context_refs is not None:
+                kwargs["book_context_refs"] = book_context_refs
+            docs = linker.bulk_link([c for _, c, _ in batch], **kwargs)
         if len(docs) != len(batch):  # a short reply would silently drop tail lines
             raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
     except Exception:
@@ -209,21 +273,24 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
         # line would silently drop all its citations while the book counts as linked
         # and the baseline advances past it — the bootstrap lost 216 lines this way.
         docs = []
-        for li, c in batch:
+        for batch_offset, (li, c, _context_ref) in enumerate(batch):
             try:
                 if precomputed is not None:
                     # A replay failure is a corrupt/mismatched handoff or resolver bug.
                     # Re-batching would destroy the exact context boundary in the
                     # signed contract, so fail the book rather than guessing.
                     raise
-                docs.append(linker.bulk_link([c], type_filter="citation")[0])
+                kwargs = {"type_filter": "citation"}
+                if book_context_refs is not None:
+                    kwargs["book_context_refs"] = [book_context_refs[batch_offset]]
+                docs.append(linker.bulk_link([c], **kwargs)[0])
             except Exception as le:
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
                 raise RuntimeError(
                     f"line {li} failed to link: {type(le).__name__}: {le}") from le
 
     records: list[LinkRecord] = []
-    for (line_index, content), doc in zip(batch, docs):
+    for (line_index, content, _context_ref), doc in zip(batch, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
         # links if the source book changed before Phase-2 applies them (cross-cycle drift).
         src_hash = content_hash(content)
@@ -256,7 +323,8 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
 
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
-    precomputed=None, ner_indices=None, reuse=(),
+    precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
+    accumulate_existing=False,
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -269,13 +337,14 @@ def process_book_checkpointed(
     marker.
     """
     from itertools import chain
-    from linker_artifact import read_artifact
-
     if ner_indices is None:
-        ner_indices = {line_index for line_index, _ in lines}
+        ner_indices = {line_index for line_index, _, _ in lines}
     else:
         ner_indices = set(ner_indices)
-    current_by_index = {line_index: content for line_index, content in lines}
+    current_by_index = {
+        line_index: (content, context_ref)
+        for line_index, content, context_ref in lines
+    }
     reuse_by_old = {}
     reused_destinations = set()
     for old_index, new_index in reuse:
@@ -297,6 +366,26 @@ def process_book_checkpointed(
     ):
         raise RuntimeError(f"line plan does not exactly partition {bk!r}")
     reused_records = []
+    cumulative_records = []
+    if accumulate_existing and os.path.exists(out_path):
+        for record in read_artifact(out_path):
+            if record.book_key != bk:
+                raise RuntimeError(
+                    f"prior artifact contains a different book identity for {bk!r}"
+                )
+            current = current_by_index.get(record.line_index)
+            if current is None:
+                continue
+            current_content, _context_ref = current
+            if is_heading_line(current_content):
+                continue
+            expected_source_hash = content_hash(current_content)
+            if record.source_hash != expected_source_hash:
+                continue
+            utf16_length = len(current_content.encode("utf-16-le")) // 2
+            if not (0 <= record.start < record.end <= utf16_length):
+                continue
+            cumulative_records.append(record)
     if reuse_by_old and os.path.exists(out_path):
         for record in read_artifact(out_path):
             if record.book_key != bk:
@@ -306,7 +395,10 @@ def process_book_checkpointed(
             new_index = reuse_by_old.get(record.line_index)
             if new_index is None:
                 continue
-            expected_source_hash = content_hash(current_by_index[new_index])
+            current_content, _context_ref = current_by_index[new_index]
+            if is_heading_line(current_content):
+                continue
+            expected_source_hash = content_hash(current_content)
             if record.source_hash != expected_source_hash:
                 raise RuntimeError(
                     f"reused artifact source hash mismatch for "
@@ -328,11 +420,14 @@ def process_book_checkpointed(
     batches_this_life = 0
     for i in range(0, len(lines), BATCH_LINES):
         batch = [
-            (li, c)
-            for li, c in lines[i:i + BATCH_LINES]
-            if li in ner_indices and c and len(c.strip()) > 1
+            (li, c, context_ref)
+            for li, c, context_ref in lines[i:i + BATCH_LINES]
+            if (
+                li in ner_indices
+                and is_ner_eligible_line(c)
+            )
         ]
-        total_words += sum(len(c.split()) for _, c in batch)
+        total_words += sum(len(c.split()) for _, c, _ in batch)
         heartbeat()
         # A large changed book may reuse almost every line.  Do not create thousands
         # of empty checkpoint shards for batches that contain no requested NER work;
@@ -345,6 +440,7 @@ def process_book_checkpointed(
             continue
         records, _ = process_batch(
             linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+            context_ref_factory=context_ref_factory,
         )
         write_artifact(shard, records)
         batches_this_life += 1
@@ -358,8 +454,19 @@ def process_book_checkpointed(
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 
-    records = list(reused_records)
+    records = list(cumulative_records)
+    records.extend(reused_records)
     records.extend(chain.from_iterable(read_artifact(path) for path in shard_paths))
+    records = list({
+        (
+            record.line_index,
+            record.start,
+            record.end,
+            record.target_ref,
+            record.source_hash,
+        ): record
+        for record in records
+    }.values())
     records.sort(key=lambda record: (record.line_index, record.start, record.end, record.target_ref))
     count = write_artifact(out_path, records)
     return count, total_words
@@ -394,6 +501,11 @@ def main():
                     help="raw-NER handoff root; disables all live GPU calls")
     ap.add_argument("--expected-engine-fingerprint", default=None)
     ap.add_argument("--expected-relink-request-id", default=None)
+    ap.add_argument(
+        "--accumulate-existing",
+        action="store_true",
+        help="union newly resolved records with still-valid prior records for each source book",
+    )
     args = ap.parse_args()
 
     global _BAVLI_CONVENTION
@@ -466,7 +578,7 @@ def main():
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     import django
     django.setup()
-    from sefaria.model import library
+    from sefaria.model import Ref, library
     linker = library.get_linker("he")
 
     con = sqlite3.connect(f"file:{args.snapshot}?mode=ro", uri=True)
@@ -591,7 +703,7 @@ def main():
                         )
                     reuse.append(tuple(pair))
             else:
-                ner_indices = {line_index for line_index, _ in lines}
+                ner_indices = {line_index for line_index, _, _ in lines}
                 reuse = []
             out_path = os.path.join(args.repo, book_key_to_relpath(bk))
             checkpoint_dir = os.path.join(run, "checkpoints", cid)
@@ -618,6 +730,8 @@ def main():
                     precomputed=precomputed,
                     ner_indices=ner_indices,
                     reuse=reuse,
+                    context_ref_factory=Ref,
+                    accumulate_existing=args.accumulate_existing,
                 )
             except Exception as e:
                 if precomputed is None and ner_indices and not ner_alive():

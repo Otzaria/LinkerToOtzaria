@@ -16,7 +16,13 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey  # noqa: E402
-from link_books import BATCH_LINES, all_book_keys, book_lines, claim_id  # noqa: E402
+from link_books import (  # noqa: E402
+    BATCH_LINES,
+    all_book_keys,
+    book_lines,
+    claim_id,
+    is_ner_eligible_line,
+)
 from ner_handoff import (  # noqa: E402
     SCHEMA_VERSION,
     load_json_strict,
@@ -472,17 +478,25 @@ def _produce_book(
         for range_start, range_end in ner_ranges
         for line_index in range(range_start, range_end)
     }
-    current_indices = {line_index for line_index, _ in lines}
+    current_indices = {line_index for line_index, _, _ in lines}
     if not selected_indices <= current_indices:
         raise RuntimeError(f"NER plan selects absent lines for {book!r}")
     for start in range(0, len(lines), BATCH_LINES):
-        batch = [(line_index, content) for line_index, content in lines[start:start + BATCH_LINES]
-                 if line_index in selected_indices and content and len(content.strip()) > 1]
+        batch = [
+            (line_index, content, context_ref)
+            for line_index, content, context_ref in lines[start:start + BATCH_LINES]
+            if (
+                line_index in selected_indices
+                and is_ner_eligible_line(content)
+            )
+        ]
         _heartbeat(root, cid, worker_hb)
         if not batch:
             continue
         expected_starts.add(start)
-        normalized = recognizer._normalize_input([content for _, content in batch])
+        normalized = recognizer._normalize_input(
+            [content for _, content, _ in batch]
+        )
         existing = by_start.get(start)
         if existing is not None:
             value = load_json_strict(_verify_descriptor(
@@ -492,7 +506,9 @@ def _produce_book(
                 value,
                 expected_book=(book.source_name, book.canonical_he_title),
                 expected_start=start,
-                normalized_lines=list(zip((line_index for line_index, _ in batch), normalized)),
+                normalized_lines=list(
+                    zip((line_index for line_index, _, _ in batch), normalized)
+                ),
             )
             eligible_count += len(batch)
             continue
@@ -510,7 +526,7 @@ def _produce_book(
                 "normalized_sha256": sha256_bytes(text.encode("utf-8")),
                 "result": result,
             }
-            for (line_index, _), text, result in zip(batch, normalized, results)
+            for (line_index, _, _), text, result in zip(batch, normalized, results)
         ]
         batch_path = temporary / f"{start:012d}.json"
         size, digest = write_json_atomic(batch_path, {

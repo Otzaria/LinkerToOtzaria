@@ -57,6 +57,14 @@ One JSON object per line (see `schema/artifact.schema.json`):
   (`line.content`, HTML included). The build maps raw→visible via `countVisibleChars`.
 - `target_ref` — canonical English ref (`Ref.normal()`). The only thing the build
   needs to resolve the target.
+- The snapshot also carries a per-line `context_ref`: exact `line.heRef` when
+  available, otherwise the canonical book title. It is passed to Sefaria as
+  `book_context_refs`, enabling CURRENT_BOOK resolution for relative citations
+  such as `לעיל` and `לקמן`. Resolver-context changes participate in both the
+  book change clock and exact-line reuse fingerprint.
+- Structural `<h1>`…`<h6>` lines are never sent to NER and never emitted as
+  artifacts. The Phase-2 DB importer independently rejects heading records from
+  old/external artifacts.
 - Ambiguous citations are **dropped** at detection time — artifacts hold only
   unambiguous links.
 
@@ -68,3 +76,44 @@ One JSON object per line (see `schema/artifact.schema.json`):
 ```
 python3 -m unittest discover -s tests -v
 ```
+
+## Parallel full-corpus relink
+
+The expensive NER pass can be split by whole books and run independently from
+the CPU resolver:
+
+```bash
+python3 src/parallel_ner.py split \
+  --snapshot lines.db --plan full-plan.json --output shards --count 12
+
+python3 scripts/parallel_kaggle_ner.py dispatch \
+  --state kaggle-state --dataset OWNER/PRIVATE_INPUT_DATASET \
+  --prefix linker-ner-RUN_ID --count 10 \
+  --session-budget-seconds 9700 --reserve-hours 2
+
+scripts/run_cpu_ner_shard.sh INPUT WORK OUTPUT 10
+scripts/run_cpu_ner_shard.sh INPUT WORK OUTPUT 11
+
+python3 src/parallel_ner.py merge \
+  --snapshot lines.db --plan full-plan.json \
+  --bundle raw-ner-shard-00 --bundle raw-ner-shard-01 \
+  --bundle raw-ner-shard-02 --bundle raw-ner-shard-03 \
+  --bundle raw-ner-shard-04 --bundle raw-ner-shard-05 \
+  --bundle raw-ner-shard-06 --bundle raw-ner-shard-07 \
+  --bundle raw-ner-shard-08 --bundle raw-ner-shard-09 \
+  --bundle raw-ner-shard-10 --bundle raw-ner-shard-11 \
+  --output merged-ner --expected-batch-lines 75
+```
+
+`parallel_ner.py merge` rejects missing, duplicate, overlapping, or
+contract-mismatched books. Replay the merged bundle through `incremental.py`
+with `--ner-bundle-dir merged-ner --accumulate-existing`. Accumulation retains
+only still-valid prior records (same line content, valid UTF-16 span, and a
+non-heading source line), unions new records by semantic identity, and therefore
+adds newly detected links without preserving stale or heading links.
+
+Kaggle workers run only `precompute_ner.py`; MongoDB and reference resolution
+stay on CPU. `parallel_kaggle_ner.py` checks the live quota before dispatch and
+refuses a launch whose worst-case session budgets would violate the requested
+GPU-hour reserve. The private input manifest pins and hashes the snapshot,
+plans, models, runtime, and source archives so a branch can repeat the run.

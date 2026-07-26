@@ -25,7 +25,7 @@ from pathlib import Path
 from linker_artifact import BookKey
 from linker_artifact import book_key_to_relpath
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DIRECTORY_NAME = "line-baseline"
 _HEX16 = re.compile(r"[0-9a-f]{16}\Z")
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
@@ -55,9 +55,15 @@ class LineDelta:
         return sum(end - start for start, end in self.ner_ranges)
 
 
-def line_fingerprint(content: str) -> str:
-    """128-bit source-line identity used only for exact reuse matching."""
-    return hashlib.blake2b((content or "").encode("utf-8"), digest_size=16).hexdigest()
+def line_fingerprint(content: str, context_ref: str = "") -> str:
+    """128-bit source-line identity used only for exact reuse matching.
+
+    Resolver output now depends on both the text and its CURRENT_BOOK location.
+    A moved line may therefore reuse an artifact only when its context ref also
+    stayed identical.
+    """
+    payload = (content or "").encode("utf-8") + b"\0" + (context_ref or "").encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=16).hexdigest()
 
 
 def _book_id(book: BookKey) -> str:
@@ -143,21 +149,31 @@ def indices_from_ranges(ranges) -> set[int]:
 
 def _read_book_rows(
     connection: sqlite3.Connection, book: BookKey
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(lines_snapshot)")
+    }
+    context_column = (
+        "context_ref"
+        if "context_ref" in columns
+        else "canonical_he_title AS context_ref"
+    )
     rows = connection.execute(
-        "SELECT line_index, content FROM lines_snapshot "
+        f"SELECT line_index, content, {context_column} FROM lines_snapshot "
         "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index",
         (book.source_name, book.canonical_he_title),
     ).fetchall()
     seen = set()
     result = []
-    for line_index, content in rows:
+    for line_index, content, context_ref in rows:
         if type(line_index) is not int or line_index < 0 or line_index in seen:
             raise RuntimeError(f"snapshot has invalid/duplicate line index for {book!r}")
         if content is not None and type(content) is not str:
             raise RuntimeError(f"snapshot has non-text content for {book!r}/{line_index}")
+        if context_ref is not None and type(context_ref) is not str:
+            raise RuntimeError(f"snapshot has non-text context for {book!r}/{line_index}")
         seen.add(line_index)
-        result.append((line_index, content or ""))
+        result.append((line_index, content or "", context_ref or ""))
     return result
 
 
@@ -209,8 +225,8 @@ def build_line_baseline(
                     "book_hash": book_hash,
                     "artifact_sha256": artifact_sha256,
                     "lines": [
-                        [line_index, line_fingerprint(content)]
-                        for line_index, content in rows
+                        [line_index, line_fingerprint(content, context_ref)]
+                        for line_index, content, context_ref in rows
                     ],
                 },
             )
@@ -226,7 +242,7 @@ def build_line_baseline(
             "snapshot_sha256": snapshot_sha256,
             "engine_fingerprint": engine_fingerprint,
             "book_count": written,
-            "line_fingerprint": "blake2b-128",
+            "line_fingerprint": "blake2b-128-content-context-v1",
         },
     )
     if root_path.exists():
@@ -266,7 +282,7 @@ def validate_baseline_identity(
         and manifest["snapshot_sha256"] == snapshot_sha256
         and manifest["engine_fingerprint"] == engine_fingerprint
         and manifest["book_count"] == book_count
-        and manifest["line_fingerprint"] == "blake2b-128"
+        and manifest["line_fingerprint"] == "blake2b-128-content-context-v1"
     )
 
 
@@ -311,10 +327,10 @@ def _load_book_baseline(
     return result, value["artifact_sha256"]
 
 
-def full_ner_delta(current_rows: list[tuple[int, str]]) -> LineDelta:
+def full_ner_delta(current_rows) -> LineDelta:
     return LineDelta(
         reuse=(),
-        ner_ranges=coalesce_ranges(line_index for line_index, _ in current_rows),
+        ner_ranges=coalesce_ranges(row[0] for row in current_rows),
         current_line_count=len(current_rows),
         prior_artifact_sha256=None,
     )
@@ -322,21 +338,23 @@ def full_ner_delta(current_rows: list[tuple[int, str]]) -> LineDelta:
 
 def compute_line_delta(
     old_rows: list[tuple[int, str]],
-    current_rows: list[tuple[int, str]],
+    current_rows,
     *,
     prior_artifact_sha256: str | None = None,
 ) -> LineDelta:
     """Match identical lines one-to-one, preferring stable line indices.
 
-    Exact content is context-free at this layer: the Linker processes each stored
-    line as its own document, so an identical moved/duplicated line has identical
-    NER and resolution output.  Greedy pairing of remaining identical fingerprints
-    is therefore safe and deterministic.
+    Exact reuse is context-aware: identical text at a different source ref can
+    resolve "לעיל" / "לקמן" differently. Greedy pairing is therefore performed
+    over the combined content+context fingerprint.
     """
     old_by_index = dict(old_rows)
     current = [
-        (line_index, line_fingerprint(content))
-        for line_index, content in current_rows
+        (
+            row[0],
+            line_fingerprint(row[1], row[2] if len(row) > 2 else ""),
+        )
+        for row in current_rows
     ]
     used_old = set()
     reuse = []
@@ -365,7 +383,7 @@ def compute_line_delta(
         current_line_count=len(current_rows),
         prior_artifact_sha256=prior_artifact_sha256,
     )
-    current_indices = {line_index for line_index, _ in current_rows}
+    current_indices = {row[0] for row in current_rows}
     reused_destinations = {new for _, new in delta.reuse}
     ner_indices = indices_from_ranges(delta.ner_ranges)
     if (

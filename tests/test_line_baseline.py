@@ -53,6 +53,13 @@ class LineBaselineTest(unittest.TestCase):
         self.assertEqual(indices_from_ranges(delta.ner_ranges), {1})
         self.assertEqual(delta.reused_line_count + delta.ner_line_count, len(current))
 
+    def test_delta_does_not_reuse_identical_relative_text_at_new_context(self):
+        old = [(4, line_fingerprint("ראה לקמן", "ברכות א, א"))]
+        current = [(4, "ראה לקמן", "ברכות ב, א")]
+        delta = compute_line_delta(old, current)
+        self.assertEqual(delta.reuse, ())
+        self.assertEqual(indices_from_ranges(delta.ner_ranges), {4})
+
     def test_release_baseline_identity_and_per_book_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
@@ -132,7 +139,7 @@ class LineBaselineTest(unittest.TestCase):
             original_batch_lines = link_books.BATCH_LINES
 
             def fake_process(_linker, book, batch, _log, **_kwargs):
-                self.assertEqual(batch, [(1, "חדש")])
+                self.assertEqual(batch, [(1, "חדש", "ספר")])
                 return [
                     LinkRecord(
                         book, 1, 0, 2, "Numbers 1:1",
@@ -146,7 +153,7 @@ class LineBaselineTest(unittest.TestCase):
                 count, _ = link_books.process_book_checkpointed(
                     object(),
                     self.BOOK,
-                    [(0, "א"), (1, "חדש"), (2, "ג")],
+                    [(0, "א", "ספר"), (1, "חדש", "ספר"), (2, "ג", "ספר")],
                     lambda _message: None,
                     lambda: None,
                     str(root / "checkpoints"),

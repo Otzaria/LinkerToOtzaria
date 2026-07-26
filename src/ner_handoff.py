@@ -368,7 +368,15 @@ class NerBundle:
         if starts != sorted(set(starts)):
             raise RuntimeError("NER book manifest batch starts are not unique and sorted")
 
-    def resolve_batch(self, linker, book, batch: list[tuple[int, str]], batch_start: int):
+    def resolve_batch(
+        self,
+        linker,
+        book,
+        batch: list[tuple[int, str, str]],
+        batch_start: int,
+        *,
+        book_context_refs=None,
+    ):
         key = (book.source_name, book.canonical_he_title)
         book_manifest = self.books.get(key)
         if book_manifest is None:
@@ -382,12 +390,17 @@ class NerBundle:
         path = self._below_root(descriptor["path"])
         self._verify_descriptor(path, descriptor, f"batch {key!r}/{batch_start}")
         original_ner = linker.get_ner()
-        normalized = original_ner._normalize_input([content for _, content in batch])
+        normalized = original_ner._normalize_input(
+            [content for _, content, _ in batch]
+        )
         payload = validate_batch(
             load_json_strict(path),
             expected_book=key,
             expected_start=batch_start,
-            normalized_lines=[(line_index, text) for (line_index, _), text in zip(batch, normalized)],
+            normalized_lines=[
+                (line_index, text)
+                for (line_index, _, _), text in zip(batch, normalized)
+            ],
         )
 
         class ReplayRecognizer:
@@ -408,6 +421,12 @@ class NerBundle:
         original = linker._ner
         linker._ner = ReplayRecognizer()
         try:
-            return linker.bulk_link([content for _, content in batch], type_filter="citation")
+            kwargs = {"type_filter": "citation"}
+            if book_context_refs is not None:
+                kwargs["book_context_refs"] = book_context_refs
+            return linker.bulk_link(
+                [content for _, content, _ in batch],
+                **kwargs,
+            )
         finally:
             linker._ner = original
