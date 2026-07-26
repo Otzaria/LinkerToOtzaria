@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
+from itertools import zip_longest
 from pathlib import Path
 
 from link_books import book_lines, is_ner_eligible_line
@@ -228,6 +230,120 @@ def merge_bundles(
     return len(ordered)
 
 
+def _copy_or_link(source: str, destination: str) -> str:
+    """Clone immutable NER data cheaply when both paths share a filesystem."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
+def _assert_exact_book_rows(
+    old_snapshot: Path,
+    new_snapshot: Path,
+    keys: list[tuple[str, str]],
+) -> None:
+    """Prove that rebinding raw NER cannot change its normalized input."""
+    old = sqlite3.connect(f"file:{old_snapshot}?mode=ro", uri=True)
+    new = sqlite3.connect(f"file:{new_snapshot}?mode=ro", uri=True)
+    query = (
+        "SELECT line_index, content, context_ref FROM lines_snapshot "
+        "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index"
+    )
+    missing = object()
+    try:
+        for key in keys:
+            old_rows = old.execute(query, key)
+            new_rows = new.execute(query, key)
+            for row_index, (old_row, new_row) in enumerate(
+                zip_longest(old_rows, new_rows, fillvalue=missing)
+            ):
+                if old_row != new_row:
+                    raise RuntimeError(
+                        "cannot rebind NER: snapshot rows differ for "
+                        f"{key!r} at row {row_index}"
+                    )
+    finally:
+        old.close()
+        new.close()
+
+
+def rebind_bundle(
+    old_snapshot: Path,
+    old_plan_path: Path,
+    bundle: Path,
+    new_snapshot: Path,
+    new_plan_path: Path,
+    output: Path,
+    expected_batch_lines: int | None,
+) -> int:
+    """Rebind a verified subset bundle after exact snapshot-row comparison.
+
+    The raw recognizer output depends only on normalized input text, while the
+    outer request/snapshot identities deliberately pin transport to one run.
+    Rebinding is therefore permitted only when every source row, book hash,
+    NER range and engine fingerprint matches exactly in both plans.
+    """
+    old_plan = _validated_plan(old_plan_path, old_snapshot)
+    new_plan = _validated_plan(new_plan_path, new_snapshot)
+    if old_plan["engine_fingerprint"] != new_plan["engine_fingerprint"]:
+        raise RuntimeError("cannot rebind NER across engine fingerprints")
+
+    bundle = bundle.resolve()
+    manifest = load_json_strict(bundle / "ner_manifest.json")
+    raw_descriptors = manifest.get("books")
+    if type(raw_descriptors) is not list:
+        raise RuntimeError(f"{bundle}: invalid books array")
+    keys = [
+        validate_book_key(item.get("book"), f"{bundle}.books[{index}].book")
+        for index, item in enumerate(raw_descriptors)
+    ]
+    old_changed = {_book_key(item): item for item in old_plan["changed"]}
+    new_changed = {_book_key(item): item for item in new_plan["changed"]}
+    if any(key not in old_changed or key not in new_changed for key in keys):
+        raise RuntimeError("cannot rebind NER outside both changed-book plans")
+
+    old_hashes = {_book_key(item): item["hash"] for item in old_plan["current_books"]}
+    new_hashes = {_book_key(item): item["hash"] for item in new_plan["current_books"]}
+    for key in keys:
+        if old_hashes.get(key) != new_hashes.get(key):
+            raise RuntimeError(f"cannot rebind NER: source hash changed for {key!r}")
+        if old_changed[key]["ner_ranges"] != new_changed[key]["ner_ranges"]:
+            raise RuntimeError(f"cannot rebind NER: line plan changed for {key!r}")
+
+    NerBundle(
+        bundle,
+        request_id=old_plan["relink_request_id"],
+        snapshot_sha256=sha256_file(old_snapshot),
+        engine_fingerprint=old_plan["engine_fingerprint"],
+        changed_books=[old_changed[key] for key in keys],
+        expected_book_hashes=old_hashes,
+        expected_batch_lines=expected_batch_lines,
+    )
+    _assert_exact_book_rows(old_snapshot, new_snapshot, keys)
+
+    output = output.resolve()
+    if output.exists():
+        shutil.rmtree(output)
+    shutil.copytree(bundle, output, copy_function=_copy_or_link)
+    rebound = dict(manifest)
+    rebound["relink_request_id"] = new_plan["relink_request_id"]
+    rebound["snapshot_sha256"] = sha256_file(new_snapshot)
+    rebound["engine_fingerprint"] = new_plan["engine_fingerprint"]
+    write_json_atomic(output / "ner_manifest.json", rebound)
+    NerBundle(
+        output,
+        request_id=new_plan["relink_request_id"],
+        snapshot_sha256=rebound["snapshot_sha256"],
+        engine_fingerprint=new_plan["engine_fingerprint"],
+        changed_books=[new_changed[key] for key in keys],
+        expected_book_hashes=new_hashes,
+        expected_batch_lines=expected_batch_lines,
+    )
+    return len(keys)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -242,11 +358,19 @@ def main() -> None:
     merge.add_argument("--bundle", type=Path, action="append", required=True)
     merge.add_argument("--output", type=Path, required=True)
     merge.add_argument("--expected-batch-lines", type=int)
+    rebind = subparsers.add_parser("rebind")
+    rebind.add_argument("--old-snapshot", type=Path, required=True)
+    rebind.add_argument("--old-plan", type=Path, required=True)
+    rebind.add_argument("--bundle", type=Path, required=True)
+    rebind.add_argument("--new-snapshot", type=Path, required=True)
+    rebind.add_argument("--new-plan", type=Path, required=True)
+    rebind.add_argument("--output", type=Path, required=True)
+    rebind.add_argument("--expected-batch-lines", type=int)
     args = parser.parse_args()
     if args.command == "split":
         manifest = split_plan(args.snapshot, args.plan, args.output, args.shards)
         print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
-    else:
+    elif args.command == "merge":
         count = merge_bundles(
             args.snapshot,
             args.plan,
@@ -255,6 +379,17 @@ def main() -> None:
             args.expected_batch_lines,
         )
         print(f"merged {count} book handoffs into {args.output}")
+    else:
+        count = rebind_bundle(
+            args.old_snapshot,
+            args.old_plan,
+            args.bundle,
+            args.new_snapshot,
+            args.new_plan,
+            args.output,
+            args.expected_batch_lines,
+        )
+        print(f"rebound {count} verified book handoffs into {args.output}")
 
 
 if __name__ == "__main__":

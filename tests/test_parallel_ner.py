@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from linker_artifact import BookKey  # noqa: E402
 from link_books import claim_id  # noqa: E402
 from ner_handoff import sha256_file, write_json_atomic  # noqa: E402
-from parallel_ner import merge_bundles, split_plan  # noqa: E402
+from parallel_ner import merge_bundles, rebind_bundle, split_plan  # noqa: E402
 
 
 class ParallelNerTest(unittest.TestCase):
@@ -133,6 +133,83 @@ class ParallelNerTest(unittest.TestCase):
                 [item["book"]["canonical_he_title"] for item in manifest["books"]],
                 [f"book-{index}" for index in range(4)],
             )
+
+    def test_rebind_requires_exact_rows_and_rewrites_run_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_snapshot, old_plan_path, old_plan = self._inputs(root)
+            old_bundle = self._bundle(root, old_plan, old_plan["changed"], 0)
+
+            new_snapshot = root / "new-snapshot.db"
+            connection = sqlite3.connect(new_snapshot)
+            connection.execute(
+                "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+                "line_index INTEGER, content TEXT, context_ref TEXT)"
+            )
+            old_connection = sqlite3.connect(old_snapshot)
+            connection.executemany(
+                "INSERT INTO lines_snapshot VALUES(?,?,?,?,?)",
+                old_connection.execute("SELECT * FROM lines_snapshot"),
+            )
+            old_connection.close()
+            connection.execute(
+                "INSERT INTO lines_snapshot VALUES(?,?,?,?,?)",
+                ("other", "extra", 0, "extra text", "Extra 1"),
+            )
+            connection.commit()
+            connection.close()
+
+            new_plan = dict(old_plan)
+            new_plan["relink_request_id"] = "b" * 64
+            new_plan["snapshot_sha256"] = sha256_file(new_snapshot)
+            new_plan["changed"] = old_plan["changed"] + [{
+                "source_name": "other",
+                "canonical_he_title": "extra",
+                "ner_ranges": [],
+            }]
+            new_plan["current_books"] = old_plan["current_books"] + [{
+                "source_name": "other",
+                "canonical_he_title": "extra",
+                "hash": "f" * 16,
+            }]
+            new_plan_path = root / "new-plan.json"
+            new_plan_path.write_text(json.dumps(new_plan), encoding="utf-8")
+            output = root / "rebound"
+
+            count = rebind_bundle(
+                old_snapshot,
+                old_plan_path,
+                old_bundle,
+                new_snapshot,
+                new_plan_path,
+                output,
+                expected_batch_lines=75,
+            )
+
+            self.assertEqual(count, 4)
+            manifest = json.loads((output / "ner_manifest.json").read_text())
+            self.assertEqual(manifest["relink_request_id"], "b" * 64)
+            self.assertEqual(manifest["snapshot_sha256"], sha256_file(new_snapshot))
+
+            connection = sqlite3.connect(new_snapshot)
+            connection.execute(
+                "UPDATE lines_snapshot SET content='changed' "
+                "WHERE canonical_he_title='book-0'"
+            )
+            connection.commit()
+            connection.close()
+            new_plan["snapshot_sha256"] = sha256_file(new_snapshot)
+            new_plan_path.write_text(json.dumps(new_plan), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "snapshot rows differ"):
+                rebind_bundle(
+                    old_snapshot,
+                    old_plan_path,
+                    old_bundle,
+                    new_snapshot,
+                    new_plan_path,
+                    root / "must-fail",
+                    expected_batch_lines=75,
+                )
 
 
 if __name__ == "__main__":
