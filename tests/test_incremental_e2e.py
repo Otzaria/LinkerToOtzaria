@@ -348,6 +348,40 @@ class IncrementalE2ETest(unittest.TestCase):
         for d in ("done", "claim", "failed"):
             self.assertFalse(os.path.exists(os.path.join(self.run_dir, d, "stale")))
 
+    def test_resume_engine_ledger_requires_exact_plan_and_preserves_done(self):
+        import json
+        from link_books import claim_id
+
+        _snapshot(self.snap, self._rows())
+        args = self._args()
+        self.fail_engine = True
+        with self.assertRaisesRegex(RuntimeError, "simulated engine failure"):
+            inc.run_incremental(args)
+        self.fail_engine = False
+
+        a_id = claim_id(BookKey(*self.A))
+        for directory in ("done", "claim", "failed", "checkpoints"):
+            os.makedirs(os.path.join(self.run_dir, directory), exist_ok=True)
+        done_path = os.path.join(self.run_dir, "done", a_id)
+        with open(done_path, "w", encoding="utf-8") as fh:
+            fh.write("preserve")
+        self.skip_done_books = {self.A}
+        args.resume_engine_ledger = True
+        self.assertEqual(inc.run_incremental(args), 3)
+        with open(done_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "preserve")
+
+        # A persisted plan from any other snapshot/run must fail closed.
+        os.remove(self.snap)
+        _snapshot(self.snap, self._rows(a="a2"))
+        with open(os.path.join(self.run_dir, "changed_books.json"), encoding="utf-8") as fh:
+            persisted = json.load(fh)
+        persisted[0]["hash"] = "0" * 16
+        with open(os.path.join(self.run_dir, "changed_books.json"), "w", encoding="utf-8") as fh:
+            json.dump(persisted, fh, ensure_ascii=False)
+        with self.assertRaisesRegex(RuntimeError, "differs from the exact current plan"):
+            inc.run_incremental(args)
+
     def test_book_removed_from_snapshot_deletes_its_artifact(self):
         # seed baseline + an artifact for C, then drop C from the snapshot.
         _snapshot(self.snap, self._rows())

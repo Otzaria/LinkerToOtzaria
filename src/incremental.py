@@ -497,35 +497,76 @@ def run_incremental(args) -> int:
     codes: list[int] = []
     if changed:
         os.makedirs(args.run_dir, exist_ok=True)
+        requested_payload = [
+            {
+                **book.to_dict(),
+                "hash": current[(book.source_name, book.canonical_he_title)],
+                "ner_ranges": [
+                    [start, end]
+                    for start, end in line_deltas[
+                        (book.source_name, book.canonical_he_title)
+                    ].ner_ranges
+                ],
+                "reuse": [
+                    [old_index, new_index]
+                    for old_index, new_index in line_deltas[
+                        (book.source_name, book.canonical_he_title)
+                    ].reuse
+                ],
+            }
+            for book in changed
+        ]
+        only = os.path.join(args.run_dir, "changed_books.json")
+        resume_engine_ledger = bool(
+            getattr(args, "resume_engine_ledger", False)
+        )
         # Fresh engine ledger for THIS invocation. done/claim/failed markers are meaningful only
         # WITHIN one link_books.py run (poison-loop guard, worker claims, failure ledger). A stale
         # `done` from a reused run_dir would make the engine SKIP a changed book with no `failed`
         # marker → baseline would advance as if it linked → orphan. So we never depend on external
-        # workspace cleanup: we clear them ourselves. (logs/ is append-only diagnostics — kept.)
+        # workspace cleanup: by default we clear them ourselves. A supervised recovery may resume
+        # only after proving the persisted changed-book plan is byte-for-byte equivalent as JSON
+        # and every ledger entry belongs to that exact plan.
         import shutil
-        for d in ("done", "claim", "failed", "checkpoints"):
-            shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
-        only = os.path.join(args.run_dir, "changed_books.json")
-        with open(only, "w", encoding="utf-8") as fh:
-            json.dump([
-                {
-                    **book.to_dict(),
-                    "hash": current[(book.source_name, book.canonical_he_title)],
-                    "ner_ranges": [
-                        [start, end]
-                        for start, end in line_deltas[
-                            (book.source_name, book.canonical_he_title)
-                        ].ner_ranges
-                    ],
-                    "reuse": [
-                        [old_index, new_index]
-                        for old_index, new_index in line_deltas[
-                            (book.source_name, book.canonical_he_title)
-                        ].reuse
-                    ],
-                }
-                for book in changed
-            ], fh, ensure_ascii=False)
+        if resume_engine_ledger:
+            if not os.path.isfile(only):
+                raise RuntimeError(
+                    "--resume-engine-ledger requires an existing changed_books.json"
+                )
+            with open(only, encoding="utf-8") as fh:
+                persisted_payload = json.load(fh)
+            if persisted_payload != requested_payload:
+                raise RuntimeError(
+                    "persisted changed_books.json differs from the exact current plan; "
+                    "refusing to resume a stale engine ledger"
+                )
+            from link_books import claim_id
+            valid_ids = {
+                claim_id(BookKey(item["source_name"], item["canonical_he_title"]))
+                for item in requested_payload
+            }
+            for directory in ("done", "claim", "failed", "checkpoints"):
+                path = os.path.join(args.run_dir, directory)
+                if not os.path.isdir(path):
+                    raise RuntimeError(
+                        f"--resume-engine-ledger requires existing {directory}/"
+                    )
+                unexpected = set(os.listdir(path)) - valid_ids
+                if unexpected:
+                    raise RuntimeError(
+                        f"{directory}/ contains entries outside the exact current plan: "
+                        + ", ".join(sorted(unexpected))
+                    )
+            _log(
+                "resuming exact engine ledger: "
+                f"{len(os.listdir(os.path.join(args.run_dir, 'done')))}"
+                f"/{len(changed)} done"
+            )
+        else:
+            for d in ("done", "claim", "failed", "checkpoints"):
+                shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
+            with open(only, "w", encoding="utf-8") as fh:
+                json.dump(requested_payload, fh, ensure_ascii=False)
         requested_ner_lines = sum(
             line_deltas[(book.source_name, book.canonical_he_title)].ner_line_count
             for book in changed
@@ -822,6 +863,12 @@ def main():
                     help="write the immutable changed-book plan and exit without mutation")
     ap.add_argument("--relink-request-id", default=None,
                     help="64-hex correlation key embedded in --plan-only output")
+    ap.add_argument(
+        "--resume-engine-ledger",
+        action="store_true",
+        help="resume done/claim/checkpoint state only when changed_books.json exactly "
+             "matches the current computed plan",
+    )
     args = ap.parse_args()
     install_terminate_handler()
     if args.plan_only:
