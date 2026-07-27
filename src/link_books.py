@@ -150,6 +150,58 @@ def claim_is_fresh(claim: str, heartbeat: str, *, now: float | None = None) -> b
     return (time.time() if now is None else now) - mtime < CLAIM_STALE_SEC
 
 
+def try_claim_atomic(run: str, cid: str, log=lambda _message: None) -> bool:
+    """Acquire a book claim, including an atomic stale-owner takeover.
+
+    ``mkdir`` makes a new claim exclusive. A stale claim needs removal first, so
+    serialize that rare path with a host-local advisory lock. Without the lock,
+    several recovering workers can all accept the same stale directory and then
+    race on its shared checkpoint files.
+    """
+    import fcntl
+    import shutil
+
+    claim = os.path.join(run, "claim", cid)
+    heartbeat = os.path.join(claim, "hb")
+    done = os.path.join(run, "done", cid)
+
+    try:
+        os.mkdir(claim)
+    except FileExistsError:
+        if os.path.exists(done):
+            return False
+        try:
+            if claim_is_fresh(claim, heartbeat):
+                return False
+        except OSError:
+            pass
+    else:
+        open(heartbeat, "w").close()
+        return True
+
+    lock_path = os.path.join(run, ".claim-takeover.lock")
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if os.path.exists(done):
+            return False
+        try:
+            if claim_is_fresh(claim, heartbeat):
+                return False
+        except OSError:
+            # The stale owner or another claimant removed it. Re-create below.
+            pass
+        if os.path.isdir(claim):
+            log(f"stealing stale claim {cid}")
+            shutil.rmtree(claim)
+        try:
+            os.mkdir(claim)
+        except FileExistsError:
+            # A normal mkdir claimant can win during the stale-removal window.
+            return False
+        open(heartbeat, "w").close()
+        return True
+
+
 def ner_alive() -> bool:
     import requests
     try:
@@ -562,26 +614,6 @@ def main():
     def claim_dir(cid):
         return os.path.join(run, "claim", cid)
 
-    def try_claim(cid):
-        claim = claim_dir(cid)
-        hb = os.path.join(claim, "hb")
-        try:
-            os.mkdir(claim)
-        except FileExistsError:
-            if os.path.exists(os.path.join(run, "done", cid)):
-                return False
-            try:
-                if claim_is_fresh(claim, hb):
-                    return False
-            except OSError:
-                pass
-            # Stale (>CLAIM_STALE_SEC): take it over. The steal is not perfectly atomic,
-            # but per-book output is idempotent (same snapshot → same artifact), so at
-            # worst two workers redo one book and write identical bytes — never wrong.
-            log(f"stealing stale claim {cid}")
-        open(hb, "w").close()
-        return True
-
     def heartbeat(cid):
         # Keep the claim fresh while this worker is actively processing the book.
         worker_heartbeat()
@@ -702,7 +734,7 @@ def main():
         while True:
             if os.path.exists(os.path.join(run, "done", cid)):
                 break
-            if not try_claim(cid):
+            if not try_claim_atomic(run, cid, log):
                 break  # another live worker owns it — it will mark done/failed
             lines = book_lines(con, bk)
             item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
