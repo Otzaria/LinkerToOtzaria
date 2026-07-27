@@ -40,10 +40,16 @@ from linker_artifact import (  # noqa: E402
 )
 from line_baseline import indices_from_ranges  # noqa: E402
 
-# Lines per bulk NER call. Transport granularity only — per-line output is independent
-# of batching. Tunable per host: GPU serving OOMs on 100-line batches of monster books
-# (16GB VRAM), so Kaggle runs use a smaller batch via env.
-BATCH_LINES = int(os.environ.get("LINKER_BATCH_LINES", "100"))
+# Lines per bulk NER call. The signed handoff keeps this transport boundary, while
+# resolution may safely replay smaller aligned chunks: per-line NER output is
+# independent of neighbouring lines. This matters for pathological resolver batches
+# that fit the GPU but exhaust a CPU host during reference disambiguation.
+NER_BATCH_LINES = int(os.environ.get("LINKER_BATCH_LINES", "100"))
+BATCH_LINES = int(os.environ.get("LINKER_RESOLVE_BATCH_LINES", str(NER_BATCH_LINES)))
+if NER_BATCH_LINES <= 0 or BATCH_LINES <= 0 or NER_BATCH_LINES % BATCH_LINES:
+    raise RuntimeError(
+        "LINKER_RESOLVE_BATCH_LINES must be a positive divisor of LINKER_BATCH_LINES"
+    )
 # Give up on a dead NER after this long (crash-looped GPU service, not a blip).
 NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 # Self-recycle above this many bytes. Overridable per machine: recycling costs a full
@@ -663,7 +669,7 @@ def main():
                 for book in books
             ],
             expected_book_hashes=expected_hashes,
-            expected_batch_lines=BATCH_LINES,
+            expected_batch_lines=NER_BATCH_LINES,
         )
         log(f"verified raw-NER handoff for {len(books)} changed book(s); live GPU disabled")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")

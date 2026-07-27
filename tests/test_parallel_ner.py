@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from linker_artifact import BookKey  # noqa: E402
 from link_books import claim_id  # noqa: E402
-from ner_handoff import sha256_file, write_json_atomic  # noqa: E402
+from ner_handoff import NerBundle, sha256_bytes, sha256_file, write_json_atomic  # noqa: E402
 from parallel_ner import merge_bundles, rebind_bundle, split_plan  # noqa: E402
 
 
@@ -272,6 +272,99 @@ class ParallelNerTest(unittest.TestCase):
                 len(list((output / "ner-data").glob("*/book_manifest.json"))),
                 2,
             )
+
+    def test_resolver_can_replay_aligned_subset_of_signed_ner_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot, _plan_path, plan = self._inputs(root)
+            book = BookKey("s", "book-0")
+            bundle = root / "bundle"
+            batch_relative = Path("ner-data") / claim_id(book) / "000000000000.json"
+            lines = [
+                {
+                    "line_index": index,
+                    "normalized_sha256": sha256_bytes(text.encode("utf-8")),
+                    "result": {"entities": []},
+                }
+                for index, text in enumerate(("א", "ב", "ג", "ד"))
+            ]
+            batch_size, batch_sha = write_json_atomic(bundle / batch_relative, {
+                "schema_version": 2,
+                "book": book.to_dict(),
+                "batch_start": 0,
+                "lines": lines,
+            })
+            book_relative = Path("ner-data") / claim_id(book) / "book_manifest.json"
+            book_size, book_sha = write_json_atomic(bundle / book_relative, {
+                "schema_version": 2,
+                "book": book.to_dict(),
+                "source_book_hash": plan["current_books"][0]["hash"],
+                "line_count": 4,
+                "eligible_line_count": 4,
+                "ner_ranges": [[0, 4]],
+                "batches": [{
+                    "batch_start": 0,
+                    "path": batch_relative.as_posix(),
+                    "size": batch_size,
+                    "sha256": batch_sha,
+                }],
+            })
+            write_json_atomic(bundle / "ner_manifest.json", {
+                "schema_version": 2,
+                "relink_request_id": plan["relink_request_id"],
+                "snapshot_sha256": plan["snapshot_sha256"],
+                "engine_fingerprint": plan["engine_fingerprint"],
+                "batch_lines": 4,
+                "books": [{
+                    "book": book.to_dict(),
+                    "manifest_path": book_relative.as_posix(),
+                    "size": book_size,
+                    "sha256": book_sha,
+                }],
+            })
+
+            handoff = NerBundle(
+                bundle,
+                request_id=plan["relink_request_id"],
+                snapshot_sha256=plan["snapshot_sha256"],
+                engine_fingerprint=plan["engine_fingerprint"],
+                changed_books=[{**book.to_dict(), "ner_ranges": [[0, 4]]}],
+                expected_book_hashes={
+                    (book.source_name, book.canonical_he_title):
+                        plan["current_books"][0]["hash"],
+                },
+                expected_batch_lines=4,
+            )
+
+            class FakeNer:
+                normalizer = object()
+
+                @staticmethod
+                def _normalize_input(inputs):
+                    return inputs
+
+                @staticmethod
+                def _parse_recognize_response(_text, _result):
+                    return [], []
+
+            class FakeLinker:
+                def __init__(self):
+                    self._ner = FakeNer()
+
+                def get_ner(self):
+                    return self._ner
+
+                def bulk_link(self, inputs, **_kwargs):
+                    return self._ner.bulk_recognize(inputs)
+
+            result = handoff.resolve_batch(
+                FakeLinker(),
+                book,
+                [(2, "ג", "context"), (3, "ד", "context")],
+                2,
+                book_context_refs=[None, None],
+            )
+            self.assertEqual(result, [[], []])
 
 
 if __name__ == "__main__":

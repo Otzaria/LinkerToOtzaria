@@ -269,6 +269,7 @@ class NerBundle:
             raise RuntimeError("NER manifest batch_lines is invalid")
         if expected_batch_lines is not None and manifest["batch_lines"] != expected_batch_lines:
             raise RuntimeError("NER manifest batch size differs from resolver transport boundary")
+        self.batch_lines = manifest["batch_lines"]
         expected = []
         expected_ranges = {}
         for index, item in enumerate(changed_books):
@@ -381,20 +382,41 @@ class NerBundle:
         book_manifest = self.books.get(key)
         if book_manifest is None:
             raise RuntimeError(f"no NER handoff for {key!r}")
+        source_batch_start = (batch_start // self.batch_lines) * self.batch_lines
+        if batch and (
+            batch_start < source_batch_start
+            or batch_start + len(batch) > source_batch_start + self.batch_lines
+        ):
+            raise RuntimeError("resolver batch crosses a signed NER transport boundary")
         descriptor = next(
-            (item for item in book_manifest["batches"] if item["batch_start"] == batch_start),
+            (
+                item for item in book_manifest["batches"]
+                if item["batch_start"] == source_batch_start
+            ),
             None,
         )
         if descriptor is None:
-            raise RuntimeError(f"NER handoff is missing batch {batch_start} for {key!r}")
+            raise RuntimeError(
+                f"NER handoff is missing batch {source_batch_start} for {key!r}"
+            )
         path = self._below_root(descriptor["path"])
-        self._verify_descriptor(path, descriptor, f"batch {key!r}/{batch_start}")
+        self._verify_descriptor(path, descriptor, f"batch {key!r}/{source_batch_start}")
         original_ner = linker.get_ner()
         normalized = original_ner._normalize_input(
             [content for _, content, _ in batch]
         )
+        signed_payload = load_json_strict(path)
+        wanted_indices = {line_index for line_index, _, _ in batch}
+        selected_lines = [
+            line for line in signed_payload.get("lines", [])
+            if type(line) is dict and line.get("line_index") in wanted_indices
+        ] if type(signed_payload) is dict else []
         payload = validate_batch(
-            load_json_strict(path),
+            {
+                **signed_payload,
+                "batch_start": batch_start,
+                "lines": selected_lines,
+            } if type(signed_payload) is dict else signed_payload,
             expected_book=key,
             expected_start=batch_start,
             normalized_lines=[
