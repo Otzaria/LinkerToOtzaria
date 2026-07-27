@@ -211,6 +211,68 @@ class ParallelNerTest(unittest.TestCase):
                     expected_batch_lines=75,
                 )
 
+    def test_rebind_can_select_exact_new_plan_subset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_snapshot, old_plan_path, old_plan = self._inputs(root)
+            old_bundle = self._bundle(root, old_plan, old_plan["changed"], 0)
+            selected_titles = {"book-1", "book-3"}
+
+            new_snapshot = root / "subset-snapshot.db"
+            connection = sqlite3.connect(new_snapshot)
+            connection.execute(
+                "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+                "line_index INTEGER, content TEXT, context_ref TEXT)"
+            )
+            old_connection = sqlite3.connect(old_snapshot)
+            connection.executemany(
+                "INSERT INTO lines_snapshot VALUES(?,?,?,?,?)",
+                old_connection.execute(
+                    "SELECT * FROM lines_snapshot WHERE canonical_he_title IN (?,?)",
+                    tuple(sorted(selected_titles)),
+                ),
+            )
+            old_connection.close()
+            connection.commit()
+            connection.close()
+
+            new_plan = dict(old_plan)
+            new_plan["relink_request_id"] = "b" * 64
+            new_plan["snapshot_sha256"] = sha256_file(new_snapshot)
+            new_plan["changed"] = [
+                item for item in old_plan["changed"]
+                if item["canonical_he_title"] in selected_titles
+            ]
+            new_plan["current_books"] = [
+                item for item in old_plan["current_books"]
+                if item["canonical_he_title"] in selected_titles
+            ]
+            new_plan_path = root / "subset-plan.json"
+            new_plan_path.write_text(json.dumps(new_plan), encoding="utf-8")
+            output = root / "subset-rebound"
+
+            count = rebind_bundle(
+                old_snapshot,
+                old_plan_path,
+                old_bundle,
+                new_snapshot,
+                new_plan_path,
+                output,
+                expected_batch_lines=75,
+                select_new_plan=True,
+            )
+
+            self.assertEqual(count, 2)
+            manifest = json.loads((output / "ner_manifest.json").read_text())
+            self.assertEqual(
+                {item["book"]["canonical_he_title"] for item in manifest["books"]},
+                selected_titles,
+            )
+            self.assertEqual(
+                len(list((output / "ner-data").glob("*/book_manifest.json"))),
+                2,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

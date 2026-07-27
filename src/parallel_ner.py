@@ -277,6 +277,7 @@ def rebind_bundle(
     new_plan_path: Path,
     output: Path,
     expected_batch_lines: int | None,
+    select_new_plan: bool = False,
 ) -> int:
     """Rebind a verified subset bundle after exact snapshot-row comparison.
 
@@ -295,16 +296,37 @@ def rebind_bundle(
     raw_descriptors = manifest.get("books")
     if type(raw_descriptors) is not list:
         raise RuntimeError(f"{bundle}: invalid books array")
-    keys = [
+    source_keys = [
         validate_book_key(item.get("book"), f"{bundle}.books[{index}].book")
         for index, item in enumerate(raw_descriptors)
     ]
     old_changed = {_book_key(item): item for item in old_plan["changed"]}
     new_changed = {_book_key(item): item for item in new_plan["changed"]}
-    if any(key not in old_changed or key not in new_changed for key in keys):
-        raise RuntimeError("cannot rebind NER outside both changed-book plans")
+    if any(key not in old_changed for key in source_keys):
+        raise RuntimeError("cannot rebind NER outside the old changed-book plan")
 
     old_hashes = {_book_key(item): item["hash"] for item in old_plan["current_books"]}
+    NerBundle(
+        bundle,
+        request_id=old_plan["relink_request_id"],
+        snapshot_sha256=sha256_file(old_snapshot),
+        engine_fingerprint=old_plan["engine_fingerprint"],
+        changed_books=[old_changed[key] for key in source_keys],
+        expected_book_hashes=old_hashes,
+        expected_batch_lines=expected_batch_lines,
+    )
+
+    if select_new_plan:
+        keys = [key for key in source_keys if key in new_changed]
+        if set(keys) != set(new_changed):
+            raise RuntimeError(
+                "selected rebind requires exact coverage of the new changed-book plan"
+            )
+    else:
+        keys = source_keys
+    if any(key not in new_changed for key in keys):
+        raise RuntimeError("cannot rebind NER outside both changed-book plans")
+
     new_hashes = {_book_key(item): item["hash"] for item in new_plan["current_books"]}
     for key in keys:
         if old_hashes.get(key) != new_hashes.get(key):
@@ -312,22 +334,29 @@ def rebind_bundle(
         if old_changed[key]["ner_ranges"] != new_changed[key]["ner_ranges"]:
             raise RuntimeError(f"cannot rebind NER: line plan changed for {key!r}")
 
-    NerBundle(
-        bundle,
-        request_id=old_plan["relink_request_id"],
-        snapshot_sha256=sha256_file(old_snapshot),
-        engine_fingerprint=old_plan["engine_fingerprint"],
-        changed_books=[old_changed[key] for key in keys],
-        expected_book_hashes=old_hashes,
-        expected_batch_lines=expected_batch_lines,
-    )
     _assert_exact_book_rows(old_snapshot, new_snapshot, keys)
 
     output = output.resolve()
     if output.exists():
         shutil.rmtree(output)
-    shutil.copytree(bundle, output, copy_function=_copy_or_link)
+    if select_new_plan:
+        output.mkdir(parents=True)
+        descriptor_by_key = dict(zip(source_keys, raw_descriptors))
+        for key in keys:
+            relative = Path(descriptor_by_key[key]["manifest_path"])
+            source_book_dir = bundle / relative.parent
+            output_book_dir = output / relative.parent
+            output_book_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_book_dir, output_book_dir, copy_function=_copy_or_link)
+    else:
+        shutil.copytree(bundle, output, copy_function=_copy_or_link)
     rebound = dict(manifest)
+    selected_keys = set(keys)
+    rebound["books"] = [
+        descriptor
+        for key, descriptor in zip(source_keys, raw_descriptors)
+        if key in selected_keys
+    ]
     rebound["relink_request_id"] = new_plan["relink_request_id"]
     rebound["snapshot_sha256"] = sha256_file(new_snapshot)
     rebound["engine_fingerprint"] = new_plan["engine_fingerprint"]
@@ -366,6 +395,11 @@ def main() -> None:
     rebind.add_argument("--new-plan", type=Path, required=True)
     rebind.add_argument("--output", type=Path, required=True)
     rebind.add_argument("--expected-batch-lines", type=int)
+    rebind.add_argument(
+        "--select-new-plan",
+        action="store_true",
+        help="extract exactly the books in the new changed-book plan from a larger bundle",
+    )
     args = parser.parse_args()
     if args.command == "split":
         manifest = split_plan(args.snapshot, args.plan, args.output, args.shards)
@@ -388,6 +422,7 @@ def main() -> None:
             args.new_plan,
             args.output,
             args.expected_batch_lines,
+            args.select_new_plan,
         )
         print(f"rebound {count} verified book handoffs into {args.output}")
 

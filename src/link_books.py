@@ -130,6 +130,20 @@ def claim_id(bk: BookKey) -> str:
     return h.hexdigest()
 
 
+def claim_is_fresh(claim: str, heartbeat: str, *, now: float | None = None) -> bool:
+    """Return whether a claim is too recent to steal.
+
+    Creating a directory and its heartbeat file requires two filesystem calls.
+    During that interval a peer must regard the directory's own mtime as the
+    initial heartbeat, or both workers can enter the same checkpoint directory.
+    """
+    try:
+        mtime = os.path.getmtime(heartbeat)
+    except OSError:
+        mtime = os.path.getmtime(claim)
+    return (time.time() if now is None else now) - mtime < CLAIM_STALE_SEC
+
+
 def ner_alive() -> bool:
     import requests
     try:
@@ -551,7 +565,7 @@ def main():
             if os.path.exists(os.path.join(run, "done", cid)):
                 return False
             try:
-                if time.time() - os.path.getmtime(hb) < CLAIM_STALE_SEC:
+                if claim_is_fresh(claim, hb):
                     return False
             except OSError:
                 pass
