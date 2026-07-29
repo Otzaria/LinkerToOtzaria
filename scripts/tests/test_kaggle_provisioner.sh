@@ -35,7 +35,10 @@ if [ "$1" = api ]; then
     printf '102\n101\n'; exit 0
   fi
   if [[ "$joined" =~ actions/runs/([0-9]+)/artifacts ]]; then
-    if [[ "$joined" == *"actions/runs/777/artifacts"* ]]; then printf '4242\n'; exit 0; fi
+    if [[ "$joined" == *"actions/runs/777/artifacts"* ]]; then
+      [ -n "${MISSING_SNAPSHOT:-}" ] || printf '4242\n'
+      exit 0
+    fi
     printf 'kaggle-intent-%064d-1\n' 0; exit 0
   fi
   if [[ "$joined" == *"actions/workflows/relink.yml/runs"* ]]; then
@@ -170,6 +173,24 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
   /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
 test ! -e "$TMP/dispatch"
 echo "ok   successful terminal parent cannot enter recovery mode"
+
+rm -f "$TMP/dispatch"
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 MISSING_SNAPSHOT=1 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
+test ! -e "$TMP/dispatch"
+echo "ok   scheduled scan retires an unrecoverable intent after its snapshot expires"
+
+rm -f "$TMP/dispatch"
+rc=0
+PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
+  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 MISSING_SNAPSHOT=1 INTENT_RUN_ID=103 \
+  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
+  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null 2>&1 || rc=$?
+test "$rc" -ne 0
+test ! -e "$TMP/dispatch"
+echo "ok   explicit recovery still fails loudly when its snapshot is missing"
 
 python3 - "$ROOT/.github/workflows/kaggle-provisioner.yml" <<'PY'
 import sys
