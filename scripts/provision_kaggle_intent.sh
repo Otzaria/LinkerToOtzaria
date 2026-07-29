@@ -142,6 +142,15 @@ PY
         exit 1
       fi
       snapshot_count=$(printf '%s\n' "$snapshot_ids" | awk 'NF' | wc -l | tr -d ' ')
+      if [ "$snapshot_count" -eq 0 ] && [ -z "${INTENT_RUN_ID:-}" ]; then
+        # Recovery snapshots are ordinary Actions artifacts and eventually expire.
+        # Once that happens this old intent can no longer be recovered.  It must
+        # not poison every scheduled queue scan forever; an explicit operator
+        # request remains fail-loud below so forensic recovery never silently
+        # claims success.
+        echo "::warning::recovery parent $library_run_id:$parent_attempt has no unexpired $snapshot_name artifact; retiring this unrecoverable intent from scheduled scans"
+        continue
+      fi
       [ "$snapshot_count" -eq 1 ] || {
         echo "::error::recovery parent $library_run_id:$parent_attempt has $snapshot_count unexpired $snapshot_name artifacts (expected exactly one)"
         exit 1
