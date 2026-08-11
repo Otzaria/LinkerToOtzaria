@@ -5,6 +5,38 @@ import unittest
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_release_publisher_rejects_asset_names_github_would_normalize(self):
+        helper = (
+            Path(__file__).parents[1] / "ci/publish_release_handoff.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("release asset basename is unsafe or would be normalized by GitHub", helper)
+        self.assertIn("^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$", helper)
+        self.assertIn('repos/$GITHUB_REPOSITORY/releases/tags/$tag', helper)
+        self.assertIn("targetCommitish:.target_commitish", helper)
+        self.assertNotIn('gh release view "$tag" --json', helper)
+
+    def test_serial_snapshot_handoff_uses_content_addressed_release(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        fetch = (root / "ci/fetch_relink_inputs.sh").read_text(encoding="utf-8")
+        provision = (root / "scripts/provision_kaggle_intent.sh").read_text(encoding="utf-8")
+
+        for source in (workflow, fetch):
+            self.assertIn('lines-snapshot-sha256-$SNAPSHOT_SHA256', source)
+            self.assertIn('gh release download "$SNAPSHOT_TAG"', source)
+            self.assertIn('sha256:$SNAPSHOT_SHA256', source)
+            self.assertNotIn('gh run download "$LIBRARY_RUN_ID"', source)
+        self.assertIn('snapshot_tag="lines-snapshot-sha256-$snapshot_sha256"', provision)
+        self.assertIn("recovery snapshot release is missing or not byte-exact", provision)
+        self.assertNotIn("recovery snapshot artifact", provision)
+        self.assertIn(
+            '"repos/Otzaria/SeforimLibrary/releases/tags/$SNAPSHOT_TAG"', workflow
+        )
+        self.assertIn(
+            '"repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG"', workflow
+        )
+        self.assertNotIn('REMOTE_SNAPSHOT_DIGEST="$(gh release view', workflow)
+
     def test_server_host_lease_is_self_provisioning(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
@@ -71,7 +103,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("inputs.target == 'kaggle' && 90", workflow)
         self.assertIn("--deadline-seconds 3600", workflow)
-        self.assertIn("compression-level: 0", workflow)
+        self.assertIn("Publish content-addressed raw-NER handoff release", workflow)
+        self.assertIn("ci/publish_release_handoff.sh", workflow)
         self.assertIn("Pack resumable NER checkpoint after bounded failure", workflow)
         self.assertIn("Restore exact prior-attempt NER checkpoint", workflow)
         self.assertIn("Kaggle now performs NER only", workflow)
@@ -89,29 +122,26 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("exit 0", segment)
         self.assertNotIn("src/incremental.py", segment)
 
-    def test_resolver_only_recovery_uses_exact_producer_artifact(self):
+    def test_resolver_only_recovery_uses_exact_producer_release(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("raw_ner_source_run_id:", workflow)
         self.assertIn("raw_ner_source_run_attempt:", workflow)
         self.assertIn("Validate exact raw-NER recovery source", workflow)
+        self.assertIn('expected_recovery_title="relink-recovery request=', workflow)
+        self.assertIn(".display_title == $title or .display_title == $recovery_title", workflow)
         self.assertIn("raw-ner-handoff-{0}-{1}", workflow)
-        self.assertIn("run-id: ${{ inputs.raw_ner_source_run_id || github.run_id }}", workflow)
-        self.assertIn("needs.relink.outputs.raw_ner_artifact_name", workflow)
+        self.assertIn("needs.relink.outputs.raw_ner_release_tag", workflow)
+        self.assertIn('gh release download "$RELEASE_TAG"', workflow)
         self.assertIn(
             'repos/$GITHUB_REPOSITORY/compare/${SOURCE_HEAD}...${GITHUB_SHA}',
             workflow,
         )
         self.assertIn(".merge_base_commit.sha == $source", workflow)
-        self.assertIn(
-            '--jq ".artifacts[] | select(.name == \\"$artifact_name\\"',
-            workflow,
-        )
-        self.assertNotIn(
-            '--jq ".artifacts[] | select(.name == \\\\\\"$artifact_name\\\\\\"',
-            workflow,
-        )
+        self.assertIn("raw-NER recovery release identity/assets differ", workflow)
+        self.assertNotIn("actions/download-artifact", workflow)
+        self.assertNotIn("actions/upload-artifact", workflow)
 
     def test_arm_resolver_uses_the_verified_kaggle_runtime_lock(self):
         root = Path(__file__).parents[1]

@@ -6,15 +6,15 @@ source "$HERE/lib/gh_runs.sh"
 REPO=${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}
 PARENT_REPO=${KAGGLE_PARENT_REPO:-Otzaria/SeforimLibrary}
 DISPATCH_SCRIPT=${KAGGLE_DISPATCH_SCRIPT:-$HERE/dispatch_kaggle_relink.sh}
-# Successful intake runs created before this instant predate the durable intent
-# artifact contract. Scheduled scans must not fail forever on those legacy runs;
+# Successful intake runs created before this instant predate the Release-based
+# intent contract. Scheduled scans must not fail forever on those legacy runs;
 # an explicit INTENT_RUN_ID remains a fail-loud forensic/recovery path.
-DURABLE_INTENT_ROLLOUT_AT=${DURABLE_INTENT_ROLLOUT_AT:-2026-07-21T09:39:49Z}
+RELEASE_INTENT_ROLLOUT_AT=${RELEASE_INTENT_ROLLOUT_AT:-2026-08-13T23:25:42Z}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-[[ "$DURABLE_INTENT_ROLLOUT_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
-  echo "::error::invalid DURABLE_INTENT_ROLLOUT_AT" >&2
+[[ "$RELEASE_INTENT_ROLLOUT_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+  echo "::error::invalid RELEASE_INTENT_ROLLOUT_AT" >&2
   exit 2
 }
 
@@ -29,7 +29,7 @@ PY
   )
   candidates=$(gh api --paginate -X GET "repos/$REPO/actions/workflows/kaggle-relink.yml/runs" \
     -f event=workflow_dispatch -f status=completed -f created=">=$since" -f per_page=100 \
-    --jq ".workflow_runs[] | select(.conclusion==\"success\" and .created_at >= \"$DURABLE_INTENT_ROLLOUT_AT\") | (.id|tostring)" | \
+    --jq ".workflow_runs[] | select(.conclusion==\"success\" and .created_at >= \"$RELEASE_INTENT_ROLLOUT_AT\") | (.id|tostring)" | \
     awk '{rows[NR]=$0} END {for (i=NR; i>=1; i--) print rows[i]}')
 fi
 
@@ -37,15 +37,12 @@ for intake_run in $candidates; do
   rm -rf "$TMP/intent" && mkdir "$TMP/intent"
   intake_attempt=$(gh api "repos/$REPO/actions/runs/$intake_run" --jq .run_attempt)
   [[ "$intake_attempt" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid intake attempt for $intake_run"; exit 1; }
-  artifacts=$(gh api --paginate "repos/$REPO/actions/runs/$intake_run/artifacts?per_page=100" \
-    --jq '.artifacts[] | select(.expired==false and (.name|startswith("kaggle-intent-"))) | .name')
-  artifact=$(printf '%s\n' "$artifacts" | awk -v suffix="-$intake_attempt" 'length($0)>=length(suffix) && substr($0,length($0)-length(suffix)+1)==suffix')
-  artifact_count=$(printf '%s\n' "$artifact" | awk 'NF' | wc -l | tr -d ' ')
-  if [ "$artifact_count" -ne 1 ]; then
-    echo "::error::successful Kaggle intake $intake_run has $artifact_count intent artifacts (expected exactly one)"
+  intent_tag="kaggle-intent-run-${intake_run}-${intake_attempt}"
+  if ! gh release download "$intent_tag" -R "$REPO" \
+      -p kaggle-intent.json -p kaggle-intent.sha256 -D "$TMP/intent"; then
+    echo "::error::successful Kaggle intake $intake_run has no exact $intent_tag release handoff"
     exit 1
   fi
-  gh run download "$intake_run" -R "$REPO" -n "$artifact" -D "$TMP/intent"
   python3 - "$TMP/intent" "$intake_run" "$intake_attempt" <<'PY'
 import hashlib,json,re,sys
 from pathlib import Path
@@ -135,26 +132,24 @@ PY
         success|neutral|skipped) echo "recovery intent $request_id belongs to a non-failed parent; leaving it unprovisioned"; continue ;;
         *) echo "::error::unknown terminal parent conclusion '$pconclusion'"; exit 1 ;;
       esac
-      snapshot_name="lines-snapshot-$parent_attempt"
-      if ! snapshot_ids=$(gh api --paginate "repos/$PARENT_REPO/actions/runs/$library_run_id/artifacts?per_page=100" \
-          --jq ".artifacts[] | select(.expired==false and .name==\"$snapshot_name\") | (.id|tostring)"); then
-        echo "::error::cannot verify recovery snapshot artifact for parent $library_run_id:$parent_attempt"
+      snapshot_sha256=$(jq -r .snapshot_sha256 "$TMP/intent/kaggle-intent.json")
+      snapshot_tag="lines-snapshot-sha256-$snapshot_sha256"
+      if ! gh api "repos/$PARENT_REPO/releases/tags/$snapshot_tag" > "$TMP/snapshot-release.json" 2> "$TMP/snapshot-release.err"; then
+        echo "::error::cannot verify recovery snapshot release $snapshot_tag for parent $library_run_id:$parent_attempt"
+        cat "$TMP/snapshot-release.err" >&2
         exit 1
       fi
-      snapshot_count=$(printf '%s\n' "$snapshot_ids" | awk 'NF' | wc -l | tr -d ' ')
-      if [ "$snapshot_count" -eq 0 ] && [ -z "${INTENT_RUN_ID:-}" ]; then
-        # Recovery snapshots are ordinary Actions artifacts and eventually expire.
-        # Once that happens this old intent can no longer be recovered.  It must
-        # not poison every scheduled queue scan forever; an explicit operator
-        # request remains fail-loud below so forensic recovery never silently
-        # claims success.
-        echo "::warning::recovery parent $library_run_id:$parent_attempt has no unexpired $snapshot_name artifact; retiring this unrecoverable intent from scheduled scans"
-        continue
-      fi
-      [ "$snapshot_count" -eq 1 ] || {
-        echo "::error::recovery parent $library_run_id:$parent_attempt has $snapshot_count unexpired $snapshot_name artifacts (expected exactly one)"
-        exit 1
-      }
+      python3 - "$TMP/snapshot-release.json" "$snapshot_tag" "$snapshot_sha256" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1],encoding='utf-8'))
+all_assets=value.get('assets',[])
+assets=[a for a in all_assets if a.get('name')=='lines_snapshot.db.zst']
+if not (value.get('tag_name')==sys.argv[2] and value.get('draft') is False and
+        value.get('prerelease') is True and len(all_assets)==len(assets)==1 and
+        assets[0].get('size',0)>0 and
+        assets[0].get('digest')=='sha256:'+sys.argv[3]):
+ raise SystemExit('recovery snapshot release is missing or not byte-exact')
+PY
     elif [ "$pstatus" = completed ]; then
       echo "serial intent $request_id belongs to a terminal/superseded parent attempt; leaving it unprovisioned"
       continue

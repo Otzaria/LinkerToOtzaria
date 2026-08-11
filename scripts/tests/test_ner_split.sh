@@ -151,7 +151,8 @@ assert "LINKER_STACK_ROLE: resolver" in Path(sys.argv[2]).read_text()
 workflow_text = Path(sys.argv[2]).read_text()
 assert "raw-ner-handoff-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" in workflow_text
 assert "--deadline-seconds 3600" in workflow_text
-assert "compression-level: 0" in workflow_text
+assert "Publish content-addressed raw-NER handoff release" in workflow_text
+assert "ci/publish_release_handoff.sh" in workflow_text
 assert "raw_ner_source_run_id:" in workflow_text
 assert "ner_checkpoint_source_run_id:" in workflow_text
 assert "ner_checkpoint_source_engine_fingerprint:" in workflow_text

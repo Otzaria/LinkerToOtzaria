@@ -8,24 +8,24 @@ run-name: "${{ inputs.recovery_mode && 'relink-recovery' || 'relink' }} request=
 # run, then hand the ref-based artifacts back to the SeforimLibrary build.
 #
 # SERIAL MODE (the weekly pipeline): the SeforimLibrary build dispatches this workflow
-# mid-build with library_run_id = its own run id, after uploading THIS build's fresh
-# lines_snapshot.db.zst as a workflow artifact. We download that exact snapshot, re-link
-# only the books it changed (delta — minutes), publish linker_links.zst, and ALSO upload
-# it as a workflow artifact of THIS run so the waiting build fetches it deterministically
+# mid-build with library_run_id = its own run id, after publishing THIS build's fresh
+# lines_snapshot.db.zst in a content-addressed pre-release. We download that exact snapshot, re-link
+# only the books it changed (delta — minutes), publish linker_links.zst, and publish an
+# exact request+attempt release pointer so the waiting build fetches it deterministically
 # and injects the links into the same DB before releasing. No cross-cycle lag: every DB
 # release ships a complete link set.
 #
 # STANDALONE MODE (manual dispatch, no library_run_id): fetches the snapshot from the
 # latest SeforimLibrary release instead — useful for re-running the linker between builds.
 #
-#   • lines_snapshot.db.zst  ← the build run's artifact (serial) or latest release (manual).
+#   • lines_snapshot.db.zst  ← content-addressed snapshot release (serial) or latest DB release (manual).
 #     The ONLY source-change clock: the linker links this content and stamps source_hash from
 #     it, so change-detection + baseline track exactly this file (per-book content hashes).
 #   • changelog_diff.json    ← latest SefariaExport release — target_ref rewrite ONLY.
 #   • engine fingerprint     ← ci/setup_stack.sh (commits+models) + policy flags; a change
 #     invalidates the whole baseline → full relink (no mixed-engine artifact store).
 #
-# ATOMICITY: the payload (release + run artifact) is published BEFORE the baseline is
+# ATOMICITY: the payload and immutable handoff releases are published BEFORE the baseline is
 # committed. If publishing fails, the baseline still points at the previous state and the
 # next run simply re-links again (idempotent). The reverse order could advance the baseline
 # over artifacts that never shipped — books would never be retried (lost links).
@@ -38,8 +38,9 @@ on:
     inputs:
       library_run_id:
         description: >
-          SeforimLibrary workflow run id to take lines_snapshot.db.zst from (serial mode,
-          passed by the build). Leave empty to use the latest SeforimLibrary release.
+          Exact SeforimLibrary parent run id (serial-mode correlation). The snapshot bytes
+          come from the content-addressed release derived from snapshot_sha256. Leave empty
+          to use the latest final SeforimLibrary DB release.
         required: false
         default: ''
         type: string
@@ -70,7 +71,7 @@ on:
         type: string
       snapshot_sha256:
         description: >
-          SHA-256 of the lines_snapshot.db.zst the build uploaded (serial mode). The
+          SHA-256 of the lines_snapshot.db.zst the build published (serial mode). The
           downloaded snapshot is verified against it, fail-closed. Empty = skip the
           check (manual/standalone dispatch only).
         required: false
@@ -136,7 +137,7 @@ on:
       raw_ner_source_run_attempt:
         description: >
           Resolver-only recovery: exact producer attempt encoded in the source raw-NER
-          artifact name. Requires raw_ner_source_run_id; empty for normal runs.
+          release tag. Requires raw_ner_source_run_id; empty for normal runs.
         required: false
         default: ''
         type: string
@@ -151,7 +152,7 @@ on:
       ner_checkpoint_source_run_attempt:
         description: >
           Producer recovery: exact failed source attempt encoded in the checkpoint
-          artifact name. Requires ner_checkpoint_source_run_id; empty otherwise.
+          release tag. Requires ner_checkpoint_source_run_id; empty otherwise.
         required: false
         default: ''
         type: string
@@ -189,7 +190,7 @@ jobs:
   relink:
     if: inputs.raw_ner_source_run_id == ''
     outputs:
-      raw_ner_artifact_name: ${{ steps.pack_raw_handoff.outputs.artifact_name }}
+      raw_ner_release_tag: ${{ steps.pack_raw_handoff.outputs.release_tag }}
       raw_ner_producer_attempt: ${{ steps.pack_raw_handoff.outputs.producer_attempt }}
     permissions:
       contents: read
@@ -206,8 +207,8 @@ jobs:
       - ${{ inputs.target == 'kaggle' && 'gpu' || 'ARM64' }}
       - ${{ inputs.target == 'kaggle' && format('request-{0}', inputs.relink_request_id) || 'server-2' }}
     # Kaggle now performs NER only. Bound the GPU/JIT job to 90 minutes; the producer
-    # itself stops at 60 minutes so packaging + artifact upload retain real headroom.
-    # Its per-book checkpoints are uploaded on that bounded failure and an exact rerun
+    # itself stops at 60 minutes so packaging + release upload retain real headroom.
+    # Its per-book checkpoints are published on that bounded failure and an exact rerun
     # of this databaseId resumes them instead of spending the next session from zero.
     # Server-only legacy/manual runs keep their existing serial/full ceilings.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
@@ -462,26 +463,36 @@ jobs:
           [[ "$CL_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::release_metadata.json has no valid changelog.sha256"; exit 1; }
           echo "$CL_SHA  inputs/changelog_diff.json" | sha256sum -c -
           # The snapshot is the ONLY source-change clock. Serial mode takes it from the
-          # dispatching build run (the DB being built right now); standalone mode takes
-          # the latest published release.
+          # dispatching build's content-addressed pre-release (the DB being built right
+          # now); standalone mode takes the latest final DB release.
           rm -f inputs/lines_snapshot.db.zst
           if [ -n "$LIBRARY_RUN_ID" ]; then
-            echo "Serial mode: snapshot from SeforimLibrary run $LIBRARY_RUN_ID"
-            gh run download "$LIBRARY_RUN_ID" -R Otzaria/SeforimLibrary \
-              -n "lines-snapshot-$PARENT_RUN_ATTEMPT" -D inputs
+            SNAPSHOT_TAG="lines-snapshot-sha256-$SNAPSHOT_SHA256"
+            echo "Serial mode: snapshot release $SNAPSHOT_TAG for SeforimLibrary run $LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
+            gh release download "$SNAPSHOT_TAG" -R Otzaria/SeforimLibrary \
+              -p lines_snapshot.db.zst -D inputs --clobber
             # Verify the handoff against the digest the build pinned (fail-closed): a
             # serial relink must link the exact snapshot this build produced.
             [ -n "$SNAPSHOT_SHA256" ] || { echo "::error::serial relink requires snapshot_sha256 to verify the snapshot handoff"; exit 1; }
+            # Kaggle currently carries gh 2.63.2, whose `release view --json assets`
+            # omits GitHub's newer digest field. Read the exact REST descriptor;
+            # content verification below remains an independent second check.
+            REMOTE_SNAPSHOT_DIGEST="$(gh api \
+              "repos/Otzaria/SeforimLibrary/releases/tags/$SNAPSHOT_TAG" \
+              --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+            [ "$REMOTE_SNAPSHOT_DIGEST" = "sha256:$SNAPSHOT_SHA256" ] || {
+              echo "::error::serial snapshot release descriptor does not match the pinned digest"; exit 1;
+            }
             echo "$SNAPSHOT_SHA256  inputs/lines_snapshot.db.zst" | sha256sum -c -
           else
-            # Newest release INCLUDING pre-releases — `gh release view` with no tag
-            # resolves the "Latest" stable only, which lags far behind the weekly
-            # pre-releases and once pointed the migration at v7 instead of v13.
-            LIB_TAG=$(gh release list -R Otzaria/SeforimLibrary -L1 --json tagName -q '.[0].tagName')
-            echo "Standalone mode: snapshot from SeforimLibrary release $LIB_TAG"
+            # Weekly DB releases are final. Resolve GitHub's stable Latest explicitly so
+            # content-addressed snapshot pre-releases can never masquerade as a DB release.
+            LIB_TAG=$(gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName)
+            echo "Standalone mode: snapshot from latest final SeforimLibrary release $LIB_TAG"
             gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
               -p 'lines_snapshot.db.zst' -D inputs --clobber
-            REMOTE_SNAPSHOT_DIGEST="$(gh release view "$LIB_TAG" -R Otzaria/SeforimLibrary --json assets \
+            REMOTE_SNAPSHOT_DIGEST="$(gh api \
+              "repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG" \
               --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
             [[ "$REMOTE_SNAPSHOT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_SNAPSHOT_DIGEST#sha256:}" ]]
@@ -687,21 +698,18 @@ jobs:
           PY
           cat relink_manifest.json
 
-      # Transfer compute output and baseline delta to a short ubuntu publisher.
-      # The heavy/GPU runner has read-only job permissions and never publishes.
-      - name: Upload verified publisher handoff
+      # Transfer compute output and baseline delta to a short ubuntu publisher without
+      # consuming Actions artifact quota. The PAT publishes an immutable pre-release.
+      - name: Publish verified publisher handoff release
         if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: linker-publisher-handoff-${{ github.run_attempt }}
-          path: |
-            linker_links.zst
-            linker_links.zst.sha256
-            relink_manifest.json
-            baseline/
-            meta.json
-          retention-days: 7
-          if-no-files-found: error
+        run: |
+          set -euo pipefail
+          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json baseline meta.json
+          sha256sum publisher_handoff.tar | cut -d' ' -f1 > publisher_handoff.tar.sha256
+          bash ci/publish_release_handoff.sh \
+            "linker-publisher-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "Immutable Linker publisher handoff ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            "$GITHUB_SHA" publisher_handoff.tar publisher_handoff.tar.sha256
 
       - name: Pack raw-NER handoff for the CPU resolver
         id: pack_raw_handoff
@@ -711,23 +719,20 @@ jobs:
           RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
         run: |
           set -euo pipefail
-          echo "artifact_name=raw-ner-handoff-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=raw-ner-handoff-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "producer_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           bash ci/pack_ner_handoff.sh "$RUN_DIR/ner-handoff" raw_ner_handoff.tar.zst
 
-      - name: Upload content-addressed raw-NER handoff
-        id: upload_raw_handoff
+      - name: Publish content-addressed raw-NER handoff release
+        id: publish_raw_handoff
         if: inputs.target == 'kaggle' && steps.pack_raw_handoff.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.pack_raw_handoff.outputs.artifact_name }}
-          path: |
-            raw_ner_handoff.tar.zst
-            raw_ner_handoff.tar.zst.sha256
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
+        env:
+          RELEASE_TAG: ${{ steps.pack_raw_handoff.outputs.release_tag }}
+        run: >-
+          bash ci/publish_release_handoff.sh "$RELEASE_TAG"
+          "Immutable raw NER handoff $RELEASE_TAG" "$GITHUB_SHA"
+          raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256
 
       - name: Pack resumable NER checkpoint after bounded failure
         id: ner_checkpoint
@@ -737,7 +742,7 @@ jobs:
             (
               steps.compute.outcome == 'failure' ||
               steps.pack_raw_handoff.outcome == 'failure' ||
-              steps.upload_raw_handoff.outcome == 'failure'
+              steps.publish_raw_handoff.outcome == 'failure'
             )
           }}
         env:
@@ -751,19 +756,16 @@ jobs:
           fi
           bash ci/pack_ner_checkpoint.sh "$RUN_DIR/ner-handoff" raw_ner_checkpoint.tar.zst
           echo "available=true" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=raw-ner-checkpoint-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=raw-ner-checkpoint-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload resumable NER checkpoint
+      - name: Publish resumable NER checkpoint release
         if: always() && steps.ner_checkpoint.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.ner_checkpoint.outputs.artifact_name }}
-          path: |
-            raw_ner_checkpoint.tar.zst
-            raw_ner_checkpoint.tar.zst.sha256
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
+        env:
+          RELEASE_TAG: ${{ steps.ner_checkpoint.outputs.release_tag }}
+        run: >-
+          bash ci/publish_release_handoff.sh "$RELEASE_TAG"
+          "Immutable resumable NER checkpoint $RELEASE_TAG" "$GITHUB_SHA"
+          raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256
 
       - name: Fail only after preserving bounded NER progress
         if: >-
@@ -772,7 +774,7 @@ jobs:
             (
               steps.compute.outcome == 'failure' ||
               steps.pack_raw_handoff.outcome == 'failure' ||
-              steps.upload_raw_handoff.outcome == 'failure'
+              steps.publish_raw_handoff.outcome == 'failure'
             )
           }}
         run: |
@@ -879,13 +881,14 @@ jobs:
         run: |
           set -euo pipefail
           expected_title="relink request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
+          expected_recovery_title="relink-recovery request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
           source_json="$RUNNER_TEMP/raw-ner-source-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$source_json"
-          jq -e --arg title "$expected_title" '
+          jq -e --arg title "$expected_title" --arg recovery_title "$expected_recovery_title" '
             .status == "completed" and .conclusion != "success" and
             .event == "workflow_dispatch" and
             .path == ".github/workflows/relink.yml" and
-            .display_title == $title and
+            (.display_title == $title or .display_title == $recovery_title) and
             (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
           ' "$source_json" >/dev/null || {
             echo "::error::raw-NER recovery source is not the exact failed producer run"; exit 1;
@@ -912,22 +915,25 @@ jobs:
           ' "$parent_json" >/dev/null || {
             echo "::error::resolver-only recovery parent is not the exact failed build attempt"; exit 1;
           }
-          artifact_name="raw-ner-handoff-${RELINK_REQUEST_ID}-${SOURCE_RUN_ATTEMPT}"
-          count=$(gh api --paginate -X GET \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts" -f per_page=100 \
-            --jq ".artifacts[] | select(.name == \"$artifact_name\" and (.expired|not) and (.size_in_bytes > 0)) | .id" \
-            | grep -c . || true)
-          [ "$count" -eq 1 ] || {
-            echo "::error::recovery source must expose exactly one live $artifact_name artifact"; exit 1;
-          }
+          release_tag="raw-ner-handoff-${RELINK_REQUEST_ID}-${SOURCE_RUN_ATTEMPT}"
+          gh release view "$release_tag" --json isDraft,isPrerelease,targetCommitish,assets > "$RUNNER_TEMP/raw-ner-source-release.json"
+          python3 - "$RUNNER_TEMP/raw-ner-source-release.json" "$SOURCE_HEAD" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1],encoding="utf-8"))
+          names={item.get("name") for item in value.get("assets",[])}
+          if not (value.get("isDraft") is False and value.get("isPrerelease") is True and
+                  value.get("targetCommitish")==sys.argv[2] and
+                  names=={"raw_ner_handoff.tar.zst","raw_ner_handoff.tar.zst.sha256"}):
+              raise SystemExit("raw-NER recovery release identity/assets differ")
+          PY
 
       - name: Download and safely extract raw-NER handoff
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ inputs.raw_ner_source_run_id != '' && format('raw-ner-handoff-{0}-{1}', inputs.relink_request_id, inputs.raw_ner_source_run_attempt) || needs.relink.outputs.raw_ner_artifact_name }}
-          run-id: ${{ inputs.raw_ner_source_run_id || github.run_id }}
-          github-token: ${{ secrets.PIPELINE_TOKEN }}
-          path: raw-ner-download
+        env:
+          RELEASE_TAG: ${{ inputs.raw_ner_source_run_id != '' && format('raw-ner-handoff-{0}-{1}', inputs.relink_request_id, inputs.raw_ner_source_run_attempt) || needs.relink.outputs.raw_ner_release_tag }}
+        run: |
+          set -euo pipefail
+          rm -rf raw-ner-download && mkdir raw-ner-download
+          gh release download "$RELEASE_TAG" -p raw_ner_handoff.tar.zst -p raw_ner_handoff.tar.zst.sha256 -D raw-ner-download
 
       - name: Verify raw-NER archive before extraction
         run: |
@@ -1031,19 +1037,16 @@ jobs:
               stream.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
           PY
 
-      - name: Upload verified publisher handoff
+      - name: Publish verified publisher handoff release
         if: ${{ !inputs.dry_run }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: linker-publisher-handoff-${{ github.run_attempt }}
-          path: |
-            linker_links.zst
-            linker_links.zst.sha256
-            relink_manifest.json
-            baseline/
-            meta.json
-          retention-days: 7
-          if-no-files-found: error
+        run: |
+          set -euo pipefail
+          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json baseline meta.json
+          sha256sum publisher_handoff.tar | cut -d' ' -f1 > publisher_handoff.tar.sha256
+          bash ci/publish_release_handoff.sh \
+            "linker-publisher-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "Immutable Linker publisher handoff ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            "$GITHUB_SHA" publisher_handoff.tar publisher_handoff.tar.sha256
 
       - name: Clean resolver workspace
         if: always()
@@ -1082,10 +1085,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: linker-publisher-handoff-${{ github.run_attempt }}
-          path: handoff
+      - name: Download and safely extract publisher handoff release
+        run: |
+          set -euo pipefail
+          rm -rf handoff handoff-download && mkdir handoff-download
+          tag="linker-publisher-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh release download "$tag" -p publisher_handoff.tar -p publisher_handoff.tar.sha256 -D handoff-download
+          python3 ci/unpack_publisher_handoff.py \
+            handoff-download/publisher_handoff.tar handoff-download/publisher_handoff.tar.sha256 handoff
       - name: Validate compute handoff strictly
         env:
           EXPECTED_REQUEST_ID: ${{ inputs.relink_request_id }}
@@ -1201,7 +1208,26 @@ jobs:
           fi
           gh release edit "$tag" --latest
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Commit baseline only after immutable release exists
+      - name: Expose exact payload pointer to the waiting Seforim build
+        env:
+          LINKER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p output-pointer
+          jq -cS -n --arg release_tag "$LINKER_RELEASE_TAG" \
+            --arg payload_sha256 "$(tr -d '\r\n' < handoff/linker_links.zst.sha256)" \
+            --arg request_id "$RELINK_REQUEST_ID" --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{schema_version:1,release_tag:$release_tag,payload_sha256:$payload_sha256,
+              relink_request_id:$request_id,relink_run_id:$run_id,relink_run_attempt:$run_attempt}' \
+            > output-pointer/linker_release_pointer.json
+          cp handoff/relink_manifest.json output-pointer/
+          bash ci/publish_release_handoff.sh \
+            "linker-output-${RELINK_REQUEST_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "Immutable Linker output pointer ${RELINK_REQUEST_ID}:${GITHUB_RUN_ATTEMPT}" \
+            "$GITHUB_SHA" output-pointer/linker_release_pointer.json output-pointer/relink_manifest.json
+      - name: Commit baseline only after all immutable releases exist
         shell: bash
         run: |
           set -euo pipefail
@@ -1215,12 +1241,3 @@ jobs:
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" pull --rebase origin main
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:main
-      - name: Expose exact payload to the waiting Seforim build
-        uses: actions/upload-artifact@v4
-        with:
-          name: linker-links-${{ github.run_attempt }}
-          path: |
-            handoff/linker_links.zst
-            handoff/relink_manifest.json
-          retention-days: 7
-          if-no-files-found: error

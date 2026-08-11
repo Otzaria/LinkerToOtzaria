@@ -9,7 +9,7 @@ triggers SefariaExport, the library update, and the SeforimLibrary build).
 ```
 weekly-pipeline (Thu):
   upstreams → SeforimLibrary manual-generate-release.yml
-                │ build DB + upload exact lines_snapshot
+                │ build DB + publish exact content-addressed lines_snapshot release
                 │ release shared host lease
                 ▼
            kaggle-relink intent/provisioner

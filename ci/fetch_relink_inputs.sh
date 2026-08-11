@@ -20,11 +20,15 @@ if [ -n "${LIBRARY_RUN_ID:-}" ]; then
   [[ "$LIBRARY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
   [[ "${PARENT_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]]
   [[ "${SNAPSHOT_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]
-  gh run download "$LIBRARY_RUN_ID" -R Otzaria/SeforimLibrary \
-    -n "lines-snapshot-$PARENT_RUN_ATTEMPT" -D inputs
+  SNAPSHOT_TAG="lines-snapshot-sha256-$SNAPSHOT_SHA256"
+  gh release download "$SNAPSHOT_TAG" -R Otzaria/SeforimLibrary \
+    -p lines_snapshot.db.zst -D inputs --clobber
+  REMOTE_DIGEST="$(gh release view "$SNAPSHOT_TAG" -R Otzaria/SeforimLibrary --json assets \
+    --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+  [[ "$REMOTE_DIGEST" == "sha256:$SNAPSHOT_SHA256" ]]
   echo "$SNAPSHOT_SHA256  inputs/lines_snapshot.db.zst" | sha256sum -c -
 else
-  LIB_TAG="$(gh release list -R Otzaria/SeforimLibrary -L1 --json tagName -q '.[0].tagName')"
+  LIB_TAG="$(gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName)"
   [[ "$LIB_TAG" =~ ^[A-Za-z0-9._-]{1,150}$ ]]
   gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
     -p lines_snapshot.db.zst -D inputs --clobber
