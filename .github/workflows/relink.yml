@@ -700,7 +700,7 @@ jobs:
             relink_manifest.json
             baseline/
             meta.json
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
       - name: Pack raw-NER handoff for the CPU resolver
@@ -725,7 +725,7 @@ jobs:
           path: |
             raw_ner_handoff.tar.zst
             raw_ner_handoff.tar.zst.sha256
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
           compression-level: 0
 
@@ -761,6 +761,8 @@ jobs:
           path: |
             raw_ner_checkpoint.tar.zst
             raw_ner_checkpoint.tar.zst.sha256
+          # Failure-only recovery state: keep a full week so an operator can
+          # resume bounded GPU work without starting the corpus over.
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
@@ -1042,7 +1044,7 @@ jobs:
             relink_manifest.json
             baseline/
             meta.json
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
       - name: Clean resolver workspace
@@ -1222,5 +1224,5 @@ jobs:
           path: |
             handoff/linker_links.zst
             handoff/relink_manifest.json
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
