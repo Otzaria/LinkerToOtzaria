@@ -8,8 +8,8 @@ mkdir "$TMP/bin"
 cat > "$TMP/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$1" = run ] && [ "$2" = download ]; then
-  run_id="$3"; shift 3; dir=""
+if [ "$1" = release ] && [ "$2" = download ] && [[ "$3" == kaggle-intent-run-* ]]; then
+  tag="$3"; run_id="${tag#kaggle-intent-run-}"; run_id="${run_id%-*}"; shift 3; dir=""
   while [ $# -gt 0 ]; do
     case "$1" in -D) dir="$2"; shift 2;; *) shift;; esac
   done
@@ -34,12 +34,10 @@ if [ "$1" = api ]; then
   if [[ "$joined" == *"actions/workflows/kaggle-relink.yml/runs"* ]]; then
     printf '102\n101\n'; exit 0
   fi
-  if [[ "$joined" =~ actions/runs/([0-9]+)/artifacts ]]; then
-    if [[ "$joined" == *"actions/runs/777/artifacts"* ]]; then
-      [ -n "${MISSING_SNAPSHOT:-}" ] || printf '4242\n'
-      exit 0
-    fi
-    printf 'kaggle-intent-%064d-1\n' 0; exit 0
+  if [[ "$joined" == *"repos/Otzaria/SeforimLibrary/releases/tags/lines-snapshot-sha256-"* ]]; then
+    [ -z "${MISSING_SNAPSHOT:-}" ] || exit 1
+    printf '{"tag_name":"lines-snapshot-sha256-%s","draft":false,"prerelease":true,"assets":[{"name":"lines_snapshot.db.zst","size":123,"digest":"sha256:%s"}]}\n' "$(printf '%064d' 0 | tr 0 d)" "$(printf '%064d' 0 | tr 0 d)"
+    exit 0
   fi
   if [[ "$joined" == *"actions/workflows/relink.yml/runs"* ]]; then
     current=$(cat "$MOCK_STATE" 2>/dev/null || true)
@@ -175,14 +173,6 @@ test ! -e "$TMP/dispatch"
 echo "ok   successful terminal parent cannot enter recovery mode"
 
 rm -f "$TMP/dispatch"
-PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
-  KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 MISSING_SNAPSHOT=1 \
-  GITHUB_REPOSITORY=Otzaria/LinkerToOtzaria \
-  /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
-test ! -e "$TMP/dispatch"
-echo "ok   scheduled scan retires an unrecoverable intent after its snapshot expires"
-
-rm -f "$TMP/dispatch"
 rc=0
 PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
   KAGGLE_DISPATCH_SCRIPT="$TMP/fake-dispatch.sh" RECOVERY_INTENT=1 MISSING_SNAPSHOT=1 INTENT_RUN_ID=103 \
@@ -190,7 +180,7 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
   /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null 2>&1 || rc=$?
 test "$rc" -ne 0
 test ! -e "$TMP/dispatch"
-echo "ok   explicit recovery still fails loudly when its snapshot is missing"
+echo "ok   recovery fails loudly when its immutable snapshot release is missing"
 
 python3 - "$ROOT/.github/workflows/kaggle-provisioner.yml" <<'PY'
 import sys
@@ -207,5 +197,5 @@ if "queue: max" in header:
 PY
 echo "ok   provisioner holds relink mutex through admission and dispatch"
 
-grep -q 'created_at >=.*DURABLE_INTENT_ROLLOUT_AT' "$ROOT/scripts/provision_kaggle_intent.sh"
-echo "ok   scheduled scanner excludes pre-contract legacy intakes"
+grep -q 'created_at >=.*RELEASE_INTENT_ROLLOUT_AT' "$ROOT/scripts/provision_kaggle_intent.sh"
+echo "ok   scheduled scanner excludes pre-Release legacy intakes"

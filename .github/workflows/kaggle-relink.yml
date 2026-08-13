@@ -1,6 +1,6 @@
 # Launch a relink on a fresh Kaggle GPU session — the cloud arm of the linker.
 #
-# Durable intake only: validates and stores an immutable intent artifact, then wakes
+# Durable intake only: validates and stores an immutable intent pre-release, then wakes
 # kaggle-provisioner.yml.  The singleton provisioner runs the actual JIT + relink queue
 # + private-kernel push only when Linker capacity is free.
 #
@@ -18,8 +18,8 @@ on:
       library_run_id:
         description: >
           SeforimLibrary run id for serial mode — forwarded to relink.yml so the
-          session takes lines_snapshot.db.zst from (and hands artifacts back to)
-          that exact waiting build. Empty = standalone relink.
+          session is correlated to that exact waiting build. Snapshot bytes come from
+          the content-addressed release derived from snapshot_sha256. Empty = standalone relink.
         required: false
         default: ''
       relink_request_id:
@@ -52,9 +52,9 @@ on:
         type: boolean
       recovery_mode:
         description: >
-          Explicitly reuse the exact snapshot artifact of a failed terminal SeforimLibrary
+          Explicitly reuse the exact content-addressed snapshot release of a failed terminal SeforimLibrary
           attempt. The provisioner still requires an exact, unsuperseded parent attempt,
-          a non-success conclusion, one unexpired snapshot artifact, and no matching child.
+          a non-success conclusion, one byte-exact snapshot release asset, and no matching child.
         required: false
         default: false
         type: boolean
@@ -81,7 +81,7 @@ permissions:
   contents: read
   actions: write
 
-# Intake is cheap and persist-all: every request becomes an immutable run artifact.
+# Intake is cheap and persist-all: every request becomes an immutable release handoff.
 # A separate singleton provisioner selects one pending intent only when capacity exists.
 concurrency:
   group: kaggle-intent-intake
@@ -200,12 +200,12 @@ jobs:
             > intent/kaggle-intent.json
           sha256sum intent/kaggle-intent.json | cut -d' ' -f1 > intent/kaggle-intent.sha256
           echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kaggle-intent-${{ steps.intent.outputs.request_id }}-${{ github.run_attempt }}
-          path: intent/
-          if-no-files-found: error
-          retention-days: 30
+      - name: Publish immutable Kaggle intent release
+        run: >-
+          bash ci/publish_release_handoff.sh
+          "kaggle-intent-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          "Immutable Kaggle intent ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          "$GITHUB_SHA" intent/kaggle-intent.json intent/kaggle-intent.sha256
       - name: Wake singleton provisioner
         env:
           INTAKE_RUN_ID: ${{ github.run_id }}
@@ -216,7 +216,7 @@ jobs:
               -f intent_run_id="$INTAKE_RUN_ID" && exit 0
             [ "$attempt" = 3 ] || sleep "$((attempt * 5))"
           done
-          # The artifact is already durable and the scheduled provisioner scans it.
-          # A wake-up outage must not turn this artifact-bearing intake run red,
+          # The release handoff is already durable and the scheduled provisioner scans it.
+          # A wake-up outage must not turn this release-bearing intake run red,
           # because the scanner intentionally ignores failed pre-persist runs.
           echo "::warning::intent persisted but immediate provisioner wake failed; scheduled tick will recover it"
