@@ -2,16 +2,16 @@
   "schema_version": 2,
   "description": "Lineage of the last linker run (see stage 3). Source-change clock = snapshot.",
   "snapshot": {
-    "sha256": "180672990130c0e09faab29feddfb5e6c65dd73fad8d4cebad9006d9e9e4fa30",
-    "book_count": 7290
+    "sha256": "8abfccb25bada9eada341e031e5ceb3595004e523c6f4dd1215378acbd951d3b",
+    "book_count": 7294
   },
   "sefaria": {
-    "export_tag": "2026-08-07_12-58-31168047561-1"
+    "export_tag": "2026-08-14_02-57-31755267788-1"
   },
   "engine": {
     "ambiguity_policy": "drop",
     "bavli_convention": false,
     "fingerprint": "dump=44e55916743983b8;engine_src=ac112bd653b90cd9;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
   },
-  "generated_at": "2026-08-07T12:54:01Z"
+  "generated_at": "2026-08-14T05:00:22Z"
 }
