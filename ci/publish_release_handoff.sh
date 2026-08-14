@@ -24,15 +24,22 @@ for path in "$@"; do
 done
 
 state="$RUNNER_TEMP/release-handoff-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}.json"
-if ! gh release view "$tag" --json isDraft,isPrerelease,targetCommitish,assets > "$state" 2>/dev/null; then
+read_release() {
+  # Older gh versions (including Kaggle's pinned client) omit asset.digest
+  # from `release view --json assets`; the REST response is authoritative.
+  gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq \
+    '{isDraft:.draft,isPrerelease:.prerelease,targetCommitish:.target_commitish,assets:[.assets[]|{name,size,digest}]}'
+}
+
+if ! read_release > "$state" 2>/dev/null; then
   if ! gh release create "$tag" --target "$target" --title "$title" \
       --notes "Immutable workflow handoff. Consumers verify every asset digest." --prerelease; then
-    gh release view "$tag" --json isDraft,isPrerelease,targetCommitish,assets > "$state"
+    read_release > "$state"
   fi
 fi
 
 verify_and_list_missing() {
-  gh release view "$tag" --json isDraft,isPrerelease,targetCommitish,assets > "$state"
+  read_release > "$state"
   python3 - "$state" "$target" "$@" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
