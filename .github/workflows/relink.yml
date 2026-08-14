@@ -474,7 +474,11 @@ jobs:
             # Verify the handoff against the digest the build pinned (fail-closed): a
             # serial relink must link the exact snapshot this build produced.
             [ -n "$SNAPSHOT_SHA256" ] || { echo "::error::serial relink requires snapshot_sha256 to verify the snapshot handoff"; exit 1; }
-            REMOTE_SNAPSHOT_DIGEST="$(gh release view "$SNAPSHOT_TAG" -R Otzaria/SeforimLibrary --json assets \
+            # Kaggle currently carries gh 2.63.2, whose `release view --json assets`
+            # omits GitHub's newer digest field. Read the exact REST descriptor;
+            # content verification below remains an independent second check.
+            REMOTE_SNAPSHOT_DIGEST="$(gh api \
+              "repos/Otzaria/SeforimLibrary/releases/tags/$SNAPSHOT_TAG" \
               --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
             [ "$REMOTE_SNAPSHOT_DIGEST" = "sha256:$SNAPSHOT_SHA256" ] || {
               echo "::error::serial snapshot release descriptor does not match the pinned digest"; exit 1;
@@ -487,7 +491,8 @@ jobs:
             echo "Standalone mode: snapshot from latest final SeforimLibrary release $LIB_TAG"
             gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
               -p 'lines_snapshot.db.zst' -D inputs --clobber
-            REMOTE_SNAPSHOT_DIGEST="$(gh release view "$LIB_TAG" -R Otzaria/SeforimLibrary --json assets \
+            REMOTE_SNAPSHOT_DIGEST="$(gh api \
+              "repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG" \
               --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
             [[ "$REMOTE_SNAPSHOT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_SNAPSHOT_DIGEST#sha256:}" ]]

@@ -26,6 +26,13 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('snapshot_tag="lines-snapshot-sha256-$snapshot_sha256"', provision)
         self.assertIn("recovery snapshot release is missing or not byte-exact", provision)
         self.assertNotIn("recovery snapshot artifact", provision)
+        self.assertIn(
+            '"repos/Otzaria/SeforimLibrary/releases/tags/$SNAPSHOT_TAG"', workflow
+        )
+        self.assertIn(
+            '"repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG"', workflow
+        )
+        self.assertNotIn('REMOTE_SNAPSHOT_DIGEST="$(gh release view', workflow)
 
     def test_server_host_lease_is_self_provisioning(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
