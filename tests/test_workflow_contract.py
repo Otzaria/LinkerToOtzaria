@@ -5,6 +5,13 @@ import unittest
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_release_publisher_rejects_asset_names_github_would_normalize(self):
+        helper = (
+            Path(__file__).parents[1] / "ci/publish_release_handoff.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("release asset basename is unsafe or would be normalized by GitHub", helper)
+        self.assertIn("^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$", helper)
+
     def test_serial_snapshot_handoff_uses_content_addressed_release(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")

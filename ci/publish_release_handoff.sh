@@ -13,6 +13,11 @@ shift 3
 
 for path in "$@"; do
   [ -f "$path" ] || { echo "::error::missing handoff asset $path"; exit 1; }
+  name=${path##*/}
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]] || {
+    echo "::error::release asset basename is unsafe or would be normalized by GitHub: $name"
+    exit 2
+  }
   [ "$(stat --format='%s' "$path")" -le 2147483647 ] || {
     echo "::error::handoff asset exceeds GitHub's 2 GiB limit: $path"; exit 1;
   }
