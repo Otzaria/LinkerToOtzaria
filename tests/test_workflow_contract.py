@@ -129,6 +129,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("raw_ner_source_run_id:", workflow)
         self.assertIn("raw_ner_source_run_attempt:", workflow)
         self.assertIn("Validate exact raw-NER recovery source", workflow)
+        self.assertIn('expected_recovery_title="relink-recovery request=', workflow)
+        self.assertIn(".display_title == $title or .display_title == $recovery_title", workflow)
         self.assertIn("raw-ner-handoff-{0}-{1}", workflow)
         self.assertIn("needs.relink.outputs.raw_ner_release_tag", workflow)
         self.assertIn('gh release download "$RELEASE_TAG"', workflow)

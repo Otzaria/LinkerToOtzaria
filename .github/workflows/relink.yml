@@ -881,13 +881,14 @@ jobs:
         run: |
           set -euo pipefail
           expected_title="relink request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
+          expected_recovery_title="relink-recovery request=${RELINK_REQUEST_ID} parent=${LIBRARY_RUN_ID}:${PARENT_RUN_ATTEMPT}"
           source_json="$RUNNER_TEMP/raw-ner-source-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$source_json"
-          jq -e --arg title "$expected_title" '
+          jq -e --arg title "$expected_title" --arg recovery_title "$expected_recovery_title" '
             .status == "completed" and .conclusion != "success" and
             .event == "workflow_dispatch" and
             .path == ".github/workflows/relink.yml" and
-            .display_title == $title and
+            (.display_title == $title or .display_title == $recovery_title) and
             (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
           ' "$source_json" >/dev/null || {
             echo "::error::raw-NER recovery source is not the exact failed producer run"; exit 1;
