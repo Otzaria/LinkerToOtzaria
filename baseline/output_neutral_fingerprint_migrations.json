@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "migrations": [
+    {
+      "from": "dump=44e55916743983b8;engine_src=ac112bd653b90cd9;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0",
+      "to": "dump=44e55916743983b8;engine_src=6884694f0e064e18;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0",
+      "review": "6952e866 serializes claim ownership only; link computation is unchanged."
+    }
+  ]
+}
