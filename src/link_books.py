@@ -23,6 +23,7 @@ import resource
 import sqlite3
 import sys
 import time
+import uuid
 
 # django/requests are imported lazily (main/ner_alive): the incremental driver imports
 # this module for claim_id alone and must not drag the whole Sefaria stack with it.
@@ -98,6 +99,94 @@ def claim_id(bk: BookKey) -> str:
     """Filesystem-safe, collision-free handle for a book (claim/done markers)."""
     h = hashlib.sha1(f"{bk.source_name}\0{bk.canonical_he_title}".encode("utf-8"))
     return h.hexdigest()
+
+
+class BookClaim:
+    """Exclusive, crash-safe ownership of one book in an engine run.
+
+    The old directory/heartbeat protocol used the heartbeat as both liveness and
+    ownership.  A slow but healthy resolver could therefore be declared stale;
+    two workers then wrote the same checkpoint directory and one could delete a
+    shard while the other was still reading it.  The marker remains useful for
+    recovering after a *dead* process, but an advisory lock is now the authority
+    for a live owner.  ``flock`` is released by the kernel if that owner dies,
+    making a stale takeover safe without allowing concurrent resolvers.
+    """
+
+    def __init__(self, claim_path: str, lock_fd: int):
+        self.claim_path = claim_path
+        self.lock_fd = lock_fd
+        self.released = False
+
+    @staticmethod
+    def acquire(run_dir: str, cid: str, stale_seconds: int = CLAIM_STALE_SEC):
+        """Return the sole live claim for ``cid``, or ``None`` if unavailable."""
+        import fcntl
+        import shutil
+
+        claims_root = os.path.join(run_dir, "claim")
+        os.makedirs(claims_root, exist_ok=True)
+        claim_path = os.path.join(claims_root, cid)
+        # Keep the lock file outside the mutable claim directory: reclaiming the
+        # directory must never drop the kernel lock that serializes reclaimers.
+        lock_path = os.path.join(claims_root, f".{cid}.lock")
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(lock_fd)
+            return None
+
+        def abandon_lock():
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+        if os.path.exists(os.path.join(run_dir, "done", cid)):
+            abandon_lock()
+            return None
+
+        heartbeat_path = os.path.join(claim_path, "hb")
+        try:
+            os.mkdir(claim_path)
+        except FileExistsError:
+            try:
+                fresh = time.time() - os.path.getmtime(heartbeat_path) < stale_seconds
+            except OSError:
+                fresh = False
+            if fresh:
+                # A previous worker ended unexpectedly but its heartbeat is still
+                # within the recovery window.  Leave its resumable checkpoints alone.
+                abandon_lock()
+                return None
+            retired = f"{claim_path}.abandoned-{uuid.uuid4().hex}"
+            os.replace(claim_path, retired)
+            shutil.rmtree(retired, ignore_errors=True)
+            os.mkdir(claim_path)
+
+        open(heartbeat_path, "w").close()
+        return BookClaim(claim_path, lock_fd)
+
+    def heartbeat(self) -> None:
+        """Refresh liveness without ever recreating a claim we no longer own."""
+        if self.released:
+            raise RuntimeError("attempted to heartbeat a released book claim")
+        try:
+            os.utime(os.path.join(self.claim_path, "hb"), None)
+        except FileNotFoundError as error:
+            raise RuntimeError("book claim disappeared while its owner was live") from error
+
+    def release(self) -> None:
+        """Drop ownership and make the book immediately available to a peer."""
+        if self.released:
+            return
+        import fcntl
+        import shutil
+        try:
+            shutil.rmtree(self.claim_path, ignore_errors=True)
+        finally:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            os.close(self.lock_fd)
+            self.released = True
 
 
 def ner_alive() -> bool:
@@ -427,42 +516,6 @@ def main():
         with open(os.path.join(run, "logs", "skipped_lines.log"), "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
-    def claim_dir(cid):
-        return os.path.join(run, "claim", cid)
-
-    def try_claim(cid):
-        claim = claim_dir(cid)
-        hb = os.path.join(claim, "hb")
-        try:
-            os.mkdir(claim)
-        except FileExistsError:
-            if os.path.exists(os.path.join(run, "done", cid)):
-                return False
-            try:
-                if time.time() - os.path.getmtime(hb) < CLAIM_STALE_SEC:
-                    return False
-            except OSError:
-                pass
-            # Stale (>CLAIM_STALE_SEC): take it over. The steal is not perfectly atomic,
-            # but per-book output is idempotent (same snapshot → same artifact), so at
-            # worst two workers redo one book and write identical bytes — never wrong.
-            log(f"stealing stale claim {cid}")
-        open(hb, "w").close()
-        return True
-
-    def heartbeat(cid):
-        # Keep the claim fresh while this worker is actively processing the book.
-        worker_heartbeat()
-        try:
-            os.utime(os.path.join(claim_dir(cid), "hb"), None)
-        except OSError:
-            open(os.path.join(claim_dir(cid), "hb"), "w").close()
-
-    def release_claim(cid):
-        # Drop ownership so the book is immediately re-claimable (not orphaned until stale).
-        import shutil
-        shutil.rmtree(claim_dir(cid), ignore_errors=True)
-
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     import django
     django.setup()
@@ -546,9 +599,9 @@ def main():
         # A single pass is not enough: a worker walks PAST a book whose claim a peer
         # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
         # one-pass world ever comes back, and the whole run fails hours later on the
-        # completeness assertion. Rescan until every book is done: try_claim steals
-        # stale claims (dead owner) and refuses fresh ones (live owner still working),
-        # so each round either shrinks the set or politely waits a live peer out.
+        # completeness assertion. Rescan until every book is done: a worker may recover
+        # a stale claim only after the dead owner has also released its kernel lock, so
+        # each round either shrinks the set or politely waits a live peer out.
         remaining = books
         while remaining:
             for bk in remaining:
@@ -570,7 +623,8 @@ def main():
         while True:
             if os.path.exists(os.path.join(run, "done", cid)):
                 break
-            if not try_claim(cid):
+            claim = BookClaim.acquire(run, cid)
+            if claim is None:
                 break  # another live worker owns it — it will mark done/failed
             lines = book_lines(con, bk)
             item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
@@ -608,12 +662,13 @@ def main():
                     )
                     # The next exec (or a peer) must be able to claim the same book
                     # immediately and resume its immutable batch shards.
-                    release_claim(cid)
+                    claim.release()
                     con.close()
                     os.execv(sys.executable, [sys.executable] + sys.argv)
 
                 record_count, words = process_book_checkpointed(
-                    linker, bk, lines, skipped_log, lambda: heartbeat(cid),
+                    linker, bk, lines, skipped_log,
+                    lambda: (worker_heartbeat(), claim.heartbeat()),
                     checkpoint_dir, out_path, recycle_worker,
                     precomputed=precomputed,
                     ner_indices=ner_indices,
@@ -624,7 +679,7 @@ def main():
                     # Infrastructure outage, not a book problem: release the claim, wait
                     # for NER, and retry this book (any worker may pick it up meanwhile).
                     log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
-                    release_claim(cid)
+                    claim.release()
                     wait_for_ner(log)
                     continue
                 log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
@@ -638,6 +693,7 @@ def main():
                 with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
                     _json.dump(bk.to_dict(), ff, ensure_ascii=False)
                 open(os.path.join(run, "done", cid), "w").close()
+                claim.release()
                 break
 
             # Atomic per-book output: write the artifact only when the whole book is linked.
@@ -648,6 +704,7 @@ def main():
             open(os.path.join(run, "done", cid), "w").close()
             import shutil
             shutil.rmtree(checkpoint_dir, ignore_errors=True)
+            claim.release()
             processed += 1
             log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
             worker_heartbeat()

@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -28,6 +29,36 @@ class WorkerMemoryTest(unittest.TestCase):
     def test_recycle_only_after_progress(self):
         self.assertFalse(link_books.recycle_needed(current_rss=100, cap=100, processed=0))
         self.assertTrue(link_books.recycle_needed(current_rss=101, cap=100, processed=1))
+
+    def test_stale_heartbeat_cannot_steal_a_live_book_lock(self):
+        """A slow resolver must never race a peer over its checkpoint directory."""
+        with tempfile.TemporaryDirectory() as run:
+            os.makedirs(os.path.join(run, "done"))
+            first = link_books.BookClaim.acquire(run, "book", stale_seconds=1)
+            self.assertIsNotNone(first)
+            heartbeat = os.path.join(run, "claim", "book", "hb")
+            old = time.time() - 2
+            os.utime(heartbeat, (old, old))
+
+            # Heartbeat age alone used to permit this second owner.  The kernel
+            # lock proves the first worker is still alive, so no takeover occurs.
+            self.assertIsNone(link_books.BookClaim.acquire(run, "book", stale_seconds=1))
+            self.assertTrue(os.path.isdir(os.path.join(run, "claim", "book")))
+
+            first.release()
+            recovered = link_books.BookClaim.acquire(run, "book", stale_seconds=1)
+            self.assertIsNotNone(recovered)
+            recovered.release()
+
+    def test_claim_heartbeat_never_recreates_lost_ownership(self):
+        with tempfile.TemporaryDirectory() as run:
+            os.makedirs(os.path.join(run, "done"))
+            claim = link_books.BookClaim.acquire(run, "book")
+            self.assertIsNotNone(claim)
+            os.remove(os.path.join(run, "claim", "book", "hb"))
+            with self.assertRaisesRegex(RuntimeError, "claim disappeared"):
+                claim.heartbeat()
+            claim.release()
 
     def test_checkpointed_book_resumes_after_mid_book_recycle(self):
         class Doc:
