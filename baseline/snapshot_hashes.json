@@ -42,7 +42,7 @@
 },
 {
 "canonical_he_title": "טובת מראה",
-"hash": "fcf95aba1c3e3321",
+"hash": "0693a595efeca043",
 "source_name": "Ben-YehudaToOtzaria"
 },
 {
@@ -377,7 +377,7 @@
 },
 {
 "canonical_he_title": "אור הישר על מכות",
-"hash": "5947e00494021899",
+"hash": "1187d1a2459e9e52",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -452,7 +452,7 @@
 },
 {
 "canonical_he_title": "אור הישר על נדה",
-"hash": "cd65137f26133697",
+"hash": "d66c668db2ceb8dc",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -567,12 +567,12 @@
 },
 {
 "canonical_he_title": "אמרי משה",
-"hash": "c3cb5f80a6b37e4b",
+"hash": "e8f2383a50794d54",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אמרי נועם",
-"hash": "34a4d3edf6dc73af",
+"hash": "817a562e37607257",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -982,7 +982,7 @@
 },
 {
 "canonical_he_title": "בית מאיר על נדה",
-"hash": "d2d9ac4ca2a98575",
+"hash": "a637324126e7129d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1497,7 +1497,7 @@
 },
 {
 "canonical_he_title": "דברי דוד פסחים",
-"hash": "c1221fbfb6d36445",
+"hash": "c5ba114d9f35b1ca",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1782,7 +1782,7 @@
 },
 {
 "canonical_he_title": "חידושי הרימ על שולחן ערוך חושן משפט חלק ב",
-"hash": "5ffde214fb96de7d",
+"hash": "18702aa6f5d94ae9",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1867,7 +1867,7 @@
 },
 {
 "canonical_he_title": "חמדת שלמה על יבמות",
-"hash": "3638d4173cfeda91",
+"hash": "5aa2df56164a96a3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2287,7 +2287,7 @@
 },
 {
 "canonical_he_title": "מהרש חלק ג",
-"hash": "e9c39d4302167bba",
+"hash": "dfb23114b506882e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2302,7 +2302,7 @@
 },
 {
 "canonical_he_title": "מחנה אפרים חלק א - ב",
-"hash": "856e42d0398bad2c",
+"hash": "2a88889f57423082",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2772,7 +2772,7 @@
 },
 {
 "canonical_he_title": "קרן אורה על יבמות",
-"hash": "7bc59774ac007b7f",
+"hash": "532a564f5de4611e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3402,7 +3402,7 @@
 },
 {
 "canonical_he_title": "שפת אמת על שבת",
-"hash": "cf163cb3af65a615",
+"hash": "682a6eb4c8a81043",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3622,7 +3622,7 @@
 },
 {
 "canonical_he_title": "איזהו מקומן על עירובין",
-"hash": "29bb3274934e32e5",
+"hash": "2fb97b85739f9f66",
 "source_name": "MoreBooks"
 },
 {
@@ -3666,8 +3666,13 @@
 "source_name": "MoreBooks"
 },
 {
+"canonical_he_title": "ברכת המזון נוסח בלדי",
+"hash": "a7a5b40e1c24037b",
+"source_name": "MoreBooks"
+},
+{
 "canonical_he_title": "גירסת ספריה",
-"hash": "f8717039c76176fd",
+"hash": "1711b43ffc2fc569",
 "source_name": "MoreBooks"
 },
 {
@@ -3876,6 +3881,11 @@
 "source_name": "MoreBooks"
 },
 {
+"canonical_he_title": "חיי אריה על מסכת מעילה",
+"hash": "0dc27751a7b6758b",
+"source_name": "MoreBooks"
+},
+{
 "canonical_he_title": "חכמת שלמה",
 "hash": "8a19099afa62d89c",
 "source_name": "MoreBooks"
@@ -3897,7 +3907,7 @@
 },
 {
 "canonical_he_title": "טעמא דקרא",
-"hash": "b0015b35ece69c84",
+"hash": "7203d976e7c517d7",
 "source_name": "MoreBooks"
 },
 {
@@ -4087,7 +4097,7 @@
 },
 {
 "canonical_he_title": "פירוש הגרא על מגלת אסתר על דרך הפשט",
-"hash": "74b217e61a1f9523",
+"hash": "892dd305949b41f4",
 "source_name": "MoreBooks"
 },
 {
@@ -4232,7 +4242,7 @@
 },
 {
 "canonical_he_title": "תולדות ישו",
-"hash": "b3f31d36a4267e0c",
+"hash": "a07b6de11c8f18d6",
 "source_name": "MoreBooks"
 },
 {
@@ -5797,7 +5807,7 @@
 },
 {
 "canonical_he_title": "מאמר החכמה",
-"hash": "e43c5337df31014b",
+"hash": "503154c4be94dd2d",
 "source_name": "OnYourWayToOtzaria"
 },
 {
@@ -7277,7 +7287,7 @@
 },
 {
 "canonical_he_title": "אוצר מדרשים",
-"hash": "3e5a3256eaabb8e5",
+"hash": "3b16f1fea76940b2",
 "source_name": "Sefaria"
 },
 {
@@ -8547,7 +8557,7 @@
 },
 {
 "canonical_he_title": "בית יוסף",
-"hash": "5dcaf7549214252c",
+"hash": "99859cdf43d01e48",
 "source_name": "Sefaria"
 },
 {
@@ -10387,7 +10397,7 @@
 },
 {
 "canonical_he_title": "דעת תבונות",
-"hash": "91277c3b7847b799",
+"hash": "77c6d5d78d776786",
 "source_name": "Sefaria"
 },
 {
@@ -10447,7 +10457,7 @@
 },
 {
 "canonical_he_title": "דרכי משה",
-"hash": "4f8f2c2afbdc15ae",
+"hash": "52a555e025b4f83e",
 "source_name": "Sefaria"
 },
 {
@@ -12957,7 +12967,7 @@
 },
 {
 "canonical_he_title": "חדושי הרא\"ה על כתובות",
-"hash": "8898e8ef863dc19c",
+"hash": "bf12b92a3b4d456c",
 "source_name": "Sefaria"
 },
 {
@@ -13312,7 +13322,7 @@
 },
 {
 "canonical_he_title": "חידושי אגדות על ערכין",
-"hash": "89eab228972242e9",
+"hash": "e92a0dfa1af28cfc",
 "source_name": "Sefaria"
 },
 {
@@ -15362,7 +15372,7 @@
 },
 {
 "canonical_he_title": "טור",
-"hash": "cf62dd46b03c2c54",
+"hash": "e4d749a87f409b0c",
 "source_name": "Sefaria"
 },
 {
@@ -15382,7 +15392,7 @@
 },
 {
 "canonical_he_title": "טורי זהב על שולחן ערוך יורה דעה",
-"hash": "eb729343ae76361d",
+"hash": "78a3da904d5d1995",
 "source_name": "Sefaria"
 },
 {
@@ -16412,7 +16422,7 @@
 },
 {
 "canonical_he_title": "ילקוט שמעוני על נ\"ך",
-"hash": "45cf1f18fa015a92",
+"hash": "e11d0db180991da9",
 "source_name": "Sefaria"
 },
 {
@@ -17057,7 +17067,7 @@
 },
 {
 "canonical_he_title": "כד הקמח",
-"hash": "80a3ac43e45ea45e",
+"hash": "e0908a1856e79da4",
 "source_name": "Sefaria"
 },
 {
@@ -17647,7 +17657,7 @@
 },
 {
 "canonical_he_title": "כף החיים על שולחן ערוך אורח חיים",
-"hash": "d6fea84b02e14dc0",
+"hash": "94329bc2b8fa1755",
 "source_name": "Sefaria"
 },
 {
@@ -18517,7 +18527,7 @@
 },
 {
 "canonical_he_title": "לקוטי תורה",
-"hash": "44c2dc22fa7570c5",
+"hash": "92163b30e3e7dd0f",
 "source_name": "Sefaria"
 },
 {
@@ -18572,7 +18582,7 @@
 },
 {
 "canonical_he_title": "מאירי על ברכות",
-"hash": "9d9bad2d32102896",
+"hash": "ef5270405c5f2581",
 "source_name": "Sefaria"
 },
 {
@@ -19546,6 +19556,16 @@
 "source_name": "Sefaria"
 },
 {
+"canonical_he_title": "מחזור קורן ליום הכיפורים; אשכנז",
+"hash": "802d2e53d8009173",
+"source_name": "Sefaria"
+},
+{
+"canonical_he_title": "מחזור קורן לראש השנה; אשכנז",
+"hash": "63af0cedc752e4d2",
+"source_name": "Sefaria"
+},
+{
 "canonical_he_title": "מחזור ראש השנה ספרד",
 "hash": "a8ab24b51bbd3c7e",
 "source_name": "Sefaria"
@@ -19622,7 +19642,7 @@
 },
 {
 "canonical_he_title": "מכילתא דרבי ישמעאל",
-"hash": "f086ee77638b26e8",
+"hash": "2a7ff8f98bafec7e",
 "source_name": "Sefaria"
 },
 {
@@ -20332,7 +20352,7 @@
 },
 {
 "canonical_he_title": "מלבי\"ם על דברים",
-"hash": "796343884b380a3d",
+"hash": "664c8a3e37ac2e86",
 "source_name": "Sefaria"
 },
 {
@@ -20457,7 +20477,7 @@
 },
 {
 "canonical_he_title": "מלבי\"ם על שופטים",
-"hash": "99e983cc2b9476ee",
+"hash": "1bb1f0b0fc6fb80f",
 "source_name": "Sefaria"
 },
 {
@@ -21437,7 +21457,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על ישעיהו",
-"hash": "1af78a4c53444357",
+"hash": "8041c0c72fc0e242",
 "source_name": "Sefaria"
 },
 {
@@ -21522,7 +21542,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על תהילים",
-"hash": "fe628e812f22ba27",
+"hash": "072427ed325c5874",
 "source_name": "Sefaria"
 },
 {
@@ -21592,7 +21612,7 @@
 },
 {
 "canonical_he_title": "מצודת ציון על ישעיהו",
-"hash": "dcbf8bf72d196495",
+"hash": "529a06952c6fc03c",
 "source_name": "Sefaria"
 },
 {
@@ -22517,7 +22537,7 @@
 },
 {
 "canonical_he_title": "משך חכמה",
-"hash": "b5e12097780bac4e",
+"hash": "a6ae53d5282cd2e2",
 "source_name": "Sefaria"
 },
 {
@@ -24417,7 +24437,7 @@
 },
 {
 "canonical_he_title": "נתינה לגר",
-"hash": "031ebb0fb5c8e2ea",
+"hash": "096576f139dd1b1b",
 "source_name": "Sefaria"
 },
 {
@@ -24432,7 +24452,7 @@
 },
 {
 "canonical_he_title": "סדר הדורות",
-"hash": "13e4cae59c472da3",
+"hash": "8bb06183e8d3eb48",
 "source_name": "Sefaria"
 },
 {
@@ -24532,7 +24552,7 @@
 },
 {
 "canonical_he_title": "סידור ספרד",
-"hash": "5f13ac333cee0892",
+"hash": "6cd381eb38ee0772",
 "source_name": "Sefaria"
 },
 {
@@ -24543,6 +24563,11 @@
 {
 "canonical_he_title": "סידור ספרד לשבת",
 "hash": "21424bf2d69dd6e7",
+"source_name": "Sefaria"
+},
+{
+"canonical_he_title": "סידור קורן השלם; אשכנז",
+"hash": "31661cde7cd46a60",
 "source_name": "Sefaria"
 },
 {
@@ -24667,7 +24692,7 @@
 },
 {
 "canonical_he_title": "ספר החינוך",
-"hash": "94aaf1b853f47be9",
+"hash": "5471acddc04d0c2b",
 "source_name": "Sefaria"
 },
 {
@@ -25302,7 +25327,7 @@
 },
 {
 "canonical_he_title": "עירין קדישין",
-"hash": "e29664b9ceb596d8",
+"hash": "347a5a85474a8cd9",
 "source_name": "Sefaria"
 },
 {
@@ -26527,7 +26552,7 @@
 },
 {
 "canonical_he_title": "פרדס רמונים",
-"hash": "585511876af55104",
+"hash": "d71bdaddfe090418",
 "source_name": "Sefaria"
 },
 {
@@ -28127,7 +28152,7 @@
 },
 {
 "canonical_he_title": "קידושין",
-"hash": "18fc60d2d22317ac",
+"hash": "c2ab7745e2a478b0",
 "source_name": "Sefaria"
 },
 {
@@ -28147,7 +28172,7 @@
 },
 {
 "canonical_he_title": "קיצור בעל הטורים על דברים",
-"hash": "15e0a8f81d4a504f",
+"hash": "d3238e5ec3d3d089",
 "source_name": "Sefaria"
 },
 {
@@ -28192,7 +28217,7 @@
 },
 {
 "canonical_he_title": "קצות החושן על שולחן ערוך חושן משפט",
-"hash": "9d896f313ee39c13",
+"hash": "9714c93263e2b203",
 "source_name": "Sefaria"
 },
 {
@@ -29097,7 +29122,7 @@
 },
 {
 "canonical_he_title": "ראשית חכמה",
-"hash": "ba54e34775a30ae1",
+"hash": "2b774377f4b2f146",
 "source_name": "Sefaria"
 },
 {
@@ -29442,7 +29467,7 @@
 },
 {
 "canonical_he_title": "רד\"ק על תהילים",
-"hash": "fdfb3ab1e5850129",
+"hash": "8902007d4e9087b4",
 "source_name": "Sefaria"
 },
 {
@@ -29557,7 +29582,7 @@
 },
 {
 "canonical_he_title": "רי\"ף פסחים",
-"hash": "9b97f434d8cf4344",
+"hash": "3f4228bda818c05e",
 "source_name": "Sefaria"
 },
 {
@@ -29612,7 +29637,7 @@
 },
 {
 "canonical_he_title": "ריטב\"א על כתובות",
-"hash": "d03a4b7b9be6eb85",
+"hash": "d28ec56dc7a01df6",
 "source_name": "Sefaria"
 },
 {
@@ -29672,7 +29697,7 @@
 },
 {
 "canonical_he_title": "ריטב\"א על שבועות",
-"hash": "3757ffff381d367d",
+"hash": "2c2b65ac04f5f3f0",
 "source_name": "Sefaria"
 },
 {
@@ -30312,7 +30337,7 @@
 },
 {
 "canonical_he_title": "רש\"י על ישעיהו",
-"hash": "010a14b1bc00c7b8",
+"hash": "5722c61943f59ee7",
 "source_name": "Sefaria"
 },
 {
@@ -30762,7 +30787,7 @@
 },
 {
 "canonical_he_title": "רשב״א על בבא בתרא",
-"hash": "86122d64bba0ae7e",
+"hash": "911b46518c496c5d",
 "source_name": "Sefaria"
 },
 {
@@ -30797,7 +30822,7 @@
 },
 {
 "canonical_he_title": "רשב״א על כתובות",
-"hash": "469631e0119e3c08",
+"hash": "c467cd33c52b857d",
 "source_name": "Sefaria"
 },
 {
@@ -30842,7 +30867,7 @@
 },
 {
 "canonical_he_title": "רשב״א על שבועות",
-"hash": "aede325084b31fd4",
+"hash": "5140382a420b86f7",
 "source_name": "Sefaria"
 },
 {
@@ -31412,12 +31437,12 @@
 },
 {
 "canonical_he_title": "שולחן ערוך, אבן העזר",
-"hash": "78e35281af53efad",
+"hash": "5ecb2efd8b1d2b8f",
 "source_name": "Sefaria"
 },
 {
 "canonical_he_title": "שולחן ערוך, אורח חיים",
-"hash": "8534a3d37adfeed4",
+"hash": "73e59e100edf8d57",
 "source_name": "Sefaria"
 },
 {
@@ -31427,7 +31452,7 @@
 },
 {
 "canonical_he_title": "שולחן ערוך, חושן משפט",
-"hash": "3d6d8d72aa1964f7",
+"hash": "842d584697867ace",
 "source_name": "Sefaria"
 },
 {
@@ -31917,7 +31942,7 @@
 },
 {
 "canonical_he_title": "שיירי קרבן על תלמוד ירושלמי מגילה",
-"hash": "b83091957c329d2c",
+"hash": "612831e4fa44a4c4",
 "source_name": "Sefaria"
 },
 {
@@ -32207,7 +32232,7 @@
 },
 {
 "canonical_he_title": "שני לוחות הברית",
-"hash": "f6cc3f00cb31d53b",
+"hash": "d1fc2e777fcb04c6",
 "source_name": "Sefaria"
 },
 {
@@ -32602,7 +32627,7 @@
 },
 {
 "canonical_he_title": "שערי אורה",
-"hash": "29a37825b171d209",
+"hash": "1b8118de59e0e488",
 "source_name": "Sefaria"
 },
 {
@@ -33792,7 +33817,7 @@
 },
 {
 "canonical_he_title": "תוספות על בבא מציעא",
-"hash": "85aef4f40585bfc5",
+"hash": "34ff258601c10120",
 "source_name": "Sefaria"
 },
 {
@@ -33857,7 +33882,7 @@
 },
 {
 "canonical_he_title": "תוספות על כתובות",
-"hash": "ef546bd12fff4bd2",
+"hash": "41b0ec4be6980556",
 "source_name": "Sefaria"
 },
 {
@@ -33952,7 +33977,7 @@
 },
 {
 "canonical_he_title": "תוספות על שבת",
-"hash": "0dd21067b70aabe6",
+"hash": "ad4eeb4856e05dc3",
 "source_name": "Sefaria"
 },
 {
@@ -35032,7 +35057,7 @@
 },
 {
 "canonical_he_title": "תלמוד ירושלמי יומא",
-"hash": "1feca3f9a80bfeb6",
+"hash": "6beac49c92fea21a",
 "source_name": "Sefaria"
 },
 {
@@ -35117,7 +35142,7 @@
 },
 {
 "canonical_he_title": "תלמוד ירושלמי פאה",
-"hash": "474e2209ecc2551c",
+"hash": "b63ced05f6a1de38",
 "source_name": "Sefaria"
 },
 {
@@ -35217,7 +35242,7 @@
 },
 {
 "canonical_he_title": "תפארת ישראל",
-"hash": "8fc9b0e31dbdfd0b",
+"hash": "2c466cb699fec3b0",
 "source_name": "Sefaria"
 },
 {
@@ -35512,7 +35537,7 @@
 },
 {
 "canonical_he_title": "תרגום תהלים",
-"hash": "af847caf808e80aa",
+"hash": "3d84741d813bc60f",
 "source_name": "Sefaria"
 },
 {
@@ -35657,37 +35682,37 @@
 },
 {
 "canonical_he_title": "אגרת תימן",
-"hash": "3437d8c9685a35b2",
+"hash": "4c4e08cce7c2858c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - א",
-"hash": "cc306d6f6dfc42b7",
+"hash": "1f9c0802ca439f71",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - ב",
-"hash": "715386f1330ba48e",
+"hash": "8f52addddce265c0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - ג",
-"hash": "e4f14b94b56f392f",
+"hash": "4486a432335b1083",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - ד",
-"hash": "c8ce5116e2997b8f",
+"hash": "287c645bf000e4c0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - ו",
-"hash": "1a76589f53603f11",
+"hash": "9818fd3fce17033d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "בלבבי משכן אבנה - ט",
-"hash": "cab685e1dc391d85",
+"hash": "ce33df340127308e",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -35697,207 +35722,207 @@
 },
 {
 "canonical_he_title": "דרשת הרמבן",
-"hash": "b76f8363ddda90af",
+"hash": "133d6d573960274b",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על בבא בתרא",
-"hash": "c0e336da82156126",
+"hash": "573937975f5aac9f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על בבא מציעא",
-"hash": "6917125700320300",
+"hash": "bda001085a11ff73",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על בבא קמא",
-"hash": "8cd3279bc52fcc1b",
+"hash": "18725b0ea2f1597e",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על ביצה",
-"hash": "ca741e268efb55cc",
+"hash": "818dbae200594152",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על בכורות",
-"hash": "5d8fc33238c5ed17",
+"hash": "e5ba90439e97b003",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על ברכות",
-"hash": "9e699e7c670cffa3",
+"hash": "a0d091295ce628e4",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על גיטין",
-"hash": "e352574511491ecd",
+"hash": "6586f8f5cf634093",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על הוריות",
-"hash": "bd7986ede9e84efd",
+"hash": "e2f2f3f28c245f02",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על זבחים",
-"hash": "5d67160bb80c3b14",
+"hash": "3c51304a5e87186c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על חגיגה",
-"hash": "fe790827f351bfa7",
+"hash": "ee23c03c84d8a3f3",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על חולין",
-"hash": "7cab1037b3706b51",
+"hash": "67f53ccc7dbdcf86",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על יבמות",
-"hash": "e80f17c1babe0d41",
+"hash": "72274f38158c5b7c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על יומא",
-"hash": "5c53a9ed6ca5a9a8",
+"hash": "2a2ada6ad7e3e6bb",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על כריתות",
-"hash": "8046fa3494e2d54c",
+"hash": "f358974614628868",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על כתובות",
-"hash": "16785030dc2b3cba",
+"hash": "c7cdc677797e0bc3",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על מגילה",
-"hash": "3d88bacff4df2a49",
+"hash": "a89e1fa53ca98bee",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על מועד קטן",
-"hash": "25519a70e5a3cdbd",
+"hash": "9d47c71f464a8fba",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על מכות",
-"hash": "dcc02f05600950fb",
+"hash": "622fbabec7907ff4",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על מנחות",
-"hash": "32a33c46fcc3de26",
+"hash": "fbd4ede788841dcb",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על מעילה",
-"hash": "9aaa3a7145c9ae28",
+"hash": "37f21a28cb83f730",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על נדה",
-"hash": "f6a288c52a9622a1",
+"hash": "02163b98beecf60f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על נדרים",
-"hash": "27a45598762373ae",
+"hash": "13da05a1523b5588",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על נזיר",
-"hash": "8ffe66af584b74a0",
+"hash": "1f27ed55f9fef288",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על סוטה",
-"hash": "681354e7ba584bee",
+"hash": "db598e3a8955400c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על סוכה",
-"hash": "b3a0edfea0e2b48b",
+"hash": "0c7d163c3cc77ca7",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על סנהדרין",
-"hash": "63e3e38133a3510b",
+"hash": "33a03b117203fef8",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על עבודה זרה",
-"hash": "5ec5f931ead2c401",
+"hash": "2dafa96ab45ce33a",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על עירובין",
-"hash": "8a7ceece3705cb7a",
+"hash": "353abf9086e93d35",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על ערכין",
-"hash": "21a858e1d780918e",
+"hash": "057f52aa88c68167",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על פסחים",
-"hash": "2aa2bca3f8a757c8",
+"hash": "4d2284a4a0db0cb5",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על קידושין",
-"hash": "2a8fe9b6d6785ecf",
+"hash": "ae35efa16de4f960",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על ראש השנה",
-"hash": "4d4aa9d0e8d20ed6",
+"hash": "7d45bbaf4b455a11",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על שבועות",
-"hash": "37e149fdd79c4967",
+"hash": "03bbd234e704e0a3",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על שבת",
-"hash": "881675a042784988",
+"hash": "c8785e8d4de62111",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על שקלים",
-"hash": "03280e1ed49ae45d",
+"hash": "4c6de3559f409027",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על תמורה",
-"hash": "3d548a3abf120e9b",
+"hash": "c38194acca13dd51",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על תמיד",
-"hash": "f8d53e9b000c2c2a",
+"hash": "b0368a98fac0f191",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "הערות על חברותא על תענית",
-"hash": "36029863c290f846",
+"hash": "0bd444291ef4156f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "וביום השבת",
-"hash": "74c0b21a3f0fc077",
+"hash": "aef57ffa5da468a0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על בבא בתרא",
-"hash": "841d87134dd63261",
+"hash": "e8adfe667059789f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -35907,237 +35932,237 @@
 },
 {
 "canonical_he_title": "חברותא על בבא קמא",
-"hash": "d4c9ab2a44a5c68b",
+"hash": "d39733ed6862194e",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על ביצה",
-"hash": "68968ae8f21bb8a9",
+"hash": "9e2853224f9b2bea",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על בכורות",
-"hash": "e8a409e8f2dbc950",
+"hash": "67afec63af0533ee",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על ברכות",
-"hash": "05213a0e6b49c7b4",
+"hash": "9e69542802f9391a",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על גיטין",
-"hash": "4a6b83ef1d8b84cc",
+"hash": "3c93adbdc0a9ca37",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על הוריות",
-"hash": "958d071510e62180",
+"hash": "40496f125e23143f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על זבחים",
-"hash": "a88bf0ff910af9a6",
+"hash": "6e686a58994b594d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על חגיגה",
-"hash": "edba0aedeb3dfdda",
+"hash": "96afd5647410e879",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על חולין",
-"hash": "fcef04812f3f27e5",
+"hash": "563b775a346f92f4",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על יבמות",
-"hash": "651db9c77a657933",
+"hash": "13b950f9a4c9692d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על יומא",
-"hash": "f3f2279f3414de35",
+"hash": "f16ad1a1c5e4de59",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על כריתות",
-"hash": "44b8d3dc9450f7ef",
+"hash": "b3d25b1a28facd2b",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על כתובות",
-"hash": "f885c50ce045cdb5",
+"hash": "05cde2f083745213",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על מגילה",
-"hash": "cfff7a4289618076",
+"hash": "f53f3c867015cf14",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על מועד קטן",
-"hash": "55f048741b56324b",
+"hash": "d23edaaab04ff6f0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על מכות",
-"hash": "7e3d3a5c9a5e0fe9",
+"hash": "b65bc227e3b8c09f",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על מנחות",
-"hash": "8d088bed981585b9",
+"hash": "3a0c33d12642dbd3",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על מעילה",
-"hash": "dcf56dbd4c270a5e",
+"hash": "b5663188d472f3d5",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על נדה",
-"hash": "b1eb317cb64a0696",
+"hash": "451939140fd1db30",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על נדרים",
-"hash": "77dd18fbcf2fd2d6",
+"hash": "28e6e79ad6f02b91",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על נזיר",
-"hash": "d2c3f159c9496e3e",
+"hash": "a6d425fe0286c55c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על סוטה",
-"hash": "a74564d686df6be1",
+"hash": "727153bfac357945",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על סוכה",
-"hash": "79552e6b5c6ae986",
+"hash": "1a5c210c1b2d1589",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על סנהדרין",
-"hash": "e8c75aa937f90243",
+"hash": "70a6a4c5540371c5",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על עבודה זרה",
-"hash": "f81659e2cd115b8d",
+"hash": "4c2e4fa21a061d7d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על עירובין",
-"hash": "95ac7274a29bfdc0",
+"hash": "cfe2d49b0b3633a0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על ערכין",
-"hash": "3aa26fd363768173",
+"hash": "0465fc06b782da8c",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על פסחים",
-"hash": "d60174bc9be33f9a",
+"hash": "ab9d397435a43368",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על קידושין",
-"hash": "ca3e128de97398d2",
+"hash": "59054ed145df4438",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על ראש השנה",
-"hash": "37f8480ddb930a96",
+"hash": "5f3037c023b04596",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על שבועות",
-"hash": "a8c1395737699290",
+"hash": "4ddeb4213e5c5cc9",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על שבת",
-"hash": "a8e34d448a1455e4",
+"hash": "bd52df640368f175",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על שקלים",
-"hash": "ee66957421cc09e3",
+"hash": "bf181086b294bcc5",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על תמורה",
-"hash": "743a183c415520da",
+"hash": "51cfa467bdb6c445",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על תמיד",
-"hash": "3cef397079195540",
+"hash": "8e4398de862ee274",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חברותא על תענית",
-"hash": "d6dfaa57dc438214",
+"hash": "3e0421106ba20527",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חמדת ימים א",
-"hash": "0b4625026b571a1e",
+"hash": "9b70159e0cd63013",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חמדת ימים ב",
-"hash": "45cce248d22617b8",
+"hash": "e2615b06421ff825",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חמדת ימים ג",
-"hash": "ffbb72d922485dfb",
+"hash": "f303664dcbbb34f0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "מבוא שערי חמדה",
-"hash": "9bb857bf3a4a6efc",
+"hash": "999fc8df046be606",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "מנורת המאור (אבוהב)",
-"hash": "465bd2638273099b",
+"hash": "035294d6cd294b20",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "מפתח ענייני התנך",
-"hash": "6cfa48aa7582f447",
+"hash": "a0c6ffc79e2caffe",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "ריבבן על שקלים",
-"hash": "a115eca7c4ebd9b0",
+"hash": "24015e36cb064ff0",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "שות בכל דרכיך דעהו",
-"hash": "e6f3c73c644bc144",
+"hash": "663897188192275e",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "שות גם אני אודך - א",
-"hash": "6e38a8ece8f0b0a2",
+"hash": "de1944bbfe63b48d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "שות גם אני אודך - ב",
-"hash": "71d867df6a298319",
+"hash": "fea3ac99084086ba",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "שות גם אני אודך - ג",
-"hash": "0cc9624df2f7e27e",
+"hash": "59138466774d4797",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -36322,7 +36347,7 @@
 },
 {
 "canonical_he_title": "דברי חיים",
-"hash": "f23e54c087c61946",
+"hash": "2b37e1d5e7846f92",
 "source_name": "wikiJewishBooksToOtzaria"
 },
 {
@@ -36471,5 +36496,5 @@
 "source_name": "wikisourceToOtzaria"
 }
 ],
-"engine_fingerprint": "dump=44e55916743983b8;engine_src=ac112bd653b90cd9;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
+"engine_fingerprint": "dump=44e55916743983b8;engine_src=6884694f0e064e18;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=10b6deacbc183772;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=cc3381990f7079cf;policy=drop;bavli=0"
 }
