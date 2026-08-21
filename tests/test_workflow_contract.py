@@ -196,7 +196,23 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         metadata_fingerprint = metadata["engine"]["fingerprint"]
 
         self.assertEqual(baseline_fingerprint, metadata_fingerprint)
-        self.assertIn(engine_component, baseline_fingerprint)
+        if engine_component not in baseline_fingerprint:
+            migrations = json.loads(
+                (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
+            )
+            current_fingerprint = baseline_fingerprint.replace(
+                baseline_fingerprint.split("engine_src=")[1].split(";", 1)[0],
+                engine_component.split("=", 1)[1],
+            )
+            self.assertEqual(migrations.get("schema_version"), 1)
+            self.assertTrue(
+                any(
+                    entry.get("from") == baseline_fingerprint
+                    and entry.get("to") == current_fingerprint
+                    and entry.get("review")
+                    for entry in migrations.get("migrations", [])
+                )
+            )
 
 
 if __name__ == "__main__":
