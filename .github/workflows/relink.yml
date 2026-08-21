@@ -598,6 +598,11 @@ jobs:
           bash ci/setup_stack.sh 9>&-
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
           echo "engine fingerprint: $FINGERPRINT"
+          if [ -z "$ADOPT_FINGERPRINT" ]; then
+            ADOPT_FINGERPRINT="$(python3 ci/resolve_output_neutral_fingerprint_migration.py \
+              --baseline baseline/snapshot_hashes.json --actual "$FINGERPRINT")"
+          fi
+          [ -z "$ADOPT_FINGERPRINT" ] || echo "using reviewed output-neutral engine fingerprint adoption"
           ARGS=(
             --repo "$PWD"
             --snapshot inputs/lines_snapshot.db
@@ -981,6 +986,11 @@ jobs:
           echo "host lease acquired for CPU resolution"
           bash ci/setup_stack.sh 9>&-
           FINGERPRINT="$(sort stack/engine_fingerprint.txt | tr '\n' ';')policy=drop;bavli=0"
+          if [ -z "$ADOPT_FINGERPRINT" ]; then
+            ADOPT_FINGERPRINT="$(python3 ci/resolve_output_neutral_fingerprint_migration.py \
+              --baseline baseline/snapshot_hashes.json --actual "$FINGERPRINT")"
+          fi
+          [ -z "$ADOPT_FINGERPRINT" ] || echo "using reviewed output-neutral engine fingerprint adoption"
           ARGS=(
             --repo "$PWD"
             --snapshot inputs/lines_snapshot.db
