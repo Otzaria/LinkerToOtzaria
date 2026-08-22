@@ -1,23 +1,20 @@
-name: Recovery guard · Provision pending Kaggle intent (not a build stage)
-run-name: kaggle-provisioner intent-run=${{ inputs.intent_run_id || 'oldest' }}
+name: Recovery guard · Provision exact Kaggle intent (not a build stage)
+run-name: kaggle-provisioner intent-run=${{ inputs.intent_run_id }}
 
 on:
   workflow_dispatch:
     inputs:
       intent_run_id:
-        required: false
+        description: 'Exact durable kaggle-relink intake run to provision'
+        required: true
         type: string
-        default: ''
-  schedule:
-    - cron: '3,13,23,33,43,53 * * * *'
 
 permissions: {}
 
 concurrency:
   group: kaggle-provisioner
   cancel-in-progress: false
-  # Ticks and wake-ups are interchangeable observations; the immutable intake
-  # artifacts are the queue.  Keep at most one pending scanner.
+  # Exact event-driven wake-ups share one singleton provisioner.
 
 jobs:
   provision:
@@ -30,7 +27,7 @@ jobs:
       group: linker-relink
       cancel-in-progress: false
       # This group is shared with the hours-long relink child. Without an
-      # unbounded pending queue, a scheduled provisioner tick can replace the
+      # unbounded pending queue, a later exact provisioner wake can replace the
       # pending slot that currently represents the active JIT handoff and GitHub
       # cancels the running relink (observed on run 29823214655).
       queue: max
@@ -44,5 +41,11 @@ jobs:
           token: ${{ secrets.PIPELINE_TOKEN }}
           persist-credentials: false
       - run: pip install --quiet kaggle
-      - name: Claim at most one durable pending intent
-        run: bash scripts/provision_kaggle_intent.sh
+      - name: Provision the exact durable intent
+        run: |
+          set -euo pipefail
+          [[ "$INTENT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::intent_run_id must be a positive integer"
+            exit 1
+          }
+          bash scripts/provision_kaggle_intent.sh

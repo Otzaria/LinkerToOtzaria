@@ -92,7 +92,7 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" CHILD
   /bin/bash "$ROOT/scripts/provision_kaggle_intent.sh" >/dev/null
 test -s "$TMP/dispatch"
 grep -q -- "--relink-request-id $(printf '%064d' 0 | tr 0 b)" "$TMP/dispatch"
-echo "ok   failed historical child is consumed without poisoning scheduled scans"
+echo "ok   failed historical child is consumed without poisoning explicit recovery"
 
 rm -f "$TMP/dispatch"
 rc=0
@@ -193,9 +193,13 @@ if "      queue: max" not in job:
     raise SystemExit("shared relink mutex can replace/cancel an active handoff")
 header = workflow.split("jobs:\n", 1)[0]
 if "queue: max" in header:
-    raise SystemExit("interchangeable provisioner ticks must not accumulate as durable intents")
+    raise SystemExit("exact provisioner wake-ups must not accumulate as durable intents")
+if "schedule:" in header or "cron:" in header:
+    raise SystemExit("provisioner must be event-driven, not periodically scheduled")
+if "required: true" not in header:
+    raise SystemExit("exact intent_run_id must be required")
 PY
 echo "ok   provisioner holds relink mutex through admission and dispatch"
 
 grep -q 'created_at >=.*RELEASE_INTENT_ROLLOUT_AT' "$ROOT/scripts/provision_kaggle_intent.sh"
-echo "ok   scheduled scanner excludes pre-Release legacy intakes"
+echo "ok   fallback scanner excludes pre-Release legacy intakes"

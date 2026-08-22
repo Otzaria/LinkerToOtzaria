@@ -7,7 +7,7 @@ REPO=${GITHUB_REPOSITORY:-Otzaria/LinkerToOtzaria}
 PARENT_REPO=${KAGGLE_PARENT_REPO:-Otzaria/SeforimLibrary}
 DISPATCH_SCRIPT=${KAGGLE_DISPATCH_SCRIPT:-$HERE/dispatch_kaggle_relink.sh}
 # Successful intake runs created before this instant predate the Release-based
-# intent contract. Scheduled scans must not fail forever on those legacy runs;
+# intent contract. Fallback scans must not fail forever on those legacy runs;
 # an explicit INTENT_RUN_ID remains a fail-loud forensic/recovery path.
 RELEASE_INTENT_ROLLOUT_AT=${RELEASE_INTENT_ROLLOUT_AT:-2026-08-13T23:25:42Z}
 TMP=$(mktemp -d)
@@ -187,7 +187,7 @@ PY
     # A short-lived pre-rollout bug allowed a failed child to be followed by a
     # recovery child with the same request id. Those historical runs are all
     # terminal and therefore cannot execute or be dispatched again; failing
-    # every scheduled scan forever would only poison admission for newer work.
+      # every fallback scan forever would only poison admission for newer work.
     # A duplicate set containing even one live child remains an invariant
     # violation and fails loudly — never choose or cancel one by guesswork.
     live_duplicates=$(printf '%s\n' "$matches" | awk -F'\t' '$2 != "completed"' | awk 'NF' | wc -l | tr -d ' ')
@@ -224,7 +224,7 @@ PY
       fi
       # A durable intent is at-most-once. A failed child consumes it just as a
       # successful child does; recovery must mint a new correlated intent. Do not
-      # let one historical failure poison every scheduled queue scan forever.
+      # let one historical failure poison every fallback queue scan forever.
       echo "::warning::consumed intent $request_id has terminal child $rid ($conclusion); skipping"
       continue
     fi
@@ -233,7 +233,14 @@ PY
     exit 1
   fi
   active=$(count_runs_active "$REPO" relink.yml)
-  [ "$active" -eq 0 ] || { echo "linker busy; intent $request_id remains durable for the next tick"; exit 0; }
+  if [ "$active" -ne 0 ]; then
+    if [ -n "${INTENT_RUN_ID:-}" ]; then
+      echo "::error::linker is busy; exact intent $request_id was not provisioned"
+      exit 1
+    fi
+    echo "linker busy; intent $request_id remains durable for a later explicit invocation"
+    exit 0
+  fi
   args=(--relink-request-id "$request_id")
   [ -z "$library_run_id" ] || args+=(--library-run-id "$library_run_id")
   [ -z "$parent_attempt" ] || args+=(--parent-run-attempt "$parent_attempt")
