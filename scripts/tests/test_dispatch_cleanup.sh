@@ -18,7 +18,7 @@
 #   • standalone (operator) → 64-hex id derived, failure cancels the right child.
 # NOT executable offline (canary-only, by design): queue:max survival of 3 rapid
 # dispatches, rerun-gets-new-request-id across real attempts, late-appearing child
-# reaped by the scheduled reconciler on real infrastructure.
+# reaped by the event-driven reconciler on real infrastructure.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$HERE/../dispatch_kaggle_relink.sh"
@@ -191,6 +191,13 @@ export MOCK_LOG="$WORK/t8.log"; reset_state
 rc=0; OUT=$( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_RC=1; bash "$SCRIPT" 2>&1 ) || rc=$?
 check "standalone: derived 64-hex id + cancel on failure" \
   test "$rc" -ne 0 -a "$(cancels)" -eq 1 -a -n "$(grep -oE 'request=[0-9a-f]{64}' <<<"$OUT" | head -1)"
+
+export MOCK_LOG="$WORK/t9.log"; reset_state
+rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_KAGGLE_RC=1 MOCK_CANCEL_RC=1; \
+  bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
+check "failed inline cancel → event-driven reconciler woken once" \
+  test "$rc" -ne 0 -a \
+    "$(grep -c 'workflow run reconcile-pipeline.yml' "$MOCK_LOG")" -eq 1
 
 echo "----"
 echo "dispatch cleanup: $PASS passed, $FAIL failed"

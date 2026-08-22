@@ -5,6 +5,35 @@ import unittest
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_recovery_guards_are_event_driven_and_exact(self):
+        root = Path(__file__).parents[1]
+        provision = (root / ".github/workflows/kaggle-provisioner.yml").read_text(
+            encoding="utf-8"
+        )
+        rerun = (root / ".github/workflows/kaggle-rerun-provisioner.yml").read_text(
+            encoding="utf-8"
+        )
+        reconcile = (root / ".github/workflows/reconcile-pipeline.yml").read_text(
+            encoding="utf-8"
+        )
+        intake = (root / ".github/workflows/kaggle-relink.yml").read_text(
+            encoding="utf-8"
+        )
+
+        for workflow in (provision, rerun, reconcile):
+            header = workflow.split("jobs:\n", 1)[0]
+            self.assertNotIn("schedule:", header)
+            self.assertNotIn("cron:", header)
+            self.assertIn("workflow_dispatch:", header)
+        self.assertIn("intent_run_id:\n        description:", provision)
+        self.assertIn("required: true", provision)
+        self.assertIn('provision_kaggle_rerun.sh --run-id "$RUN_ID"', rerun)
+        self.assertIn("required: true", rerun)
+        wake = intake.split("- name: Wake singleton provisioner", 1)[1]
+        self.assertIn("exact provisioner could not be started", wake)
+        self.assertIn("exit 1", wake)
+        self.assertNotIn("scheduled tick", wake)
+
     def test_release_publisher_rejects_asset_names_github_would_normalize(self):
         helper = (
             Path(__file__).parents[1] / "ci/publish_release_handoff.sh"

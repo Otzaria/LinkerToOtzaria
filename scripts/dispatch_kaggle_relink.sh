@@ -223,9 +223,18 @@ cancel_child() {
     fi
     sleep 5  # API eventual consistency — the fresh run may not be listed yet
   done
-  # Never flip the failure into success; leave a structured marker. The failed
-  # dispatcher run itself is what reconcile-pipeline keys on to reap the child.
-  echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID child_run_id=${CHILD_RUN_ID:-unknown} query_ok=$query_ok cancel failed — reconcile-pipeline will reap it" >&2
+  # Never flip the original failure into success. Wake the event-driven reconciler
+  # immediately; the failed parent completion will wake it once more if this
+  # dispatcher dies before the child becomes visible.
+  local wake_attempt
+  for wake_attempt in 1 2 3; do
+    if gh workflow run reconcile-pipeline.yml -R "$REPO"; then
+      echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID child_run_id=${CHILD_RUN_ID:-unknown} query_ok=$query_ok cancel failed — event-driven reconciliation dispatched" >&2
+      return 0
+    fi
+    [ "$wake_attempt" = 3 ] || sleep "$((wake_attempt * 5))"
+  done
+  echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID child_run_id=${CHILD_RUN_ID:-unknown} query_ok=$query_ok cancel failed and reconciliation dispatch failed" >&2
   return 0
 }
 on_exit()   { local ec=$?; trap - EXIT HUP INT TERM; if [ "$ec" -ne 0 ]; then terminate_active; cancel_child; fi; exit "$ec"; }

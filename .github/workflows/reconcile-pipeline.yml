@@ -1,4 +1,4 @@
-# Scheduled reconciler — the RECOVERY path of the relink identity contract.
+# Event-driven reconciler — the RECOVERY path of the relink identity contract.
 #
 # The fast path is inline: the SeforimLibrary build cancels its own dispatcher/child by
 # exact request-id title on any exit, and the kaggle dispatcher's trap cancels the child
@@ -8,20 +8,19 @@
 # superseding an attempt whose runs are still live. Logic lives in
 # scripts/reconcile_pipeline.sh (env-injectable repos → testable with a mocked gh).
 #
-# Every action is idempotent and keyed on the per-attempt request id, so a tick can
-# never touch a live attempt's runs or anything manual/standalone.
+# It is dispatched after a failed/cancelled Seforim build, or explicitly by the
+# operator. Every action is idempotent and keyed on the per-attempt request id, so
+# an invocation can never touch a live attempt's runs or anything manual/standalone.
 name: Recovery guard · Reconcile Linker pipeline (not a build stage)
 run-name: reconcile-pipeline
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 permissions: {}
 
-# Latest-only intent: ticks are identical; one pending is plenty. Never cancel a
-# running tick mid-cancel — its actions are idempotent but a red half-tick is noise.
+# Invocations are interchangeable; one pending is plenty. Never cancel a running
+# reconciliation mid-cancel — its actions are idempotent but a red half-run is noise.
 concurrency:
   group: reconcile-pipeline
   cancel-in-progress: false

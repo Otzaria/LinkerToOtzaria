@@ -216,7 +216,5 @@ jobs:
               -f intent_run_id="$INTAKE_RUN_ID" && exit 0
             [ "$attempt" = 3 ] || sleep "$((attempt * 5))"
           done
-          # The release handoff is already durable and the scheduled provisioner scans it.
-          # A wake-up outage must not turn this release-bearing intake run red,
-          # because the scanner intentionally ignores failed pre-persist runs.
-          echo "::warning::intent persisted but immediate provisioner wake failed; scheduled tick will recover it"
+          echo "::error::intent persisted, but the exact provisioner could not be started after three attempts"
+          exit 1

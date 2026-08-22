@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reconciler — the RECOVERY path of the relink identity contract (the parent build's
-# inline cleanup is the fast path). Runs every 15 minutes from reconcile-pipeline.yml.
+# inline cleanup is the fast path). Invoked after a failed/cancelled parent build,
+# or manually, from reconcile-pipeline.yml.
 #
 # For every LIVE (pre-terminal) relink.yml / kaggle-relink.yml run stamped with a
 # serial identity ("<wf> request=<64-hex> parent=<run_id>:<attempt>"), fetch the parent
@@ -22,11 +23,11 @@
 # FAIL-CLOSED LISTING: run enumeration goes through lib/gh_runs.sh — full REST
 # pagination over every pre-terminal status (an old orphan can never be pushed out
 # of a "-L 100" window by fresh completed runs), and ANY listing/API failure turns
-# the tick red instead of reporting "0 orphans" on a broken token. Parent JSON is
+# the invocation red instead of reporting "0 orphans" on a broken token. Parent JSON is
 # validated (known status, positive-int run_attempt) before any decision.
 #
 # Every action is idempotent (cancel of a cancelling run is a no-op), so overlapping
-# ticks or a manual dispatch beside the schedule are safe.
+# failure notifications or a simultaneous manual dispatch are safe.
 set -euo pipefail
 
 # shellcheck source=lib/gh_runs.sh
@@ -57,7 +58,7 @@ handle_run() {
       gh run cancel "$rid" -R "$REPO" || { echo "::warning::cancel of $wf/$rid failed"; FAILURES=$((FAILURES+1)); return 0; }
       REAPED=$((REAPED+1))
     else
-      echo "::warning::parent lookup for $wf/$rid failed transiently — left for the next tick"
+      echo "::warning::parent lookup for $wf/$rid failed transiently — left for the next invocation"
       cat "$TMP/parent.err" >&2
       FAILURES=$((FAILURES+1))
     fi
@@ -68,7 +69,7 @@ handle_run() {
   # status, or a non-numeric attempt must never drive a cancel decision.
   local pstatus pcurrent pconclusion
   if ! jq -e . "$TMP/parent.json" > /dev/null 2>&1; then
-    echo "::warning::parent $prun returned unparseable JSON — left for the next tick"
+    echo "::warning::parent $prun returned unparseable JSON — left for the next invocation"
     FAILURES=$((FAILURES+1)); return 0
   fi
   pstatus=$(jq -r '.status // empty' "$TMP/parent.json")
@@ -76,11 +77,11 @@ handle_run() {
   pconclusion=$(jq -r '.conclusion // empty' "$TMP/parent.json")
   case "$pstatus" in
     requested|waiting|pending|queued|in_progress|completed) ;;
-    *) echo "::warning::parent $prun has unrecognized status '$pstatus' — left for the next tick"
+    *) echo "::warning::parent $prun has unrecognized status '$pstatus' — left for the next invocation"
        FAILURES=$((FAILURES+1)); return 0 ;;
   esac
   if ! [[ "$pcurrent" =~ ^[1-9][0-9]*$ ]]; then
-    echo "::warning::parent $prun has non-numeric run_attempt '$pcurrent' — left for the next tick"
+    echo "::warning::parent $prun has non-numeric run_attempt '$pcurrent' — left for the next invocation"
     FAILURES=$((FAILURES+1)); return 0
   fi
 
@@ -116,10 +117,10 @@ handle_run() {
 
 collect_workflow() {
   local wf="$1" rows rid status title
-  # Capture-then-parse: a listing failure must surface as a RED tick, never as an
+  # Capture-then-parse: a listing failure must surface as a RED invocation, never as an
   # empty scan (the old process-substitution form swallowed gh's exit status).
   if ! rows=$(list_runs_active "$REPO" "$wf"); then
-    echo "::error::listing active $wf runs failed — cannot reconcile blind this tick"
+    echo "::error::listing active $wf runs failed — cannot reconcile blind"
     FAILURES=$((FAILURES+1))
     return 0
   fi
@@ -143,7 +144,7 @@ if [ "$FAILURES" -gt 0 ]; then
 fi
 
 # Broken invariant: one request id on more than one live run of one workflow. Never
-# guess a survivor — turn the tick red so a human (or the parent build's own
+# guess a survivor — turn the invocation red so a human (or the parent build's own
 # refuse-to-guess) resolves it.
 DUPES=$(sort "$SEEN_IDS_FILE" | uniq -d)
 if [ -n "$DUPES" ]; then
@@ -159,7 +160,7 @@ for wf in relink.yml kaggle-relink.yml; do
   done < "$TMP/$wf.tsv"
 done
 if [ "$FAILURES" -gt 0 ]; then
-  echo "::error::$FAILURES reconcile action(s) failed — will retry next tick"
+  echo "::error::$FAILURES reconcile action(s) failed — retry with an exact manual invocation"
   exit 1
 fi
 echo "reconcile complete: $REAPED orphan(s) reaped."
