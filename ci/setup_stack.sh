@@ -12,7 +12,8 @@
 # mixing engine versions inside the artifact store.
 set -euo pipefail
 
-STACK="${GITHUB_WORKSPACE:-$PWD}/stack"
+WORKSPACE_STACK="${GITHUB_WORKSPACE:-$PWD}/stack"
+STACK="${LINKER_STACK_DIR:-$WORKSPACE_STACK}"
 CACHE="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}"
 SEF="$STACK/Sefaria-Project"
 GPU="$STACK/gpu-server"
@@ -26,6 +27,11 @@ case "$STACK_ROLE" in
   *) echo "::error::LINKER_STACK_ROLE must be full, ner, or resolver"; exit 2 ;;
 esac
 mkdir -p "$STACK" "$CACHE"
+if [ "$STACK" != "$WORKSPACE_STACK" ]; then
+  [[ "$STACK" = /* ]] || { echo "::error::LINKER_STACK_DIR must be an absolute path"; exit 1; }
+  rm -rf "$WORKSPACE_STACK"
+  ln -s "$STACK" "$WORKSPACE_STACK"
+fi
 
 # Kaggle chooses the mount directory for a kernel output. Discover by the pinned
 # archive filename under the fixed input root and require exactly one match;
@@ -78,12 +84,57 @@ echo "using $PYBIN ($($PYBIN --version))"
 url_key() { printf '%s' "$1" | sha256sum | cut -c1-12; }
 
 # ── 1. Sefaria-Project + gpu-server checkouts ────────────────────────────────
-# Optional pins via SEFARIA_COMMIT / GPU_SERVER_COMMIT; unpinned drift is still safe —
-# the fingerprint below changes with HEAD and triggers a full relink.
-[ -d "$SEF" ] || git clone https://github.com/Sefaria/Sefaria-Project "$SEF"
-[ -d "$GPU" ] || git clone https://github.com/Sefaria/gpu-server "$GPU"
-[ -z "${SEFARIA_COMMIT:-}" ] || { git -C "$SEF" checkout -- .; git -C "$SEF" -c advice.detachedHead=false checkout "$SEFARIA_COMMIT"; }
-[ -z "${GPU_SERVER_COMMIT:-}" ] || git -C "$GPU" -c advice.detachedHead=false checkout "$GPU_SERVER_COMMIT"
+# NetFree may block Git's smart-HTTP/archive front-end while allowing the authenticated
+# GitHub REST API used by Actions. The local runner therefore materializes exact pinned
+# commits from REST tarballs and caches them permanently. Other runners retain the
+# existing git transport. The explicit pin (validated against the API) remains the source
+# identity; the synthetic local git commit is used only so our patch application stays
+# idempotent.
+SOURCE_TRANSPORT="${LINKER_SOURCE_TRANSPORT:-git}"
+materialize_api_archive() { # $1 owner/repo, $2 full commit, $3 destination
+  local repo="$1" commit="$2" destination="$3" marker archive temporary resolved
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::api-archive transport requires a full commit for $repo"; exit 1; }
+  marker="$destination/.otzaria-source-commit"
+  if [ "$(cat "$marker" 2>/dev/null)" = "$commit" ]; then return 0; fi
+  resolved="$(gh api "repos/$repo/commits/$commit" --jq .sha)"
+  [ "$resolved" = "$commit" ] || { echo "::error::GitHub resolved $repo@$commit to $resolved"; exit 1; }
+  mkdir -p "$CACHE/source-archives"
+  archive="$CACHE/source-archives/${repo//\//-}-$commit.tar.gz"
+  if [ ! -s "$archive" ]; then
+    temporary="$archive.part-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}"
+    gh api -H 'Accept: application/vnd.github+json' "repos/$repo/tarball/$commit" > "$temporary"
+    tar -tzf "$temporary" >/dev/null
+    mv "$temporary" "$archive"
+  fi
+  rm -rf "$destination"
+  mkdir -p "$destination"
+  tar -xzf "$archive" --strip-components=1 -C "$destination"
+  git -C "$destination" init -q
+  git -C "$destination" add -A
+  git -C "$destination" -c user.name=Otzaria -c user.email=actions@otzaria.invalid \
+    commit -qm "Materialize $repo@$commit"
+  printf '%s' "$commit" > "$marker"
+}
+source_identity() { # $1 checkout, $2 optional pin
+  if [ -n "$2" ]; then printf '%s' "$2"; else git -C "$1" rev-parse HEAD; fi
+}
+if [ "$SOURCE_TRANSPORT" = api-archive ]; then
+  [ -n "${SEFARIA_COMMIT:-}" ] && [ -n "${GPU_SERVER_COMMIT:-}" ] || {
+    echo "::error::api-archive transport requires SEFARIA_COMMIT and GPU_SERVER_COMMIT"; exit 1;
+  }
+  materialize_api_archive Sefaria/Sefaria-Project "$SEFARIA_COMMIT" "$SEF"
+  materialize_api_archive Sefaria/gpu-server "$GPU_SERVER_COMMIT" "$GPU"
+elif [ "$SOURCE_TRANSPORT" = git ]; then
+  [ -d "$SEF" ] || git clone https://github.com/Sefaria/Sefaria-Project "$SEF"
+  [ -d "$GPU" ] || git clone https://github.com/Sefaria/gpu-server "$GPU"
+  [ -z "${SEFARIA_COMMIT:-}" ] || { git -C "$SEF" checkout -- .; git -C "$SEF" -c advice.detachedHead=false checkout "$SEFARIA_COMMIT"; }
+  [ -z "${GPU_SERVER_COMMIT:-}" ] || git -C "$GPU" -c advice.detachedHead=false checkout "$GPU_SERVER_COMMIT"
+else
+  echo "::error::LINKER_SOURCE_TRANSPORT must be git or api-archive"
+  exit 1
+fi
+SEFARIA_SOURCE_ID="$(source_identity "$SEF" "${SEFARIA_COMMIT:-}")"
+GPU_SOURCE_ID="$(source_identity "$GPU" "${GPU_SERVER_COMMIT:-}")"
 
 # Resolver fixes we maintain on top of the pin (see the patch header): two upstream
 # crashes (empty-section pad, None-ref dedup) that took whole LINES down — with
@@ -99,6 +150,23 @@ fi
 # rebuilds it from scratch — a SEFARIA_COMMIT bump must never run on a stale venv.
 SEF_VENV_BASE_ID="$($PYBIN --version 2>&1):$(sha256sum "$SEF/requirements.txt" | cut -c1-12):${SEFARIA_COMMIT:-head}"
 GPU_VENV_ID="$($PYBIN --version 2>&1):$(sha256sum "$GPU/app/requirements.txt" | cut -c1-12):${GPU_SERVER_COMMIT:-head}"
+GPU_VENV_EXTERNAL="${LINKER_GPU_VENV:-}"
+ACCELERATOR_PROFILE="${LINKER_ACCELERATOR_PROFILE:-}"
+if [ -n "$GPU_VENV_EXTERNAL" ] || [ -n "$ACCELERATOR_PROFILE" ]; then
+  [ -n "$GPU_VENV_EXTERNAL" ] && [ -n "$ACCELERATOR_PROFILE" ] || {
+    echo "::error::LINKER_GPU_VENV and LINKER_ACCELERATOR_PROFILE must be set together"
+    exit 1
+  }
+  [[ "$GPU_VENV_EXTERNAL" = /* ]] || {
+    echo "::error::LINKER_GPU_VENV must be an absolute path"
+    exit 1
+  }
+  [[ "$ACCELERATOR_PROFILE" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || {
+    echo "::error::LINKER_ACCELERATOR_PROFILE has an unsafe value"
+    exit 1
+  }
+  GPU_VENV_ID="$GPU_VENV_ID:$ACCELERATOR_PROFILE"
+fi
 SEF_VENV_ID="$SEF_VENV_BASE_ID"
 CANONICAL_PYTHON_RUNTIME_ID=
 if [ "$STACK_ROLE" = resolver ]; then
@@ -140,7 +208,17 @@ if [ ! -x "$SEF/.venv/bin/python" ] || [ "$(cat "$SEF/.venv/.identity" 2>/dev/nu
   if [ "$STACK_ROLE" = resolver ]; then
     "$SEF/.venv/bin/pip" install -r "$RUNTIME_LOCK_SEFARIA"
   else
-    "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
+    if [ "$SOURCE_TRANSPORT" = api-archive ]; then
+      rewritten="$STACK/sefaria-requirements-api.txt"
+      sed \
+        -e 's#git+https://github.com/Sefaria/elasticsearch-dsl-py@v8.0.0#https://api.github.com/repos/Sefaria/elasticsearch-dsl-py/tarball/v8.0.0#' \
+        -e 's#git+https://github.com/Sefaria/LLM@v1.3.6#https://api.github.com/repos/Sefaria/LLM/tarball/v1.3.6#' \
+        -e 's#git+https://github.com/Sefaria/ne_span.git@v1.0.2#https://api.github.com/repos/Sefaria/ne_span/tarball/v1.0.2#' \
+        "$SEF/requirements.txt" > "$rewritten"
+      "$SEF/.venv/bin/pip" install -r "$rewritten"
+    else
+      "$SEF/.venv/bin/pip" install -r "$SEF/requirements.txt"
+    fi
     "$SEF/.venv/bin/pip" install "numpy<2"
   fi
   printf '%s' "$SEF_VENV_ID" > "$SEF/.venv/.identity"
@@ -226,8 +304,23 @@ SUBREF_MODEL=$(model_path he_subref_ner)
 
 # ── 5. gpu-server venv + generated config + gunicorn on :5051 ────────────────
 # app/local_config.py is generated here (it is machine-specific, never committed).
-if [ "$STACK_ROLE" != resolver ] && \
-   { [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; }; then
+if [ "$STACK_ROLE" != resolver ] && [ -n "$GPU_VENV_EXTERNAL" ]; then
+  [ -x "$GPU_VENV_EXTERNAL/bin/python" ] && [ -x "$GPU_VENV_EXTERNAL/bin/gunicorn" ] || {
+    echo "::error::persistent GPU venv is incomplete: $GPU_VENV_EXTERNAL"
+    exit 1
+  }
+  [ "$(cat "$GPU_VENV_EXTERNAL/.identity" 2>/dev/null)" = "$GPU_VENV_ID" ] || {
+    echo "::error::persistent GPU venv identity differs from the pinned gpu-server/profile"
+    echo "expected: $GPU_VENV_ID"
+    echo "actual:   $(cat "$GPU_VENV_EXTERNAL/.identity" 2>/dev/null || echo missing)"
+    exit 1
+  }
+  if [ "$(readlink -f "$GPU/.venv" 2>/dev/null || true)" != "$(readlink -f "$GPU_VENV_EXTERNAL")" ]; then
+    rm -rf "$GPU/.venv"
+    ln -s "$GPU_VENV_EXTERNAL" "$GPU/.venv"
+  fi
+elif [ "$STACK_ROLE" != resolver ] && \
+     { [ ! -x "$GPU/.venv/bin/gunicorn" ] || [ "$(cat "$GPU/.venv/.identity" 2>/dev/null)" != "$GPU_VENV_ID" ]; }; then
   rm -rf "$GPU/.venv"
   "$PYBIN" -m venv "$GPU/.venv"
   "$GPU/.venv/bin/pip" install --upgrade pip
@@ -283,7 +376,7 @@ EOF
 # fingerprint. Restart whenever the NER service identity (models+gpu-server+config)
 # differs from the one that launched the running process.
 GUNICORN_WORKERS="${NER_WORKERS:-3}"
-NER_ID="$MODELS_TAG:$(git -C "$GPU" rev-parse HEAD):$(sha256sum "$GPU/app/local_config.py" | cut -c1-12):w$GUNICORN_WORKERS"
+NER_ID="$MODELS_TAG:$GPU_SOURCE_ID:$(sha256sum "$GPU/app/local_config.py" | cut -c1-12):w$GUNICORN_WORKERS"
 NER_MARKER="$CACHE/.ner-identity"
 NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
@@ -360,9 +453,9 @@ fi
 # the Mongo dump identity (Refs are resolved against it), and the engine source itself
 # (link_books.py + the artifact contract). relink.yml appends the policy flags.
 {
-  echo "sefaria=$(git -C "$SEF" rev-parse HEAD)"
+  echo "sefaria=$SEFARIA_SOURCE_ID"
   echo "sefaria_patch=$(sha256sum "$PATCH" | cut -c1-16)"
-  echo "gpu-server=$(git -C "$GPU" rev-parse HEAD)"
+  echo "gpu-server=$GPU_SOURCE_ID"
   echo "python_runtime=$PYTHON_RUNTIME_ID"
   echo "dump=$DUMP_CONTENT_ID"
   echo "engine_src=$(cat \

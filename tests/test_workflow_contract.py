@@ -5,6 +5,29 @@ import unittest
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_local_rocm_target_uses_dedicated_runner_and_persistent_venv(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        setup = (root / "ci/setup_stack.sh").read_text(encoding="utf-8")
+
+        self.assertIn("options: [local, server, kaggle]", workflow)
+        self.assertIn("default: 'local'", workflow)
+        self.assertIn("otzaria-linker", workflow)
+        self.assertIn("amd-gpu", workflow)
+        self.assertIn("LINKER_GPU_VENV:", workflow)
+        self.assertIn("LINKER_ACCELERATOR_PROFILE:", workflow)
+        self.assertIn("LINKER_CACHE_DIR:", workflow)
+        self.assertIn("HSA_ENABLE_DXG_DETECTION:", workflow)
+        canary = (root / ".github/workflows/local-runner-canary.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Verify durable host toolchain", canary)
+        self.assertIn("sudo -n true", canary)
+        self.assertIn('GPU_VENV_EXTERNAL="${LINKER_GPU_VENV:-}"', setup)
+        self.assertIn('ACCELERATOR_PROFILE="${LINKER_ACCELERATOR_PROFILE:-}"', setup)
+        self.assertIn("persistent GPU venv identity differs", setup)
+        self.assertIn('ln -s "$GPU_VENV_EXTERNAL" "$GPU/.venv"', setup)
+
     def test_recovery_guards_are_event_driven_and_exact(self):
         root = Path(__file__).parents[1]
         provision = (root / ".github/workflows/kaggle-provisioner.yml").read_text(

@@ -88,13 +88,13 @@ on:
         type: string
       target:
         description: >
-          Compute topology. 'kaggle' = raw NER on an ephemeral GPU JIT runner, followed
-          by CPU resolution on the Oracle ARM box. 'server' = legacy unsplit fallback
-          on Oracle when Kaggle is unavailable.
+          Compute topology. 'local' = complete GPU NER + CPU resolution on the durable
+          Otzaria x64/ROCm host. 'kaggle' = raw NER on an ephemeral GPU JIT runner,
+          followed by CPU resolution on Oracle. 'server' = legacy Oracle fallback.
         required: false
-        default: 'server'
+        default: 'local'
         type: choice
-        options: [server, kaggle]
+        options: [local, server, kaggle]
       dry_run:
         description: >
           Run everything but SKIP publish + baseline commit (canary/testing — safe to
@@ -195,17 +195,14 @@ jobs:
     permissions:
       contents: read
       actions: read
+    # local: complete unsplit run on the durable x64/ROCm host.
     # server: legacy unsplit fallback on the Oracle ARM box.
     # kaggle: a throwaway GPU VM (see kaggle/) that plans + produces raw NER only;
     # Mongo/Django resolution belongs to the separate `resolve` job on Oracle.
     # The request label binds this job to the one JIT configuration created for
     # it. A prior Kaggle listener that is still shutting down lacks this label
     # and therefore cannot steal the next recovery job.
-    runs-on:
-      - self-hosted
-      - ${{ inputs.target == 'kaggle' && 'kaggle' || 'Linux' }}
-      - ${{ inputs.target == 'kaggle' && 'gpu' || 'ARM64' }}
-      - ${{ inputs.target == 'kaggle' && format('request-{0}', inputs.relink_request_id) || 'server-2' }}
+    runs-on: ${{ inputs.target == 'local' && fromJSON('["otzaria-linker", "amd-gpu"]') || (inputs.target == 'kaggle' && fromJSON(format('["self-hosted", "kaggle", "gpu", "request-{0}"]', inputs.relink_request_id)) || fromJSON('["self-hosted", "Linux", "ARM64", "server-2"]')) }}
     # Kaggle now performs NER only. Bound the GPU/JIT job to 90 minutes; the producer
     # itself stops at 60 minutes so packaging + release upload retain real headroom.
     # Its per-book checkpoints are published on that bounded failure and an exact rerun
@@ -226,6 +223,13 @@ jobs:
       # a MANUAL standalone dispatch, off-cycle, never under a waiting weekly build).
       SEFARIA_COMMIT: 59291d9f8754de0062711bc1cd49214b0e618fc5
       GPU_SERVER_COMMIT: d9da16119e9c0de64224d7b187cd999b2ead4bad
+      LINKER_SOURCE_TRANSPORT: ${{ inputs.target == 'local' && 'api-archive' || 'git' }}
+      LINKER_CACHE_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack' || '' }}
+      LINKER_STACK_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack-runtime' || '' }}
+      LINKER_GPU_VENV: ${{ inputs.target == 'local' && '/opt/otzaria-cache/venvs/linker-rocm-7.2.1' || '' }}
+      LINKER_ACCELERATOR_PROFILE: ${{ inputs.target == 'local' && 'rocm-7.2.1-torch-2.9.1-cupy-13.6.0' || '' }}
+      HSA_ENABLE_DXG_DETECTION: ${{ inputs.target == 'local' && '1' || '' }}
+      TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: ${{ inputs.target == 'local' && '1' || '' }}
       # The attached private kernel output is mounted before the JIT runner
       # starts. Declare the pin at job level as well as bootstrap level so the
       # worker never depends on arbitrary host-environment inheritance.

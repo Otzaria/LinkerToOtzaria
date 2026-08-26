@@ -1,0 +1,106 @@
+name: Local ROCm runner canary
+run-name: local-rocm-canary ${{ github.run_id }}:${{ github.run_attempt }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-rocm-canary
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: [otzaria-linker, amd-gpu]
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      HSA_ENABLE_DXG_DETECTION: '1'
+      TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1'
+      LINKER_CACHE_DIR: /opt/otzaria-cache/linker-stack
+      LINKER_STACK_DIR: /opt/otzaria-cache/linker-stack-runtime
+      LINKER_GPU_VENV: /opt/otzaria-cache/venvs/linker-rocm-7.2.1
+      LINKER_ACCELERATOR_PROFILE: rocm-7.2.1-torch-2.9.1-cupy-13.6.0
+      LINKER_SOURCE_TRANSPORT: api-archive
+      LINKER_MODELS_TAG: models-v1
+      LINKER_DUMP_TAG: dump-v1
+      SEFARIA_COMMIT: 59291d9f8754de0062711bc1cd49214b0e618fc5
+      GPU_SERVER_COMMIT: d9da16119e9c0de64224d7b187cd999b2ead4bad
+      LINKER_STACK_ROLE: ner
+      NER_WORKERS: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify durable host toolchain
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sudo -n true
+          for tool in bash curl docker gh git java jq mongod mongosh python3 sqlite3 unzstd zstd; do
+            command -v "$tool"
+          done
+          java -version
+          docker --version
+          mongod --version | head -n 3
+          df -h / /opt/otzaria-cache
+          free -h
+
+      - name: Verify pinned local accelerator
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          "$LINKER_GPU_VENV/bin/python" - <<'PY'
+          import json
+          import cupy
+          import spacy
+          import torch
+
+          assert torch.cuda.is_available()
+          assert torch.cuda.get_device_name(0) == "AMD Radeon RX 9060 XT"
+          assert spacy.prefer_gpu()
+          values = cupy.arange(1024, dtype=cupy.float32)
+          assert float(values.sum().get()) == 523776.0
+          print(json.dumps({
+              "torch": torch.__version__,
+              "hip": torch.version.hip,
+              "cupy": cupy.__version__,
+              "spacy": spacy.__version__,
+              "device": torch.cuda.get_device_name(0),
+          }, sort_keys=True))
+          PY
+
+      - name: Bootstrap cached pinned Linker NER stack
+        run: |
+          set -euo pipefail
+          bash ci/bootstrap_host_lock.sh ci/otzaria-pipeline.tmpfiles.conf
+          exec 9>>/run/lock/otzaria/host-heavy.lock
+          flock -n 9
+          export LINKER_NER_SCOPE=/run/lock/otzaria/linker-ner.scope.json
+          export LINKER_NER_SCOPE_MODE=0644
+          trap 'bash ci/stop_ner.sh || true' EXIT
+          bash ci/setup_stack.sh 9>&-
+
+          curl -fsS -m 60 -X POST 'http://127.0.0.1:5051/bulk-recognize-entities?with_span_text=1' \
+            -H 'Content-Type: application/json' \
+            -d '{"lang":"he","texts":["כדכתיב בראשית ברא אלהים את השמים ואת הארץ","עיין מסכת ברכות דף ב עמוד א"]}' \
+            > "$RUNNER_TEMP/ner-smoke.json"
+          python3 - "$RUNNER_TEMP/ner-smoke.json" <<'PY'
+          import json, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          if not isinstance(value, list) or len(value) != 2:
+              raise SystemExit(f"unexpected NER response shape: {value!r}")
+          print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+          PY
+          test -s stack/engine_fingerprint.txt
+          cat stack/engine_fingerprint.txt
+
+      - name: Verify persistent cache boundaries
+        if: always()
+        run: |
+          set -euo pipefail
+          test -d /opt/otzaria-cache/linker-stack
+          test -d /opt/otzaria-cache/linker-stack-runtime
+          test -f /opt/otzaria-cache/venvs/linker-rocm-7.2.1/.identity
+          df -h / /opt/otzaria-cache
