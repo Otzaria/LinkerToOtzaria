@@ -22,7 +22,7 @@ jobs:
       LINKER_CACHE_DIR: /opt/otzaria-cache/linker-stack
       LINKER_STACK_DIR: /opt/otzaria-cache/linker-stack-runtime
       LINKER_GPU_VENV: /opt/otzaria-cache/venvs/linker-rocm-7.2.1
-      LINKER_ACCELERATOR_PROFILE: rocm-7.2.1-torch-2.9.1-cupy-13.6.0
+      LINKER_ACCELERATOR_PROFILE: rocm-7.2.1-torch-2.9.1-cupy-14.2.0-nespan-0.7-spacy38
       LINKER_SOURCE_TRANSPORT: api-archive
       LINKER_MODELS_TAG: models-v1
       LINKER_DUMP_TAG: dump-v1

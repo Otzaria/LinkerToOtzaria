@@ -227,7 +227,7 @@ jobs:
       LINKER_CACHE_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack' || '' }}
       LINKER_STACK_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack-runtime' || '' }}
       LINKER_GPU_VENV: ${{ inputs.target == 'local' && '/opt/otzaria-cache/venvs/linker-rocm-7.2.1' || '' }}
-      LINKER_ACCELERATOR_PROFILE: ${{ inputs.target == 'local' && 'rocm-7.2.1-torch-2.9.1-cupy-13.6.0' || '' }}
+      LINKER_ACCELERATOR_PROFILE: ${{ inputs.target == 'local' && 'rocm-7.2.1-torch-2.9.1-cupy-14.2.0-nespan-0.7-spacy38' || '' }}
       HSA_ENABLE_DXG_DETECTION: ${{ inputs.target == 'local' && '1' || '' }}
       TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: ${{ inputs.target == 'local' && '1' || '' }}
       # The attached private kernel output is mounted before the JIT runner
