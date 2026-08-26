@@ -23,6 +23,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("Verify durable host toolchain", canary)
         self.assertIn("sudo -n true", canary)
+        self.assertIn('results = value.get("results")', canary)
+        self.assertIn("not isinstance(results, list) or len(results) != 2", canary)
         self.assertIn('GPU_VENV_EXTERNAL="${LINKER_GPU_VENV:-}"', setup)
         self.assertIn('ACCELERATOR_PROFILE="${LINKER_ACCELERATOR_PROFILE:-}"', setup)
         self.assertIn("persistent GPU venv identity differs", setup)

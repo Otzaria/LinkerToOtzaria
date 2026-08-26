@@ -89,7 +89,8 @@ jobs:
           python3 - "$RUNNER_TEMP/ner-smoke.json" <<'PY'
           import json, sys
           value = json.load(open(sys.argv[1], encoding="utf-8"))
-          if not isinstance(value, list) or len(value) != 2:
+          results = value.get("results") if isinstance(value, dict) else None
+          if not isinstance(results, list) or len(results) != 2:
               raise SystemExit(f"unexpected NER response shape: {value!r}")
           print(json.dumps(value, ensure_ascii=False, sort_keys=True))
           PY
