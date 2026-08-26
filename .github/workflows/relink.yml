@@ -275,7 +275,12 @@ jobs:
           selected="$RUNNER_TEMP/linker-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           payload="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
           archive="$RUNNER_TEMP/linker-links-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
-          trap 'rm -f "$releases" "$selected" "$payload" "$archive"' EXIT
+          cache_tmp=""
+          cleanup_restore() {
+            rm -f "$releases" "$selected" "$payload" "$archive"
+            [ -z "$cache_tmp" ] || rm -f "$cache_tmp"
+          }
+          trap cleanup_restore EXIT
 
           # Use REST, not `gh release view --json assets`: the pinned Kaggle gh
           # 2.63.2 omits the newer asset.digest field and used to fail this
@@ -297,12 +302,37 @@ jobs:
           [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
           [[ "$remote_size" =~ ^[1-9][0-9]*$ ]]
           [[ "$remote_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          gh api -H 'Accept: application/octet-stream' \
-            "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$payload"
-          [[ "$(stat -c %s "$payload")" == "$remote_size" ]]
-          [[ "$(sha256sum "$payload" | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
-          zstd -q -t "$payload"
-          zstd -q -dc "$payload" > "$archive"
+          payload_source="$payload"
+          if [ -n "${LINKER_CACHE_DIR:-}" ]; then
+            cache_dir="$LINKER_CACHE_DIR/artifact-store-releases/${remote_digest#sha256:}"
+            cache_payload="$cache_dir/linker_links.zst"
+            if [ -f "$cache_payload" ] && \
+               [ "$(stat -c %s "$cache_payload")" = "$remote_size" ] && \
+               [ "$(sha256sum "$cache_payload" | cut -d' ' -f1)" = "${remote_digest#sha256:}" ] && \
+               zstd -q -t "$cache_payload"; then
+              payload_source="$cache_payload"
+              echo "reused verified local artifact-store payload $remote_digest"
+            else
+              mkdir -p "$cache_dir"
+              cache_tmp="$cache_payload.tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$cache_tmp"
+              [[ "$(stat -c %s "$cache_tmp")" == "$remote_size" ]]
+              [[ "$(sha256sum "$cache_tmp" | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
+              zstd -q -t "$cache_tmp"
+              mv -f "$cache_tmp" "$cache_payload"
+              cache_tmp=""
+              payload_source="$cache_payload"
+              echo "cached verified artifact-store payload $remote_digest"
+            fi
+          else
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$payload"
+            [[ "$(stat -c %s "$payload")" == "$remote_size" ]]
+            [[ "$(sha256sum "$payload" | cut -d' ' -f1)" == "${remote_digest#sha256:}" ]]
+            zstd -q -t "$payload"
+          fi
+          zstd -q -dc "$payload_source" > "$archive"
           python3 - "$archive" <<'PY'
           import pathlib, sys, tarfile
           archive = pathlib.Path(sys.argv[1])
@@ -706,6 +736,24 @@ jobs:
               fh.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
           PY
           cat relink_manifest.json
+
+      - name: Retain verified local artifact-store payload
+        if: ${{ !inputs.dry_run && inputs.target == 'local' && steps.compute.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          payload_sha="$(tr -d '\r\n' < linker_links.zst.sha256)"
+          [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum linker_links.zst | cut -d' ' -f1)" = "$payload_sha" ]
+          zstd -q -t linker_links.zst
+          cache_dir="$LINKER_CACHE_DIR/artifact-store-releases/$payload_sha"
+          cache_payload="$cache_dir/linker_links.zst"
+          cache_tmp="$cache_payload.tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$cache_dir"
+          cp linker_links.zst "$cache_tmp"
+          [ "$(sha256sum "$cache_tmp" | cut -d' ' -f1)" = "$payload_sha" ]
+          zstd -q -t "$cache_tmp"
+          mv -f "$cache_tmp" "$cache_payload"
+          echo "retained verified artifact-store payload sha256:$payload_sha"
 
       # Transfer compute output and baseline delta to a short ubuntu publisher without
       # consuming Actions artifact quota. The PAT publishes an immutable pre-release.

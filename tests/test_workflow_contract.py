@@ -129,8 +129,18 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('path.name in {".DS_Store", ".gitkeep"}', segment)
         self.assertIn('path.name.startswith("._")', segment)
         self.assertIn("members=artifact_members", segment)
+        self.assertIn('artifact-store-releases/${remote_digest#sha256:}', segment)
+        self.assertIn("reused verified local artifact-store payload", segment)
+        self.assertIn('zstd -q -dc "$payload_source"', segment)
         self.assertNotIn("if: inputs.target != 'kaggle'", segment)
         self.assertNotIn('latest_tag="$(gh release view', segment)
+
+        retain = workflow.split("- name: Retain verified local artifact-store payload", 1)[1]
+        retain = retain.split("- name: Publish verified publisher handoff release", 1)[0]
+        self.assertIn("inputs.target == 'local'", retain)
+        self.assertIn('sha256sum linker_links.zst', retain)
+        self.assertIn('artifact-store-releases/$payload_sha', retain)
+        self.assertIn('mv -f "$cache_tmp" "$cache_payload"', retain)
 
     def test_attested_fingerprint_adoption_reaches_serial_recovery(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
