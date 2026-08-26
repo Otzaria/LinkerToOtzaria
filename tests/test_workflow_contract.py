@@ -29,6 +29,9 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('ACCELERATOR_PROFILE="${LINKER_ACCELERATOR_PROFILE:-}"', setup)
         self.assertIn("persistent GPU venv identity differs", setup)
         self.assertIn('ln -s "$GPU_VENV_EXTERNAL" "$GPU/.venv"', setup)
+        self.assertIn('DUMP_ARCHIVE_DIR="$CACHE/dump-archives/$DUMP_CONTENT_ID"', setup)
+        self.assertIn('tar -xzf "$DUMP_ARCHIVE"', setup)
+        self.assertNotIn('tar -xzf "$CACHE/dump-dl/dump.tar.gz"', setup)
 
     def test_recovery_guards_are_event_driven_and_exact(self):
         root = Path(__file__).parents[1]

@@ -254,17 +254,29 @@ rm -rf "$CACHE/dump-sums" && mkdir -p "$CACHE/dump-sums"
 gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p SHA256SUMS -D "$CACHE/dump-sums"
 DUMP_CONTENT_ID="$(sha256sum "$CACHE/dump-sums/SHA256SUMS" | cut -c1-16)"
 DUMP_MARKER="$CACHE/.dump-restored-content-$DUMP_CONTENT_ID"
+DUMP_ARCHIVE_DIR="$CACHE/dump-archives/$DUMP_CONTENT_ID"
+DUMP_ARCHIVE="$DUMP_ARCHIVE_DIR/dump.tar.gz"
+DUMP_ARCHIVE_SHA256="$(awk '$2 == "dump.tar.gz" {print $1}' "$CACHE/dump-sums/SHA256SUMS")"
+[[ "$DUMP_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "::error::SHA256SUMS does not pin dump.tar.gz"
+  exit 1
+}
 if [ "$STACK_ROLE" != ner ]; then
   pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
 fi
 if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
-  rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
-  gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
-  cp "$CACHE/dump-sums/SHA256SUMS" "$CACHE/dump-dl/SHA256SUMS"
-  cat "$CACHE/dump-dl"/dump.tar.gz.part-* > "$CACHE/dump-dl/dump.tar.gz"
-  (cd "$CACHE/dump-dl" && sha256sum -c SHA256SUMS)
+  mkdir -p "$DUMP_ARCHIVE_DIR"
+  if [ ! -s "$DUMP_ARCHIVE" ]; then
+    rm -rf "$CACHE/dump-dl" && mkdir -p "$CACHE/dump-dl"
+    gh release download "$DUMP_TAG" -R "$DUMP_REPO" -p 'dump.tar.gz.part-*' -D "$CACHE/dump-dl"
+    cat "$CACHE/dump-dl"/dump.tar.gz.part-* > "$DUMP_ARCHIVE.part-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}"
+    echo "$DUMP_ARCHIVE_SHA256  $DUMP_ARCHIVE.part-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}" | sha256sum -c -
+    mv "$DUMP_ARCHIVE.part-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}" "$DUMP_ARCHIVE"
+    rm -rf "$CACHE/dump-dl"
+  fi
+  echo "$DUMP_ARCHIVE_SHA256  $DUMP_ARCHIVE" | sha256sum -c -
   rm -rf "$CACHE/dump-extract" && mkdir -p "$CACHE/dump-extract"
-  tar -xzf "$CACHE/dump-dl/dump.tar.gz" -C "$CACHE/dump-extract"
+  tar -xzf "$DUMP_ARCHIVE" -C "$CACHE/dump-extract"
   DUMP_DIR=$(find "$CACHE/dump-extract" -type d -name dump | head -1)
   [ -n "$DUMP_DIR" ] || DUMP_DIR="$CACHE/dump-extract"
   for dbdir in "$DUMP_DIR"/*/; do
@@ -272,7 +284,7 @@ if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
     mongosh --quiet --eval "db.getSiblingDB('$dbname').dropDatabase()" >/dev/null
   done
   mongorestore --gzip --drop "$DUMP_DIR"
-  rm -rf "$CACHE/dump-dl" "$CACHE/dump-extract"
+  rm -rf "$CACHE/dump-extract"
   rm -f "$CACHE"/.dump-restored-* "$CACHE/.dump-content-id"
   touch "$DUMP_MARKER"
 fi
