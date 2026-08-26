@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: local-rocm-canary
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   smoke:
