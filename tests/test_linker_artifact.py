@@ -56,6 +56,15 @@ class ArtifactContractTest(unittest.TestCase):
         self.assertEqual(rec, back)
         self.assertEqual(back.source_hash, content_hash("abc"))
 
+    def test_roundtrip_with_validated_relative_context(self):
+        rec = LinkRecord(
+            BookKey("s", "t"), 3, 1, 5, "Genesis 1:1",
+            source_hash=content_hash("abc"),
+            context_ref="בראשית א, ב",
+            relative_direction="above",
+        )
+        self.assertEqual(LinkRecord.from_dict(rec.to_dict()), rec)
+
     def test_content_hash_contract(self):
         # These constants are asserted identically in the Kotlin importer's test
         # (GenerateLinkerLinksTest.contentHashMatchesPythonContract) — the guard only works
@@ -89,6 +98,8 @@ class ArtifactContractTest(unittest.TestCase):
             {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "source_hash": "abc"},
             # source_hash non-hex
             {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "source_hash": "ZZZZZZZZZZZZZZZZ"},
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "context_ref": "בראשית א"},
+            {"book_key": {"source_name": "s", "canonical_he_title": "x"}, "line_index": 0, "start": 0, "end": 1, "target_ref": "R", "relative_direction": "sideways", "context_ref": "בראשית א"},
         ]
         for d in bad:
             with self.assertRaises(ValueError):

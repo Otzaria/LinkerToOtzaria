@@ -13,10 +13,15 @@ import incremental as inc  # noqa: E402
 
 
 def _snapshot(path, rows):
-    """rows: (source_name, canonical_he_title, line_index, content)."""
+    """Rows are 4-tuples; context defaults to the canonical book title."""
     con = sqlite3.connect(path)
-    con.execute("CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT)")
-    con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?)", rows)
+    con.execute(
+        "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+        "line_index INTEGER, content TEXT, context_ref TEXT)"
+    )
+    con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?,?)", [
+        (*row, row[1]) for row in rows
+    ])
     con.commit()
     con.close()
 

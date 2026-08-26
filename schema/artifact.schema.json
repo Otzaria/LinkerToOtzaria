@@ -50,6 +50,20 @@
       "type": "string",
       "pattern": "^[0-9a-f]{16}$",
       "description": "Optional. content_hash() of the source line content the offsets index; the build drops the link if it no longer matches the current DB content (source-side drift guard)."
+    },
+    "context_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact source context from the snapshot, present only for an explicit relative citation."
+    },
+    "relative_direction": {
+      "type": "string",
+      "enum": ["above", "below"],
+      "description": "Direction validated by the linker for an explicit relative citation."
     }
+  },
+  "dependentRequired": {
+    "context_ref": ["relative_direction"],
+    "relative_direction": ["context_ref"]
   }
 }

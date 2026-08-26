@@ -31,9 +31,11 @@ def snapshot(path, rows):
     connection = sqlite3.connect(path)
     connection.execute(
         "CREATE TABLE lines_snapshot("
-        "source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT)"
+        "source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT, context_ref TEXT)"
     )
-    connection.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?)", rows)
+    connection.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?,?)", [
+        (*row, row[1]) for row in rows
+    ])
     connection.commit()
     connection.close()
 
@@ -43,15 +45,21 @@ class LineBaselineTest(unittest.TestCase):
 
     def test_delta_reuses_stable_and_moved_identical_lines(self):
         old = [
-            (0, line_fingerprint("א")),
-            (1, line_fingerprint("ב")),
-            (2, line_fingerprint("ג")),
+            (0, line_fingerprint("א", "ספר")),
+            (1, line_fingerprint("ב", "ספר")),
+            (2, line_fingerprint("ג", "ספר")),
         ]
-        current = [(0, "א"), (1, "חדש"), (2, "ג"), (3, "ב")]
+        current = [(0, "א", "ספר"), (1, "חדש", "ספר"), (2, "ג", "ספר"), (3, "ב", "ספר")]
         delta = compute_line_delta(old, current)
         self.assertEqual(delta.reuse, ((0, 0), (2, 2), (1, 3)))
         self.assertEqual(indices_from_ranges(delta.ner_ranges), {1})
         self.assertEqual(delta.reused_line_count + delta.ner_line_count, len(current))
+
+    def test_identical_relative_text_at_new_context_is_not_reused(self):
+        old = [(4, line_fingerprint("ראה לקמן", "ברכות א, א"))]
+        delta = compute_line_delta(old, [(4, "ראה לקמן", "ברכות ב, א")])
+        self.assertEqual(delta.reuse, ())
+        self.assertEqual(indices_from_ranges(delta.ner_ranges), {4})
 
     def test_release_baseline_identity_and_per_book_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -132,7 +140,7 @@ class LineBaselineTest(unittest.TestCase):
             original_batch_lines = link_books.BATCH_LINES
 
             def fake_process(_linker, book, batch, _log, **_kwargs):
-                self.assertEqual(batch, [(1, "חדש")])
+                self.assertEqual(batch, [(1, "חדש", "ספר")])
                 return [
                     LinkRecord(
                         book, 1, 0, 2, "Numbers 1:1",
@@ -146,7 +154,7 @@ class LineBaselineTest(unittest.TestCase):
                 count, _ = link_books.process_book_checkpointed(
                     object(),
                     self.BOOK,
-                    [(0, "א"), (1, "חדש"), (2, "ג")],
+                    [(0, "א", "ספר"), (1, "חדש", "ספר"), (2, "ג", "ספר")],
                     lambda _message: None,
                     lambda: None,
                     str(root / "checkpoints"),

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import resource
 import sqlite3
 import sys
@@ -45,6 +46,49 @@ NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
+
+_HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+_HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
+
+
+def is_heading_line(content: str) -> bool:
+    """Structural headings are navigation labels, never clickable prose."""
+    return bool(_HEADING_RE.match(content or ""))
+
+
+def is_ner_eligible_line(content: str) -> bool:
+    """Return whether a stored row contains visible Hebrew prose for the NER.
+
+    Besides headings, this excludes image-only/data rows whose hidden payload can
+    be megabytes long. The pinned linker is Hebrew-only, so sending such rows adds
+    no links and can make a batch needlessly slow or run out of memory.
+    """
+    if not content or len(content.strip()) <= 1 or is_heading_line(content):
+        return False
+    visible = _HTML_TAG_RE.sub(" ", content)
+    return len(_HEBREW_RE.findall(visible)) >= 2
+
+
+def validate_snapshot_contract(con) -> None:
+    """Require the context-aware snapshot produced by the current DB build."""
+    try:
+        meta = dict(con.execute("SELECT key, value FROM lines_snapshot_meta"))
+        columns = {
+            row[1] for row in con.execute("PRAGMA table_info(lines_snapshot)")
+        }
+    except sqlite3.DatabaseError as error:
+        raise RuntimeError(f"invalid lines snapshot: {error}") from error
+    if meta.get("schema_version") != "2" or meta.get("context_policy") != "explicit-relative-v1":
+        raise RuntimeError(
+            "snapshot must be schema 2 with context_policy=explicit-relative-v1; "
+            "rebuild Phase-1 with the current SeforimLibrary generator"
+        )
+    required = {"source_name", "canonical_he_title", "line_index", "content", "context_ref"}
+    if columns != required:
+        raise RuntimeError(f"unexpected lines_snapshot columns: {sorted(columns)!r}")
+
+
 def rss_bytes() -> int:
     """Return the process's *current* resident set, not its historical maximum.
 
@@ -221,9 +265,9 @@ def all_book_keys(con) -> list[BookKey]:
     return [BookKey(s, t) for s, t in rows]
 
 
-def book_lines(con, bk: BookKey) -> list[tuple[int, str]]:
+def book_lines(con, bk: BookKey) -> list[tuple[int, str, str]]:
     return con.execute(
-        "SELECT line_index, content FROM lines_snapshot "
+        "SELECT line_index, content, context_ref FROM lines_snapshot "
         "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index",
         (bk.source_name, bk.canonical_he_title),
     ).fetchall()
@@ -259,7 +303,10 @@ def _same_location(one, others) -> bool:
     return any(o.index.title.replace("Jerusalem Talmud ", "") == base for o in others)
 
 
-def process_book(linker, bk, lines, skipped_log, heartbeat, precomputed=None):
+def process_book(
+    linker, bk, lines, skipped_log, heartbeat, precomputed=None,
+    context_ref_factory=None,
+):
     """Link one book's lines into a list of LinkRecord (unambiguous only).
 
     Calls heartbeat() once per batch so a long book keeps its claim fresh and is
@@ -268,26 +315,50 @@ def process_book(linker, bk, lines, skipped_log, heartbeat, precomputed=None):
     records: list[LinkRecord] = []
     words = 0
     for i in range(0, len(lines), BATCH_LINES):
-        batch = [(li, c) for li, c in lines[i:i + BATCH_LINES] if c and len(c.strip()) > 1]
+        batch = [
+            (li, content, context_ref)
+            for li, content, context_ref in lines[i:i + BATCH_LINES]
+            if is_ner_eligible_line(content)
+        ]
         heartbeat()
         if not batch:
             continue
         batch_records, batch_words = process_batch(
             linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+            context_ref_factory=context_ref_factory,
         )
         records.extend(batch_records)
         words += batch_words
     return records, words
 
 
-def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None):
+def process_batch(
+    linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None,
+    context_ref_factory=None,
+):
     """Link one transport batch. Output is independent of neighbouring batches."""
-    words = sum(len(c.split()) for _, c in batch)
+    words = sum(len(content.split()) for _, content, _ in batch)
+    context_objects = []
+    for _line_index, _content, context_ref in batch:
+        try:
+            context_objects.append(
+                context_ref_factory(context_ref) if context_ref_factory and context_ref else None
+            )
+        except Exception:
+            # Non-Sefaria books may have titles that Ref cannot parse. They still
+            # link context-free; relative citations fail closed below.
+            context_objects.append(None)
     try:
         if precomputed is not None:
-            docs = precomputed.resolve_batch(linker, bk, batch, batch_start)
+            docs = precomputed.resolve_batch(
+                linker, bk, batch, batch_start, book_context_refs=context_objects,
+            )
         else:
-            docs = linker.bulk_link([c for _, c in batch], type_filter="citation")
+            docs = linker.bulk_link(
+                [content for _, content, _ in batch],
+                book_context_refs=context_objects,
+                type_filter="citation",
+            )
         if len(docs) != len(batch):  # a short reply would silently drop tail lines
             raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
     except Exception:
@@ -298,21 +369,25 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
         # line would silently drop all its citations while the book counts as linked
         # and the baseline advances past it — the bootstrap lost 216 lines this way.
         docs = []
-        for li, c in batch:
+        for batch_offset, (li, content, _context_ref) in enumerate(batch):
             try:
                 if precomputed is not None:
                     # A replay failure is a corrupt/mismatched handoff or resolver bug.
                     # Re-batching would destroy the exact context boundary in the
                     # signed contract, so fail the book rather than guessing.
                     raise
-                docs.append(linker.bulk_link([c], type_filter="citation")[0])
+                docs.append(linker.bulk_link(
+                    [content],
+                    book_context_refs=[context_objects[batch_offset]],
+                    type_filter="citation",
+                )[0])
             except Exception as le:
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
                 raise RuntimeError(
                     f"line {li} failed to link: {type(le).__name__}: {le}") from le
 
     records: list[LinkRecord] = []
-    for (line_index, content), doc in zip(batch, docs):
+    for (line_index, content, context_ref), context_object, doc in zip(batch, context_objects, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
         # links if the source book changed before Phase-2 applies them (cross-cycle drift).
         src_hash = content_hash(content)
@@ -326,6 +401,12 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
                 if ref is None:
                     continue
                 start, end = rr.raw_entity.span.range
+                relative_direction = relative_ref_direction(
+                    rr, ref, context_object, content[start:end]
+                )
+                if has_raw_part_type(rr, "RELATIVE") and relative_direction is None:
+                    continue
+                record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
                     end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
@@ -333,6 +414,8 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
                     book_key=bk, line_index=line_index,
                     start=start, end=end, target_ref=ref.normal(),
                     source_hash=src_hash,
+                    context_ref=record_context,
+                    relative_direction=relative_direction,
                 ))
             except Exception as ce:
                 # A broken citation is OUR bug (resolver/normal()), not corpus noise —
@@ -345,7 +428,7 @@ def process_batch(linker, bk, batch, skipped_log, *, batch_start=0, precomputed=
 
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
-    precomputed=None, ner_indices=None, reuse=(),
+    precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -361,10 +444,13 @@ def process_book_checkpointed(
     from linker_artifact import read_artifact
 
     if ner_indices is None:
-        ner_indices = {line_index for line_index, _ in lines}
+        ner_indices = {line_index for line_index, _, _ in lines}
     else:
         ner_indices = set(ner_indices)
-    current_by_index = {line_index: content for line_index, content in lines}
+    current_by_index = {
+        line_index: (content, context_ref)
+        for line_index, content, context_ref in lines
+    }
     reuse_by_old = {}
     reused_destinations = set()
     for old_index, new_index in reuse:
@@ -395,10 +481,16 @@ def process_book_checkpointed(
             new_index = reuse_by_old.get(record.line_index)
             if new_index is None:
                 continue
-            expected_source_hash = content_hash(current_by_index[new_index])
+            current_content, current_context = current_by_index[new_index]
+            expected_source_hash = content_hash(current_content)
             if record.source_hash != expected_source_hash:
                 raise RuntimeError(
                     f"reused artifact source hash mismatch for "
+                    f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
+                )
+            if record.context_ref is not None and record.context_ref != current_context:
+                raise RuntimeError(
+                    f"reused artifact context mismatch for "
                     f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
                 )
             reused_records.append(LinkRecord(
@@ -410,6 +502,8 @@ def process_book_checkpointed(
                 line_index_base=record.line_index_base,
                 source_path=record.source_path,
                 source_hash=record.source_hash,
+                context_ref=record.context_ref,
+                relative_direction=record.relative_direction,
             ))
     os.makedirs(checkpoint_dir, exist_ok=True)
     shard_paths = []
@@ -417,11 +511,11 @@ def process_book_checkpointed(
     batches_this_life = 0
     for i in range(0, len(lines), BATCH_LINES):
         batch = [
-            (li, c)
-            for li, c in lines[i:i + BATCH_LINES]
-            if li in ner_indices and c and len(c.strip()) > 1
+            (li, content, context_ref)
+            for li, content, context_ref in lines[i:i + BATCH_LINES]
+            if li in ner_indices and is_ner_eligible_line(content)
         ]
-        total_words += sum(len(c.split()) for _, c in batch)
+        total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
         # A large changed book may reuse almost every line.  Do not create thousands
         # of empty checkpoint shards for batches that contain no requested NER work;
@@ -434,6 +528,7 @@ def process_book_checkpointed(
             continue
         records, _ = process_batch(
             linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+            context_ref_factory=context_ref_factory,
         )
         write_artifact(shard, records)
         batches_this_life += 1
@@ -460,12 +555,60 @@ _BAVLI_CONVENTION = False
 
 def _pick_ref(rr):
     """Return the single target Ref for a resolved citation, or None to drop it."""
+    if (
+        not has_raw_part_type(rr, "RELATIVE")
+        and getattr(getattr(rr, "context_type", None), "name", None) == "CURRENT_BOOK"
+    ):
+        return None
     if rr.is_ambiguous:
         if not _BAVLI_CONVENTION:
             return None
         cands = [r.ref for r in rr.resolved_raw_refs if r.ref]
         return disambiguate_bavli(cands)
     return rr.ref if rr.ref else None
+
+
+def has_raw_part_type(rr, type_name: str) -> bool:
+    parts = getattr(getattr(rr, "raw_entity", None), "raw_ref_parts", ())
+    return any(getattr(getattr(part, "type", None), "name", None) == type_name for part in parts)
+
+
+def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str | None:
+    """Validate an explicit relative citation and return its direction.
+
+    Context is deliberately confined to NER parts marked RELATIVE. A bare
+    "לעיל"/"לקמן" without a numbered or named destination is too vague and is
+    dropped. An unnamed relative target must remain in the exact source book;
+    cross-book resolution is accepted only when the citation explicitly names a
+    book. Same-book targets must also be on the requested side of the source.
+    """
+    if not has_raw_part_type(rr, "RELATIVE"):
+        return None
+    if getattr(rr, "is_ambiguous", False) or source_ref is None or target_ref is None:
+        return None
+    context_type = getattr(getattr(rr, "context_type", None), "name", None)
+    if context_type != "CURRENT_BOOK":
+        return None
+    above = "לעיל" in anchor_text
+    below = "לקמן" in anchor_text or "להלן" in anchor_text
+    if above == below:
+        return None
+    has_named = has_raw_part_type(rr, "NAMED")
+    has_numbered = has_raw_part_type(rr, "NUMBERED") or has_raw_part_type(rr, "RANGE")
+    if not (has_named or has_numbered):
+        return None
+    source_title = getattr(getattr(source_ref, "index", None), "title", None)
+    target_title = getattr(getattr(target_ref, "index", None), "title", None)
+    if not has_named and (not source_title or target_title != source_title):
+        return None
+    if target_title == source_title:
+        source_order = source_ref.order_id()
+        target_order = target_ref.order_id()
+        if above and not target_order < source_order:
+            return None
+        if below and not target_order > source_order:
+            return None
+    return "above" if above else "below"
 
 
 def main():
@@ -519,10 +662,11 @@ def main():
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     import django
     django.setup()
-    from sefaria.model import library
+    from sefaria.model import Ref, library
     linker = library.get_linker("he")
 
     con = sqlite3.connect(f"file:{args.snapshot}?mode=ro", uri=True)
+    validate_snapshot_contract(con)
     books = all_book_keys(con)
     requested_items = None
     requested_plans = {}
@@ -645,7 +789,7 @@ def main():
                         )
                     reuse.append(tuple(pair))
             else:
-                ner_indices = {line_index for line_index, _ in lines}
+                ner_indices = {line_index for line_index, _, _ in lines}
                 reuse = []
             out_path = os.path.join(args.repo, book_key_to_relpath(bk))
             checkpoint_dir = os.path.join(run, "checkpoints", cid)
@@ -673,6 +817,7 @@ def main():
                     precomputed=precomputed,
                     ner_indices=ner_indices,
                     reuse=reuse,
+                    context_ref_factory=Ref,
                 )
             except Exception as e:
                 if precomputed is None and ner_indices and not ner_alive():

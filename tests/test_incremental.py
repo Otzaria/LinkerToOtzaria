@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -34,11 +35,16 @@ class RewriteTest(unittest.TestCase):
 
 
 def _mk_snapshot(path, rows):
-    """rows: list of (source_name, canonical_he_title, line_index, content)."""
+    """Rows are 4-tuples; context defaults to the canonical book title."""
     import sqlite3
     con = sqlite3.connect(path)
-    con.execute("CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT)")
-    con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?)", rows)
+    con.execute(
+        "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+        "line_index INTEGER, content TEXT, context_ref TEXT)"
+    )
+    con.executemany("INSERT INTO lines_snapshot VALUES(?,?,?,?,?)", [
+        (*row, row[1]) for row in rows
+    ])
     con.commit()
     con.close()
 
@@ -69,6 +75,21 @@ class SnapshotHashTest(unittest.TestCase):
         changed, removed = inc.plan_from_snapshot(cur, base)
         self.assertEqual({(b.source_name, b.canonical_he_title) for b in changed}, {("s", "b"), ("s", "new")})
         self.assertEqual({(b.source_name, b.canonical_he_title) for b in removed}, {("s", "gone")})
+
+    def test_hash_changes_when_relative_context_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = os.path.join(tmp, "first.db")
+            second = os.path.join(tmp, "second.db")
+            for path, context in ((first, "ברכות א, א"), (second, "ברכות ב, א")):
+                con = sqlite3.connect(path)
+                con.execute(
+                    "CREATE TABLE lines_snapshot(source_name TEXT, canonical_he_title TEXT, "
+                    "line_index INTEGER, content TEXT, context_ref TEXT)"
+                )
+                con.execute("INSERT INTO lines_snapshot VALUES(?,?,?,?,?)", ("Sefaria", "ברכות", 4, "ראה לקמן", context))
+                con.commit()
+                con.close()
+            self.assertNotEqual(inc.snapshot_book_hashes(first), inc.snapshot_book_hashes(second))
 
     def test_baseline_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:

@@ -103,27 +103,33 @@ def _validate_artifacts(
                             f"artifact path does not match its book identity: {relative}"
                         )
                     rows = connection.execute(
-                        "SELECT line_index, content FROM lines_snapshot "
+                        "SELECT line_index, content, context_ref FROM lines_snapshot "
                         "WHERE source_name=? AND canonical_he_title=?",
                         key,
                     ).fetchall()
                     contents = {
-                        line_index: content or ""
-                        for line_index, content in rows
+                        line_index: (content or "", context_ref)
+                        for line_index, content, context_ref in rows
                     }
                     if len(contents) != len(rows):
                         raise RuntimeError(f"snapshot has duplicate line indices for {key!r}")
                 elif record.book_key != book:
                     raise RuntimeError(f"artifact mixes multiple book identities: {relative}")
-                content = contents.get(record.line_index)
-                if content is None:
+                source = contents.get(record.line_index)
+                if source is None:
                     raise RuntimeError(
                         f"artifact references an absent source line: "
                         f"{relative}/{record.line_index}"
                     )
+                content, context_ref = source
                 if record.source_hash != content_hash(content):
                     raise RuntimeError(
                         f"artifact source hash differs from snapshot: "
+                        f"{relative}/{record.line_index}"
+                    )
+                if record.context_ref is not None and record.context_ref != context_ref:
+                    raise RuntimeError(
+                        f"artifact context differs from snapshot: "
                         f"{relative}/{record.line_index}"
                     )
             if count == 0:

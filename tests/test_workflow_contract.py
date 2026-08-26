@@ -244,7 +244,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("django.setup", producer)
         self.assertIn("from sefaria.helper.normalization import NormalizerComposer", producer)
 
-    def test_committed_fingerprint_matches_split_engine_sources(self):
+    def test_committed_fingerprint_is_accepted_lineage_not_dirty_source(self):
         root = Path(__file__).parents[1]
         digest = hashlib.sha256()
         for relative_path in (
@@ -273,13 +273,13 @@ class RelinkWorkflowContractTest(unittest.TestCase):
                 engine_component.split("=", 1)[1],
             )
             self.assertEqual(migrations.get("schema_version"), 1)
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     entry.get("from") == baseline_fingerprint
                     and entry.get("to") == current_fingerprint
-                    and entry.get("review")
                     for entry in migrations.get("migrations", [])
-                )
+                ),
+                "this semantic change must force a full relink, never fingerprint adoption",
             )
 
 

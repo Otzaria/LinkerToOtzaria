@@ -80,6 +80,8 @@ class LinkRecord:
     line_index_base: int = 0  # only 0 is supported; explicit for forward-safety
     source_path: Optional[str] = None  # optional, debug only — never authoritative
     source_hash: Optional[str] = None  # content_hash(source line content); build safe-drops on mismatch
+    context_ref: Optional[str] = None  # exact snapshot context, only on explicit relative citations
+    relative_direction: Optional[str] = None  # "above" or "below" when context_ref is present
 
     def to_dict(self) -> dict:
         d = {
@@ -94,6 +96,10 @@ class LinkRecord:
             d["source_path"] = self.source_path
         if self.source_hash is not None:
             d["source_hash"] = self.source_hash
+        if self.context_ref is not None:
+            d["context_ref"] = self.context_ref
+        if self.relative_direction is not None:
+            d["relative_direction"] = self.relative_direction
         return d
 
     @staticmethod
@@ -108,10 +114,15 @@ class LinkRecord:
             line_index_base=d.get("line_index_base", 0),
             source_path=d.get("source_path"),
             source_hash=d.get("source_hash"),
+            context_ref=d.get("context_ref"),
+            relative_direction=d.get("relative_direction"),
         )
 
 
-_ALLOWED_KEYS = {"book_key", "line_index", "line_index_base", "start", "end", "target_ref", "source_path", "source_hash"}
+_ALLOWED_KEYS = {
+    "book_key", "line_index", "line_index_base", "start", "end", "target_ref",
+    "source_path", "source_hash", "context_ref", "relative_direction",
+}
 _ALLOWED_BOOK_KEY_KEYS = {"source_name", "canonical_he_title"}
 
 
@@ -155,6 +166,14 @@ def validate_record(d: dict) -> None:
     sh = d.get("source_hash")
     if sh is not None and (not isinstance(sh, str) or not _HASH_RE.match(sh)):
         raise ValueError("source_hash, when present, must be 16 lowercase hex chars")
+    context_ref = d.get("context_ref")
+    direction = d.get("relative_direction")
+    if (context_ref is None) != (direction is None):
+        raise ValueError("context_ref and relative_direction must be present together")
+    if context_ref is not None and (not isinstance(context_ref, str) or not context_ref.strip()):
+        raise ValueError("context_ref, when present, must be a non-empty string")
+    if direction is not None and direction not in {"above", "below"}:
+        raise ValueError("relative_direction must be 'above' or 'below'")
 
 
 def book_key_to_relpath(bk: BookKey) -> str:

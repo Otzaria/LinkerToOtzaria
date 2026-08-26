@@ -31,11 +31,11 @@ class SeedLineBaselineTest(unittest.TestCase):
         connection = sqlite3.connect(snapshot)
         connection.execute(
             "CREATE TABLE lines_snapshot("
-            "source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT)"
+            "source_name TEXT, canonical_he_title TEXT, line_index INTEGER, content TEXT, context_ref TEXT)"
         )
         connection.execute(
-            "INSERT INTO lines_snapshot VALUES(?,?,?,?)",
-            ("Source", "ספר", 0, "תוכן"),
+            "INSERT INTO lines_snapshot VALUES(?,?,?,?,?)",
+            ("Source", "ספר", 0, "תוכן", "ספר"),
         )
         connection.commit()
         connection.close()

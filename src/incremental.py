@@ -99,6 +99,7 @@ def _with_target_ref(rec, new_ref):
         book_key=rec.book_key, line_index=rec.line_index, start=rec.start,
         end=rec.end, target_ref=new_ref, line_index_base=rec.line_index_base,
         source_path=rec.source_path, source_hash=rec.source_hash,
+        context_ref=rec.context_ref, relative_direction=rec.relative_direction,
     )
 
 
@@ -139,6 +140,7 @@ def _with_book_key(rec, bk):
         book_key=bk, line_index=rec.line_index, start=rec.start, end=rec.end,
         target_ref=rec.target_ref, line_index_base=rec.line_index_base,
         source_path=rec.source_path, source_hash=rec.source_hash,
+        context_ref=rec.context_ref, relative_direction=rec.relative_direction,
     )
 
 
@@ -147,20 +149,21 @@ def _with_book_key(rec, bk):
 def snapshot_book_hashes(snapshot_db: str) -> dict[tuple[str, str], str]:
     """Per-book content hash over the snapshot's lines, keyed by (source_name, he_title).
 
-    Streams rows ordered by book then line_index and folds each book's (line_index, content)
-    into one sha1 — so any content or line change flips the hash, and it never materialises a
+    Streams rows ordered by book then line_index and folds each book's
+    (line_index, content, context_ref) into one sha1 — so any content, location
+    context or line change flips the hash, and it never materialises a
     whole book in memory. This is the exact content the linker links and stamps `source_hash`
     from, so a hash change here is precisely "this book must be re-linked"."""
     con = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
     try:
         rows = con.execute(
-            "SELECT source_name, canonical_he_title, line_index, content "
+            "SELECT source_name, canonical_he_title, line_index, content, context_ref "
             "FROM lines_snapshot ORDER BY source_name, canonical_he_title, line_index"
         )
         hashes: dict[tuple[str, str], str] = {}
         cur_key = None
         h = None
-        for s, t, li, content in rows:
+        for s, t, li, content, context_ref in rows:
             key = (s, t)
             if key != cur_key:
                 if cur_key is not None:
@@ -170,6 +173,8 @@ def snapshot_book_hashes(snapshot_db: str) -> dict[tuple[str, str], str]:
             h.update(str(li).encode("ascii"))
             h.update(b"\0")
             h.update((content or "").encode("utf-8"))
+            h.update(b"\0")
+            h.update((context_ref or "").encode("utf-8"))
             h.update(b"\0")
         if cur_key is not None:
             hashes[cur_key] = h.hexdigest()[:16]
