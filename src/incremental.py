@@ -771,7 +771,6 @@ def _run_engine(args, only_books_path):
     then clears such orphans."""
     import signal
     import subprocess
-    import threading
     import time
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "link_books.py")
     base_cmd = [args.python, engine,
@@ -798,78 +797,130 @@ def _run_engine(args, only_books_path):
     except OSError:
         pass
     worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
-    labels = [["--label", label] for label in worker_labels]
     heartbeat_dir = os.path.join(os.path.abspath(args.run_dir), "worker-heartbeats")
     os.makedirs(heartbeat_dir, exist_ok=True)
-    for label in worker_labels:
+
+    # The exact done ledger lets the supervisor avoid a pointless replacement if a
+    # worker happens to die after peers already completed the requested plan.  Keep
+    # direct unit-test callers with synthetic paths compatible; production always
+    # receives the JSON file written immediately above in run_incremental().
+    expected_done = None
+    try:
+        from link_books import claim_id
+        with open(only_books_path, encoding="utf-8") as fh:
+            requested = json.load(fh)
+        expected_done = {
+            claim_id(BookKey(item["source_name"], item["canonical_he_title"]))
+            for item in requested
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+    def ledger_complete():
+        done_dir = os.path.join(os.path.abspath(args.run_dir), "done")
+        return expected_done is not None and all(
+            os.path.isfile(os.path.join(done_dir, cid)) for cid in expected_done
+        )
+
+    procs = []
+    scope_paths = []
+    active = {}
+    spawned_at = {}
+    restart_counts = {label: 0 for label in worker_labels}
+    restart_limit = max(0, int(getattr(args, "engine_restart_limit", 2) or 0))
+    scope_dir = os.environ.get("LINKER_ENGINE_SCOPE_DIR")
+    scope_tool = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "ci", "process_scope.py",
+    )
+
+    def spawn_worker(label):
         try:
             os.remove(os.path.join(heartbeat_dir, label))
         except FileNotFoundError:
             pass
-    procs = []
-    scope_paths = []
-    watchdog_stop = threading.Event()
-    watchdog = None
+        proc = subprocess.Popen(
+            base_cmd + ["--label", label],
+            cwd=args.sef_project,
+            env=env,
+            start_new_session=True,
+            pass_fds=lease_fds,
+        )
+        # Record ownership immediately.  Every historical process remains in procs
+        # so the final cleanup also reaps a replacement's predecessor.
+        procs.append(proc)
+        active[label] = proc
+        spawned_at[proc.pid] = time.time()
+        if scope_dir:
+            os.makedirs(scope_dir, exist_ok=True)
+            restart = restart_counts[label]
+            state = os.path.join(scope_dir, f"engine-{label}-r{restart:02d}.json")
+            subprocess.run([
+                sys.executable, scope_tool, "record", "--state", state,
+                "--pid", str(proc.pid), "--kind", f"linker-engine-{label}",
+                "--expect", "link_books.py",
+            ], check=True)
+            scope_paths.append((state, proc))
+        return proc
+
     try:
         # Append immediately after every successful spawn.  A list comprehension
         # loses all already-created children if a later Popen raises before the
         # assignment completes, leaving an unowned worker/process group behind.
-        for extra in labels:
-            procs.append(subprocess.Popen(
-                base_cmd + extra,
-                cwd=args.sef_project,
-                env=env,
-                start_new_session=True,
-                pass_fds=lease_fds,
-            ))
-        scope_dir = os.environ.get("LINKER_ENGINE_SCOPE_DIR")
-        if scope_dir:
-            os.makedirs(scope_dir, exist_ok=True)
-            scope_tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ci", "process_scope.py")
-            for p, label in zip(procs, worker_labels):
-                state = os.path.join(scope_dir, f"engine-{label}.json")
-                subprocess.run([
-                    sys.executable, scope_tool, "record", "--state", state,
-                    "--pid", str(p.pid), "--kind", f"linker-engine-{label}",
-                    "--expect", "link_books.py",
-                ], check=True)
-                scope_paths.append((state, p))
-        spawned_at = {p.pid: time.time() for p in procs}
+        for label in worker_labels:
+            spawn_worker(label)
 
-        def monitor_heartbeats():
-            stall = float(getattr(args, "worker_stall_seconds", 1800) or 1800)
-            while not watchdog_stop.wait(min(30.0, max(1.0, stall / 10))):
-                now = time.time()
-                for p, label in zip(procs, worker_labels):
-                    if p.poll() is not None:
-                        continue
+        codes = []
+        stall = float(getattr(args, "worker_stall_seconds", 1800) or 1800)
+        while active:
+            time.sleep(1)
+            now = time.time()
+            for label, proc in list(active.items()):
+                code = proc.poll()
+                if code is None:
                     path = os.path.join(heartbeat_dir, label)
                     try:
-                        last = max(spawned_at[p.pid], os.path.getmtime(path))
+                        last = max(spawned_at[proc.pid], os.path.getmtime(path))
                     except OSError:
-                        last = spawned_at[p.pid]
+                        last = spawned_at[proc.pid]
                     if now - last <= stall:
                         continue
-                    _log(f"worker {label} pid={p.pid} has no heartbeat for {now-last:.0f}s; terminating its group")
+                    _log(
+                        f"worker {label} pid={proc.pid} has no heartbeat for "
+                        f"{now-last:.0f}s; terminating its group"
+                    )
                     try:
-                        os.killpg(p.pid, signal.SIGTERM)
+                        os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
-                        continue
-                    if watchdog_stop.wait(10):
-                        return
-                    if p.poll() is None:
+                        pass
+                    try:
+                        code = proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
                         try:
-                            os.killpg(p.pid, signal.SIGKILL)
+                            os.killpg(proc.pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+                        code = proc.wait()
 
-        watchdog = threading.Thread(target=monitor_heartbeats, name="engine-heartbeat-watchdog", daemon=True)
-        watchdog.start()
-        codes = [p.wait() for p in procs]
+                if code is None:
+                    continue
+                codes.append(code)
+                del active[label]
+                if code == 0 or ledger_complete():
+                    continue
+                if restart_counts[label] >= restart_limit:
+                    _log(
+                        f"worker {label} exited {code}; bounded replacement limit "
+                        f"{restart_limit} exhausted — peers may still complete its book"
+                    )
+                    continue
+                restart_counts[label] += 1
+                _log(
+                    f"worker {label} exited {code} before ledger completion; "
+                    f"starting bounded replacement {restart_counts[label]}/{restart_limit}"
+                )
+                spawn_worker(label)
     finally:
-        watchdog_stop.set()
-        if watchdog is not None:
-            watchdog.join(timeout=2)
         live = [p for p in procs if p.poll() is None]
         for p in live:
             try:
@@ -935,6 +986,8 @@ def main():
                          "outputs restored into --run-dir; claim/failed ledgers are rebuilt")
     ap.add_argument("--worker-stall-seconds", type=int, default=1800,
                     help="kill only a worker whose per-batch heartbeat is stale this long")
+    ap.add_argument("--engine-restart-limit", type=int, default=2,
+                    help="bounded replacements per nonzero-exiting engine worker")
     ap.add_argument("--forbid-full-relink", action="store_true",
                     help="serial mode: fail instead of a fingerprint-triggered full relink")
     ap.add_argument("--adopt-fingerprint", default=None, metavar="OLD::NEW",

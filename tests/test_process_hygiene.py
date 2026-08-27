@@ -9,6 +9,7 @@ driver, workers inherit it (pass_fds), so an orphaned worker keeps the lease hel
 until the relink-start reaper clears it.
 """
 import os
+import json
 from pathlib import Path
 import signal
 import subprocess
@@ -54,6 +55,41 @@ def _alive(pid):
 
 
 class ProcessHygieneTest(unittest.TestCase):
+    def test_nonzero_worker_is_replaced_and_completes_exact_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            os.makedirs(os.path.join(run_dir, "done"))
+            only = os.path.join(tmp, "only.json")
+            with open(only, "w", encoding="utf-8") as fh:
+                json.dump([{"source_name": "Source", "canonical_he_title": "Book"}], fh)
+
+            sys.path.insert(0, SRC)
+            import incremental
+            from linker_artifact import BookKey
+            from link_books import claim_id
+            cid = claim_id(BookKey("Source", "Book"))
+            fake = os.path.join(tmp, "fake_python")
+            with open(fake, "w") as fh:
+                fh.write(textwrap.dedent(f"""\
+                    #!/usr/bin/env bash
+                    if [ ! -e "{tmp}/first-exit" ]; then
+                      touch "{tmp}/first-exit"
+                      exit 7
+                    fi
+                    touch "{run_dir}/done/{cid}"
+                    exit 0
+                """))
+            os.chmod(fake, 0o755)
+            import types
+            args = types.SimpleNamespace(
+                python=fake, snapshot="s", repo="r", run_dir=run_dir,
+                sef_project=tmp, bavli_convention=False, engine_workers=1,
+                engine_restart_limit=2,
+            )
+
+            self.assertEqual(incremental._run_engine(args, only), [7, 0])
+            self.assertTrue(os.path.isfile(os.path.join(run_dir, "done", cid)))
+
     def test_sigterm_driver_leaves_no_worker_or_grandchild(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = os.path.join(tmp, "fake_python")

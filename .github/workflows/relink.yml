@@ -670,9 +670,12 @@ jobs:
         id: compute
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # The local ROCm host loads exactly one model process. Four independent CPU
-          # resolver workers share its queued HTTP service, keeping the GPU fed while
-          # peers resolve the previous batch without duplicating ~8GB of model VRAM.
+          # The local ROCm host loads exactly one model process. Exact-stack measurement
+          # on a 30,742-line mixed workload found four resolver workers fastest and safe
+          # (4/6/8/10 workers: 304/314/324/494 seconds, byte-identical output); higher
+          # counts only contend for the one GPU queue and multiply Sefaria memory.
+          # Longest-work-first assignment plus bounded worker replacement keeps all four
+          # useful without duplicating the model's VRAM.
           # Kaggle/server retain their independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
@@ -812,6 +815,7 @@ jobs:
           else
             ARGS+=(--engine-workers 3)
           fi
+          ARGS+=(--engine-restart-limit 2)
           [ -z "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" ] || ARGS+=(--resume-checkpoints)
           # An explicit OLD::NEW attestation is output-neutral by contract and is
           # therefore valid in both standalone and serial recovery.  Keeping this

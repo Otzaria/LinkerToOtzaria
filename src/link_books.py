@@ -44,7 +44,7 @@ NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 # library reload (~8s on M-series, ~22s on Neoverse-N1), so give workers headroom when
 # RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
-CLAIM_STALE_SEC = 900    # steal a claim whose heartbeat is older than this
+CLAIM_STALE_SEC = 900    # compatibility argument; the kernel lock is liveness authority
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 
 _HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
@@ -68,6 +68,35 @@ def is_ner_eligible_line(content: str) -> bool:
         return False
     visible = _HTML_TAG_RE.sub(" ", content)
     return len(_HEBREW_RE.findall(visible)) >= 2
+
+
+def schedule_planned_books(books, requested_plans):
+    """Deterministically start the heaviest exact-plan books first.
+
+    Claim-ledger workers otherwise inherit snapshot order, which can leave a giant
+    book until the end and reduce the whole pool to one busy worker.  Longest-first
+    scheduling changes only assignment order—not batching, IDs, content or output—
+    and therefore remains compatible with exact completed-book and batch checkpoints.
+    Plans without line-level work estimates retain their original order.
+    """
+    if not books or not all(
+        isinstance(requested_plans.get((book.source_name, book.canonical_he_title)), dict)
+        and "ner_ranges" in requested_plans[(book.source_name, book.canonical_he_title)]
+        and "reuse" in requested_plans[(book.source_name, book.canonical_he_title)]
+        for book in books
+    ):
+        return list(books)
+
+    def work(book):
+        item = requested_plans[(book.source_name, book.canonical_he_title)]
+        ner = sum(end - start for start, end in item["ner_ranges"])
+        # Reused rows still need deterministic artifact assembly, but NER dominates.
+        return ner * 4 + len(item["reuse"])
+
+    return sorted(
+        books,
+        key=lambda book: (-work(book), book.source_name, book.canonical_he_title),
+    )
 
 
 def validate_snapshot_contract(con) -> None:
@@ -193,15 +222,12 @@ class BookClaim:
         try:
             os.mkdir(claim_path)
         except FileExistsError:
-            try:
-                fresh = time.time() - os.path.getmtime(heartbeat_path) < stale_seconds
-            except OSError:
-                fresh = False
-            if fresh:
-                # A previous worker ended unexpectedly but its heartbeat is still
-                # within the recovery window.  Leave its resumable checkpoints alone.
-                abandon_lock()
-                return None
+            # Reaching this branch while holding the advisory lock proves that no
+            # live worker owns the claim.  Waiting for the old heartbeat to age out
+            # used to strand a crashed worker's book for up to 15 minutes even though
+            # the kernel had already released its ownership lock.  Retire only the
+            # mutable claim directory immediately; immutable batch checkpoints live
+            # elsewhere and are reused by the replacement worker.
             retired = f"{claim_path}.abandoned-{uuid.uuid4().hex}"
             os.replace(claim_path, retired)
             shutil.rmtree(retired, ignore_errors=True)
@@ -734,6 +760,7 @@ def main():
         if len(books) != len(wanted):
             missing = wanted - {(book.source_name, book.canonical_he_title) for book in books}
             raise RuntimeError(f"--only-books includes book(s) absent from snapshot: {sorted(missing)!r}")
+        books = schedule_planned_books(books, requested_plans)
         log(f"restricted to {len(books)}/{len(wanted)} requested books")
     precomputed = None
     if args.ner_bundle_dir:

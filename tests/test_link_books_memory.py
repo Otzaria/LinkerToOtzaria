@@ -53,6 +53,33 @@ class WorkerMemoryTest(unittest.TestCase):
         self.assertFalse(link_books.recycle_needed(current_rss=100, cap=100, processed=0))
         self.assertTrue(link_books.recycle_needed(current_rss=101, cap=100, processed=1))
 
+    def test_exact_plan_schedules_heaviest_books_first_without_changing_identity(self):
+        light = link_books.BookKey("Source", "Light")
+        heavy = link_books.BookKey("Source", "Heavy")
+        medium = link_books.BookKey("Source", "Medium")
+        plans = {
+            (light.source_name, light.canonical_he_title): {
+                "ner_ranges": [[0, 2]], "reuse": [],
+            },
+            (heavy.source_name, heavy.canonical_he_title): {
+                "ner_ranges": [[0, 10]], "reuse": [],
+            },
+            (medium.source_name, medium.canonical_he_title): {
+                "ner_ranges": [[0, 4]], "reuse": [[4, 4]],
+            },
+        }
+        self.assertEqual(
+            link_books.schedule_planned_books([light, heavy, medium], plans),
+            [heavy, medium, light],
+        )
+
+    def test_plan_without_line_estimates_preserves_snapshot_order(self):
+        books = [link_books.BookKey("Source", "B"), link_books.BookKey("Source", "A")]
+        plans = {
+            (book.source_name, book.canonical_he_title): {} for book in books
+        }
+        self.assertEqual(link_books.schedule_planned_books(books, plans), books)
+
     def test_stale_heartbeat_cannot_steal_a_live_book_lock(self):
         """A slow resolver must never race a peer over its checkpoint directory."""
         with tempfile.TemporaryDirectory() as run:
@@ -70,6 +97,18 @@ class WorkerMemoryTest(unittest.TestCase):
 
             first.release()
             recovered = link_books.BookClaim.acquire(run, "book", stale_seconds=1)
+            self.assertIsNotNone(recovered)
+            recovered.release()
+
+    def test_fresh_orphan_claim_is_recovered_immediately(self):
+        """A dead owner is proved by the free kernel lock; heartbeat age is irrelevant."""
+        with tempfile.TemporaryDirectory() as run:
+            os.makedirs(os.path.join(run, "done"))
+            claim_dir = os.path.join(run, "claim", "book")
+            os.makedirs(claim_dir)
+            open(os.path.join(claim_dir, "hb"), "w").close()
+
+            recovered = link_books.BookClaim.acquire(run, "book", stale_seconds=900)
             self.assertIsNotNone(recovered)
             recovered.release()
 
