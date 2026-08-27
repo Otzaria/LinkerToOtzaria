@@ -491,35 +491,57 @@ def run_incremental(args) -> int:
     codes: list[int] = []
     if changed:
         os.makedirs(args.run_dir, exist_ok=True)
+        changed_books_payload = [
+            {
+                **book.to_dict(),
+                "hash": current[(book.source_name, book.canonical_he_title)],
+                "ner_ranges": [
+                    [start, end]
+                    for start, end in line_deltas[
+                        (book.source_name, book.canonical_he_title)
+                    ].ner_ranges
+                ],
+                "reuse": [
+                    [old_index, new_index]
+                    for old_index, new_index in line_deltas[
+                        (book.source_name, book.canonical_he_title)
+                    ].reuse
+                ],
+            }
+            for book in changed
+        ]
         # Fresh engine ledger for THIS invocation. done/claim/failed markers are meaningful only
         # WITHIN one link_books.py run (poison-loop guard, worker claims, failure ledger). A stale
         # `done` from a reused run_dir would make the engine SKIP a changed book with no `failed`
-        # marker → baseline would advance as if it linked → orphan. So we never depend on external
-        # workspace cleanup: we clear them ourselves. (logs/ is append-only diagnostics — kept.)
+        # marker → baseline would advance as if it linked → orphan. An explicitly restored
+        # checkpoint may retain only immutable per-batch shards, and only when its complete
+        # changed-book plan is byte-for-byte equivalent after JSON parsing. done/claim/failed are
+        # always discarded; the fresh invocation reconstructs every completed book from verified
+        # shards and writes new done markers. (logs/ is append-only diagnostics — kept.)
         import shutil
-        for d in ("done", "claim", "failed", "checkpoints"):
+        resume_checkpoints = bool(getattr(args, "resume_checkpoints", False))
+        for d in ("done", "claim", "failed"):
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
-        with open(only, "w", encoding="utf-8") as fh:
-            json.dump([
-                {
-                    **book.to_dict(),
-                    "hash": current[(book.source_name, book.canonical_he_title)],
-                    "ner_ranges": [
-                        [start, end]
-                        for start, end in line_deltas[
-                            (book.source_name, book.canonical_he_title)
-                        ].ner_ranges
-                    ],
-                    "reuse": [
-                        [old_index, new_index]
-                        for old_index, new_index in line_deltas[
-                            (book.source_name, book.canonical_he_title)
-                        ].reuse
-                    ],
-                }
-                for book in changed
-            ], fh, ensure_ascii=False)
+        if resume_checkpoints:
+            try:
+                with open(only, encoding="utf-8") as fh:
+                    restored_payload = json.load(fh)
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    "--resume-checkpoints requires a valid restored changed_books.json"
+                ) from error
+            if restored_payload != changed_books_payload:
+                raise RuntimeError(
+                    "restored checkpoint plan differs from the exact current incremental plan"
+                )
+            if not os.path.isdir(os.path.join(args.run_dir, "checkpoints")):
+                raise RuntimeError("--resume-checkpoints requires a restored checkpoints directory")
+            _log("accepted exact-plan local checkpoint; stale ledgers were discarded")
+        else:
+            shutil.rmtree(os.path.join(args.run_dir, "checkpoints"), ignore_errors=True)
+            with open(only, "w", encoding="utf-8") as fh:
+                json.dump(changed_books_payload, fh, ensure_ascii=False)
         requested_ner_lines = sum(
             line_deltas[(book.source_name, book.canonical_he_title)].ner_line_count
             for book in changed
@@ -796,6 +818,9 @@ def main():
                     help="engine identity (commits/models/policy); a change forces a FULL relink")
     ap.add_argument("--engine-workers", type=int, default=1,
                     help="parallel link_books.py processes (claim-ledger coordinated)")
+    ap.add_argument("--resume-checkpoints", action="store_true",
+                    help="reuse exact-plan immutable batch shards restored into --run-dir; "
+                         "done/claim/failed ledgers are always rebuilt")
     ap.add_argument("--worker-stall-seconds", type=int, default=1800,
                     help="kill only a worker whose per-batch heartbeat is stale this long")
     ap.add_argument("--forbid-full-relink", action="store_true",

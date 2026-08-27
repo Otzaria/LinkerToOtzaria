@@ -525,6 +525,40 @@ def process_book_checkpointed(
         shard = os.path.join(checkpoint_dir, f"{i:012d}.jsonl")
         shard_paths.append(shard)
         if os.path.exists(shard):
+            # A resumed shard is useful only if it is bound to this exact book, batch,
+            # source content and contextual line identity. The cache manifest protects
+            # bytes in transit; these semantic checks protect against restoring a valid
+            # shard under the wrong plan/snapshot. Non-relative records intentionally
+            # omit context_ref, while a relative record must retain the exact context.
+            batch_by_index = {
+                line_index: (content, context_ref)
+                for line_index, content, context_ref in batch
+            }
+            for record in read_artifact(shard):
+                if record.book_key != bk:
+                    raise RuntimeError(f"checkpoint shard contains a different book for {bk!r}")
+                current = batch_by_index.get(record.line_index)
+                if current is None:
+                    raise RuntimeError(
+                        f"checkpoint shard line {record.line_index} is outside its exact batch for {bk!r}"
+                    )
+                current_content, current_context = current
+                if record.source_hash != content_hash(current_content):
+                    raise RuntimeError(
+                        f"checkpoint shard source hash mismatch for "
+                        f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
+                    )
+                if record.context_ref is not None and record.context_ref != current_context:
+                    raise RuntimeError(
+                        f"checkpoint shard context mismatch for "
+                        f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
+                    )
+                utf16_length = len(current_content.encode("utf-16-le")) // 2
+                if record.end > utf16_length:
+                    raise RuntimeError(
+                        f"checkpoint shard offset exceeds source line for "
+                        f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
+                    )
             continue
         records, _ = process_batch(
             linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,

@@ -115,10 +115,25 @@ on:
           Explicit operator authorization for one output-changing baseline migration
           against an exact failed serial parent snapshot. Requires recovery_mode,
           target=local and a pinned parent; it must never be used for an ordinary
-          weekly delta or together with fingerprint adoption/checkpoint recovery.
+          weekly delta or together with fingerprint adoption/Kaggle checkpoint recovery.
         required: false
         default: false
         type: boolean
+      local_checkpoint_source_run_id:
+        description: >
+          Exact terminal local relink run whose identity-bound immutable batch shards
+          should be resumed on the same durable host. Requires recovery_mode,
+          target=local and source attempt coordinates.
+        required: false
+        default: ''
+        type: string
+      local_checkpoint_source_run_attempt:
+        description: >
+          Exact source attempt stored in the durable local checkpoint manifest.
+          Empty unless local_checkpoint_source_run_id is set.
+        required: false
+        default: ''
+        type: string
       adopt_fingerprint:
         description: >
           Operator-attested migration 'OLD::NEW' — re-stamp the baseline engine
@@ -236,6 +251,7 @@ jobs:
       LINKER_CACHE_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack' || '' }}
       LINKER_STACK_DIR: ${{ inputs.target == 'local' && '/opt/otzaria-cache/linker-stack-runtime' || '' }}
       LINKER_GPU_VENV: ${{ inputs.target == 'local' && '/opt/otzaria-cache/venvs/linker-rocm-7.2.1' || '' }}
+      LINKER_LOCAL_CHECKPOINT_CACHE_ROOT: ${{ inputs.target == 'local' && '/opt/otzaria-cache/local-relink-checkpoints' || '' }}
       LINKER_ACCELERATOR_PROFILE: ${{ inputs.target == 'local' && 'rocm-7.2.1-torch-2.9.1-cupy-14.2.0-nespan-0.7-spacy38' || '' }}
       HSA_ENABLE_DXG_DETECTION: ${{ inputs.target == 'local' && '1' || '' }}
       TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: ${{ inputs.target == 'local' && '1' || '' }}
@@ -407,6 +423,8 @@ jobs:
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
           NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
+          LOCAL_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.local_checkpoint_source_run_id }}
+          LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.local_checkpoint_source_run_attempt }}
         run: |
           set -euo pipefail
           # Shape-validate EVERY dispatch input once, fail-closed, before any step
@@ -444,6 +462,31 @@ jobs:
             }
             [ -n "$RECOVERY_MODE" ] && [ "$TARGET" = kaggle ] || {
               echo "::error::checkpoint source coordinates require recovery_mode and target=kaggle"; exit 1;
+            }
+          fi
+          [ -z "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" ] || [[ "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::local_checkpoint_source_run_id must be a positive integer"; exit 1;
+          }
+          [ -z "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || [[ "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::local_checkpoint_source_run_attempt must be a positive integer"; exit 1;
+          }
+          if [ -n "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" ] || [ -n "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" ]; then
+            [ -n "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" ] && [ -n "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] || {
+              echo "::error::local checkpoint recovery requires both source coordinates"; exit 1;
+            }
+            [ -n "$RECOVERY_MODE" ] && [ "$TARGET" = local ] &&
+              [ -z "$ADOPT_FINGERPRINT" ] && [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || {
+              echo "::error::local checkpoint source requires exact local recovery without adoption/Kaggle checkpoint"; exit 1;
+            }
+            source_json="$RUNNER_TEMP/local-checkpoint-source.json"
+            gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID" > "$source_json"
+            expected_title="relink-recovery request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
+            jq -e --argjson attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" --arg title "$expected_title" '
+              .status == "completed" and (.conclusion == "cancelled" or .conclusion == "failure") and
+              .event == "workflow_dispatch" and .path == ".github/workflows/relink.yml" and
+              .run_attempt == $attempt and .display_title == $title
+            ' "$source_json" >/dev/null || {
+              echo "::error::local checkpoint source is not the exact terminal recovery attempt"; exit 1;
             }
           fi
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
@@ -574,6 +617,30 @@ jobs:
           NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
         run: bash ci/restore_ner_checkpoint.sh "$RUN_DIR/ner-handoff"
 
+      - name: Restore exact local batch checkpoint
+        if: inputs.target == 'local' && inputs.local_checkpoint_source_run_id != ''
+        env:
+          SOURCE_RUN_ID: ${{ inputs.local_checkpoint_source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.local_checkpoint_source_run_attempt }}
+          RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
+          LIBRARY_RUN_ID: ${{ inputs.library_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
+        run: |
+          python3 ci/local_checkpoint_cache.py restore \
+            --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
+            --run-dir "$RUN_DIR" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-run-attempt "$SOURCE_RUN_ATTEMPT" \
+            --request-id "$RELINK_REQUEST_ID" \
+            --parent-run-id "$LIBRARY_RUN_ID" \
+            --parent-run-attempt "$PARENT_RUN_ATTEMPT" \
+            --snapshot-sha256 "$SNAPSHOT_SHA256" \
+            --sefaria-tag "$SEF_TAG" \
+            --sefaria-metadata-sha256 "$SEFARIA_METADATA_SHA256"
+
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
       # target=server retains the legacy Mongo+NER+Django path. The server path runs as
       # ONE step under a host lease: a kernel flock whose FD is
@@ -602,10 +669,11 @@ jobs:
         id: compute
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # Kaggle runs two producer processes against one NER model server; it never
-          # starts resolution workers. The server fallback retains its measured NER
-          # process count and 100-line transport boundary.
-          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.library_run_id != '' && '2' || '3') }}
+          # The local ROCm host loads exactly one model process. Four independent CPU
+          # resolver workers share its queued HTTP service, keeping the GPU fed while
+          # peers resolve the previous batch without duplicating ~8GB of model VRAM.
+          # Kaggle/server retain their independently measured process counts.
+          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
           # Shared, pre-provisioned via /etc/tmpfiles.d/otzaria-pipeline.conf on the
           # box (1777 dir, recreated on boot) — same path the SeforimLibrary build
@@ -619,6 +687,10 @@ jobs:
           ALLOW_FULL_RELINK: ${{ inputs.allow_full_relink && '1' || '' }}
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
+          LOCAL_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.local_checkpoint_source_run_id }}
+          PARENT_RUN_ATTEMPT: ${{ inputs.parent_run_attempt }}
+          SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
+          SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
         run: |
           set -euo pipefail
@@ -653,7 +725,30 @@ jobs:
           fi
           # Teardown by OWNED pid (gunicorn --pid via setup_stack), still under the
           # lease/serialization — never a broad pkill sweep of the whole host.
-          trap 'bash ci/stop_ner.sh || true' EXIT
+          finish_compute() {
+            rc=$?
+            trap - EXIT
+            if [ "$TARGET" = local ] && [ -n "$LIBRARY_RUN_ID" ] &&
+               [ -f "$RUN_DIR/changed_books.json" ] && [ -d "$RUN_DIR/checkpoints" ]; then
+              python3 ci/local_checkpoint_cache.py save \
+                --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
+                --run-dir "$RUN_DIR" \
+                --source-run-id "$GITHUB_RUN_ID" \
+                --source-run-attempt "$GITHUB_RUN_ATTEMPT" \
+                --request-id "$RELINK_REQUEST_ID" \
+                --parent-run-id "$LIBRARY_RUN_ID" \
+                --parent-run-attempt "$PARENT_RUN_ATTEMPT" \
+                --snapshot-sha256 "$SNAPSHOT_SHA256" \
+                --sefaria-tag "$SEF_TAG" \
+                --sefaria-metadata-sha256 "$SEFARIA_METADATA_SHA256" || {
+                  echo "::error::failed to persist the exact local Linker checkpoint"
+                  [ "$rc" -ne 0 ] || rc=1
+                }
+            fi
+            bash ci/stop_ner.sh || true
+            exit "$rc"
+          }
+          trap finish_compute EXIT
           if [ "$TARGET" = kaggle ]; then
             export LINKER_STACK_ROLE=ner
           else
@@ -706,12 +801,16 @@ jobs:
               "${CHECKPOINT_ARGS[@]}"
             exit 0
           fi
-          if [ -n "$LIBRARY_RUN_ID" ]; then
+          if [ "$TARGET" = local ]; then
+            ARGS+=(--engine-workers 4)
+            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
+          elif [ -n "$LIBRARY_RUN_ID" ]; then
             ARGS+=(--engine-workers 2)
             [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           else
             ARGS+=(--engine-workers 3)
           fi
+          [ -z "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" ] || ARGS+=(--resume-checkpoints)
           # An explicit OLD::NEW attestation is output-neutral by contract and is
           # therefore valid in both standalone and serial recovery.  Keeping this
           # outside the worker-count branch prevents a recovery from silently

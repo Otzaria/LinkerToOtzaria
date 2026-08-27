@@ -134,6 +134,27 @@ class WorkerMemoryTest(unittest.TestCase):
             self.assertEqual(words, 10)
             self.assertTrue(os.path.exists(output))
 
+    def test_resumed_checkpoint_is_bound_to_exact_source_content(self):
+        bk = link_books.BookKey("source", "book")
+        lines = [(0, "תוכן נוכחי", "ספר")]
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "checkpoint")
+            os.makedirs(checkpoint)
+            link_books.write_artifact(
+                os.path.join(checkpoint, "000000000000.jsonl"),
+                [
+                    link_books.LinkRecord(
+                        bk, 0, 0, 1, "Genesis 1:1", source_hash="0" * 16
+                    )
+                ],
+            )
+            with self.assertRaisesRegex(RuntimeError, "source hash mismatch"):
+                link_books.process_book_checkpointed(
+                    object(), bk, lines, lambda _line: None, lambda: None,
+                    checkpoint, os.path.join(tmp, "artifact.jsonl"),
+                    lambda *_args: None,
+                )
+
     def test_heading_lines_are_not_sent_and_context_is_forwarded(self):
         class Doc:
             resolved_refs = []

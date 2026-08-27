@@ -123,6 +123,39 @@ class IncrementalE2ETest(unittest.TestCase):
         # run4: same v2 snapshot -> baseline advanced only for what was linked -> 0.
         self.assertEqual(inc.run_incremental(self._args()), 0)
 
+    def test_exact_plan_checkpoint_resume_preserves_shards_but_rebuilds_ledgers(self):
+        _snapshot(self.snap, self._rows())
+        self.fail_engine = True
+        with self.assertRaisesRegex(RuntimeError, "simulated engine failure"):
+            inc.run_incremental(self._args())
+        checkpoint = os.path.join(self.run_dir, "checkpoints", "sentinel")
+        os.makedirs(os.path.dirname(checkpoint), exist_ok=True)
+        with open(checkpoint, "w", encoding="utf-8") as stream:
+            stream.write("immutable")
+        os.makedirs(os.path.join(self.run_dir, "done"), exist_ok=True)
+        open(os.path.join(self.run_dir, "done", "stale"), "w").close()
+
+        self.fail_engine = False
+        args = self._args()
+        args.resume_checkpoints = True
+        self.assertEqual(inc.run_incremental(args), 3)
+        self.assertTrue(os.path.isfile(checkpoint))
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "done", "stale")))
+
+    def test_checkpoint_resume_rejects_a_different_plan(self):
+        _snapshot(self.snap, self._rows())
+        self.fail_engine = True
+        with self.assertRaisesRegex(RuntimeError, "simulated engine failure"):
+            inc.run_incremental(self._args())
+        only = os.path.join(self.run_dir, "changed_books.json")
+        with open(only, "w", encoding="utf-8") as stream:
+            stream.write("[]")
+        os.makedirs(os.path.join(self.run_dir, "checkpoints"), exist_ok=True)
+        args = self._args()
+        args.resume_checkpoints = True
+        with self.assertRaisesRegex(RuntimeError, "differs from the exact current"):
+            inc.run_incremental(args)
+
     def test_changed_book_sends_only_unmatched_lines_to_ner(self):
         _snapshot(self.snap, [
             (*self.A, 0, "א"),

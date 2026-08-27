@@ -163,6 +163,12 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             workflow.count('[ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)'),
             1,
         )
+        self.assertIn("local_checkpoint_source_run_id:", workflow)
+        self.assertIn("ci/local_checkpoint_cache.py restore", workflow)
+        self.assertIn("ci/local_checkpoint_cache.py save", workflow)
+        self.assertIn("--resume-checkpoints", workflow)
+        self.assertIn("ARGS+=(--engine-workers 4)", workflow)
+        self.assertIn("inputs.target == 'local' && '1'", workflow)
 
     def test_kaggle_is_ner_only_and_resolution_runs_on_server(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
