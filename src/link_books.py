@@ -45,6 +45,7 @@ NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 # RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
 CLAIM_STALE_SEC = 900    # compatibility argument; the kernel lock is liveness authority
+RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 
 _HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
@@ -815,8 +816,11 @@ def main():
                          if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
             if remaining:
                 worker_heartbeat()
-                log(f"rescan: {len(remaining)} book(s) still lack a done marker; sleeping 60s")
-                time.sleep(60)
+                log(
+                    f"rescan: {len(remaining)} book(s) still lack a done marker; "
+                    f"sleeping {RESCAN_WAIT_SEC}s"
+                )
+                time.sleep(RESCAN_WAIT_SEC)
 
     processed = 0
     for bk in pending_books():

@@ -679,6 +679,10 @@ jobs:
           # Kaggle/server retain their independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
+          # A local worker recycle releases its book claim immediately. Polling the
+          # exact ledger every 10s keeps a giant checkpointed book moving without the
+          # old one-minute handoff gaps; other hosts retain the conservative default.
+          LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}
           # Shared, pre-provisioned via /etc/tmpfiles.d/otzaria-pipeline.conf on the
           # box (1777 dir, recreated on boot) — same path the SeforimLibrary build
           # holds; never a user-owned /tmp file a cleaner could unlink mid-hold.

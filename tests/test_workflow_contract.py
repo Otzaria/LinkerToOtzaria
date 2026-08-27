@@ -178,6 +178,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("--resume-checkpoints", workflow)
         self.assertIn("ARGS+=(--engine-workers 4)", workflow)
         self.assertIn("ARGS+=(--engine-restart-limit 2)", workflow)
+        self.assertIn("LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)
 
     def test_kaggle_is_ner_only_and_resolution_runs_on_server(self):
