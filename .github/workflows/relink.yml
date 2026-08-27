@@ -674,8 +674,9 @@ jobs:
           # on a 30,742-line mixed workload found four resolver workers fastest and safe
           # (4/6/8/10 workers: 304/314/324/494 seconds, byte-identical output); higher
           # counts only contend for the one GPU queue and multiply Sefaria memory.
-          # Longest-work-first assignment plus bounded worker replacement keeps all four
-          # useful without duplicating the model's VRAM.
+          # Bounded worker replacement keeps all four useful without duplicating the
+          # model's VRAM. Preserve exact snapshot order: forcing all giant books to the
+          # front was measured slower because it creates GPU-queue and memory contention.
           # Kaggle/server retain their independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}

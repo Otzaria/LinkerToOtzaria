@@ -71,35 +71,6 @@ def is_ner_eligible_line(content: str) -> bool:
     return len(_HEBREW_RE.findall(visible)) >= 2
 
 
-def schedule_planned_books(books, requested_plans):
-    """Deterministically start the heaviest exact-plan books first.
-
-    Claim-ledger workers otherwise inherit snapshot order, which can leave a giant
-    book until the end and reduce the whole pool to one busy worker.  Longest-first
-    scheduling changes only assignment order—not batching, IDs, content or output—
-    and therefore remains compatible with exact completed-book and batch checkpoints.
-    Plans without line-level work estimates retain their original order.
-    """
-    if not books or not all(
-        isinstance(requested_plans.get((book.source_name, book.canonical_he_title)), dict)
-        and "ner_ranges" in requested_plans[(book.source_name, book.canonical_he_title)]
-        and "reuse" in requested_plans[(book.source_name, book.canonical_he_title)]
-        for book in books
-    ):
-        return list(books)
-
-    def work(book):
-        item = requested_plans[(book.source_name, book.canonical_he_title)]
-        ner = sum(end - start for start, end in item["ner_ranges"])
-        # Reused rows still need deterministic artifact assembly, but NER dominates.
-        return ner * 4 + len(item["reuse"])
-
-    return sorted(
-        books,
-        key=lambda book: (-work(book), book.source_name, book.canonical_he_title),
-    )
-
-
 def validate_snapshot_contract(con) -> None:
     """Require the context-aware snapshot produced by the current DB build."""
     try:
@@ -761,7 +732,6 @@ def main():
         if len(books) != len(wanted):
             missing = wanted - {(book.source_name, book.canonical_he_title) for book in books}
             raise RuntimeError(f"--only-books includes book(s) absent from snapshot: {sorted(missing)!r}")
-        books = schedule_planned_books(books, requested_plans)
         log(f"restricted to {len(books)}/{len(wanted)} requested books")
     precomputed = None
     if args.ner_bundle_dir:
