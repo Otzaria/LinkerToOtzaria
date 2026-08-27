@@ -110,6 +110,15 @@ on:
         required: false
         default: false
         type: boolean
+      allow_full_relink:
+        description: >
+          Explicit operator authorization for one output-changing baseline migration
+          against an exact failed serial parent snapshot. Requires recovery_mode,
+          target=local and a pinned parent; it must never be used for an ordinary
+          weekly delta or together with fingerprint adoption/checkpoint recovery.
+        required: false
+        default: false
+        type: boolean
       adopt_fingerprint:
         description: >
           Operator-attested migration 'OLD::NEW' — re-stamp the baseline engine
@@ -393,6 +402,7 @@ jobs:
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
           SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
           RECOVERY_MODE: ${{ inputs.recovery_mode && '1' || '' }}
+          ALLOW_FULL_RELINK: ${{ inputs.allow_full_relink && '1' || '' }}
           TARGET: ${{ inputs.target }}
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
@@ -457,6 +467,25 @@ jobs:
           fi
           if [ -n "$RECOVERY_MODE" ] && [ -z "$LIBRARY_RUN_ID" ]; then
             echo "::error::recovery_mode requires an exact serial parent"; exit 1
+          fi
+          if [ -n "$ALLOW_FULL_RELINK" ]; then
+            [ -n "$RECOVERY_MODE" ] && [ -n "$LIBRARY_RUN_ID" ] &&
+              [ "$TARGET" = local ] && [ -z "$ADOPT_FINGERPRINT" ] &&
+              [ -z "$SEED_LINE_BASELINE" ] &&
+              [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || {
+              echo "::error::allow_full_relink requires an exact local recovery without adoption/seed/checkpoint reuse"; exit 1;
+            }
+            parent_json="$RUNNER_TEMP/full-relink-parent.json"
+            gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID" > "$parent_json"
+            jq -e --argjson attempt "$PARENT_RUN_ATTEMPT" '
+              .status == "completed" and .conclusion == "failure" and
+              .event == "workflow_dispatch" and
+              .path == ".github/workflows/manual-generate-release.yml" and
+              .run_attempt == $attempt
+            ' "$parent_json" >/dev/null || {
+              echo "::error::allow_full_relink parent is not the exact failed Seforim build attempt"; exit 1;
+            }
+            echo "validated one full baseline migration for failed parent $LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
           fi
           if [ -n "$SEFARIA_TAG_INPUT" ]; then
             SEF_TAG="$SEFARIA_TAG_INPUT"
@@ -587,6 +616,7 @@ jobs:
           RELINK_REQUEST_ID: ${{ inputs.relink_request_id }}
           ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
           SEED_LINE_BASELINE: ${{ inputs.seed_line_baseline && '1' || '' }}
+          ALLOW_FULL_RELINK: ${{ inputs.allow_full_relink && '1' || '' }}
           NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT: ${{ inputs.ner_checkpoint_source_engine_fingerprint }}
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
@@ -651,7 +681,7 @@ jobs:
           if [ "$TARGET" = kaggle ]; then
             PLAN="$RUN_DIR/ner-plan.json"
             PLAN_ARGS=("${ARGS[@]}" --plan-only "$PLAN" --relink-request-id "$RELINK_REQUEST_ID")
-            [ -z "$LIBRARY_RUN_ID" ] || PLAN_ARGS+=(--forbid-full-relink)
+            [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
           CHECKPOINT_ARGS=()
@@ -678,7 +708,7 @@ jobs:
           fi
           if [ -n "$LIBRARY_RUN_ID" ]; then
             ARGS+=(--engine-workers 2)
-            ARGS+=(--forbid-full-relink)
+            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           else
             ARGS+=(--engine-workers 3)
           fi

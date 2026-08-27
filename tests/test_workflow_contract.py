@@ -150,6 +150,20 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', workflow)
         self.assertGreaterEqual(workflow.count("--forbid-full-relink"), 2)
 
+    def test_full_relink_requires_explicit_exact_local_recovery(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("allow_full_relink:", workflow)
+        self.assertIn("ALLOW_FULL_RELINK: ${{ inputs.allow_full_relink && '1' || '' }}", workflow)
+        self.assertIn('[ "$TARGET" = local ]', workflow)
+        self.assertIn('.status == "completed" and .conclusion == "failure"', workflow)
+        self.assertIn('allow_full_relink parent is not the exact failed Seforim build attempt', workflow)
+        self.assertGreaterEqual(
+            workflow.count('[ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)'),
+            1,
+        )
+
     def test_kaggle_is_ner_only_and_resolution_runs_on_server(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
