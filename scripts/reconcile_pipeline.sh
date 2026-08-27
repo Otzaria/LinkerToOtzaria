@@ -9,6 +9,9 @@
 #   • parent completed (any conclusion)            → normal child: cancel.
 #   • recovery child + same failed terminal attempt → keep: this is the explicit
 #     replay contract, and no live build is expected to be waiting.
+#   • recovery child + a later parent rerun         → keep: GitHub mutates the
+#     databaseId's visible run_attempt, but that must not retroactively orphan an
+#     already-authorized content-addressed recovery of the earlier failed attempt.
 #   • parent's current attempt > stamped attempt   → that attempt was superseded by a
 #     rerun (its request id is dead — a rerun derives a NEW id) — cancel.
 #   • parent gone entirely (HTTP 404)              → deleted/never existed — cancel.
@@ -85,7 +88,10 @@ handle_run() {
     FAILURES=$((FAILURES+1)); return 0
   fi
 
-  if [ "$kind" = relink-recovery ] && [ "$pcurrent" -eq "$pattempt" ]; then
+  if [ "$kind" = relink-recovery ] && [ "$pcurrent" -gt "$pattempt" ]; then
+    echo "keep  $wf/$rid: explicit recovery of earlier parent attempt $prun:$pattempt; current attempt is $pcurrent"
+    return 0
+  elif [ "$kind" = relink-recovery ] && [ "$pcurrent" -eq "$pattempt" ]; then
     if [ "$pstatus" != completed ]; then
       echo "::warning::recovery $wf/$rid has a non-terminal parent $prun:$pattempt — left untouched"
       FAILURES=$((FAILURES+1))

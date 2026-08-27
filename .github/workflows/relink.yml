@@ -479,7 +479,7 @@ jobs:
               echo "::error::local checkpoint source requires exact local recovery without adoption/Kaggle checkpoint"; exit 1;
             }
             source_json="$RUNNER_TEMP/local-checkpoint-source.json"
-            gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID" > "$source_json"
+            gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID/attempts/$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" > "$source_json"
             expected_title="relink-recovery request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
             jq -e --argjson attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" --arg title "$expected_title" '
               .status == "completed" and (.conclusion == "cancelled" or .conclusion == "failure") and
@@ -519,7 +519,7 @@ jobs:
               echo "::error::allow_full_relink requires an exact local recovery without adoption/seed/checkpoint reuse"; exit 1;
             }
             parent_json="$RUNNER_TEMP/full-relink-parent.json"
-            gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID" > "$parent_json"
+            gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID/attempts/$PARENT_RUN_ATTEMPT" > "$parent_json"
             jq -e --argjson attempt "$PARENT_RUN_ATTEMPT" '
               .status == "completed" and .conclusion == "failure" and
               .event == "workflow_dispatch" and
@@ -632,6 +632,7 @@ jobs:
           python3 ci/local_checkpoint_cache.py restore \
             --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
             --run-dir "$RUN_DIR" \
+            --repo "$PWD" \
             --source-run-id "$SOURCE_RUN_ID" \
             --source-run-attempt "$SOURCE_RUN_ATTEMPT" \
             --request-id "$RELINK_REQUEST_ID" \
@@ -733,6 +734,7 @@ jobs:
               python3 ci/local_checkpoint_cache.py save \
                 --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
                 --run-dir "$RUN_DIR" \
+                --repo "$PWD" \
                 --source-run-id "$GITHUB_RUN_ID" \
                 --source-run-attempt "$GITHUB_RUN_ATTEMPT" \
                 --request-id "$RELINK_REQUEST_ID" \
@@ -1092,7 +1094,7 @@ jobs:
             echo "::error::recovery commit is not a forward descendant of the failed raw-NER producer"; exit 1;
           }
           parent_json="$RUNNER_TEMP/raw-ner-parent-run.json"
-          gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID" > "$parent_json"
+          gh api "repos/Otzaria/SeforimLibrary/actions/runs/$LIBRARY_RUN_ID/attempts/$PARENT_RUN_ATTEMPT" > "$parent_json"
           jq -e --argjson attempt "$PARENT_RUN_ATTEMPT" '
             .status == "completed" and .conclusion == "failure" and
             .event == "workflow_dispatch" and

@@ -164,8 +164,17 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             1,
         )
         self.assertIn("local_checkpoint_source_run_id:", workflow)
+        self.assertIn(
+            'actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID/attempts/$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT',
+            workflow,
+        )
+        self.assertGreaterEqual(
+            workflow.count('actions/runs/$LIBRARY_RUN_ID/attempts/$PARENT_RUN_ATTEMPT'),
+            2,
+        )
         self.assertIn("ci/local_checkpoint_cache.py restore", workflow)
         self.assertIn("ci/local_checkpoint_cache.py save", workflow)
+        self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
         self.assertIn("ARGS+=(--engine-workers 4)", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)

@@ -41,7 +41,13 @@ import sqlite3
 sys_path = os.path.dirname(os.path.abspath(__file__))
 import sys  # noqa: E402
 sys.path.insert(0, sys_path)
-from linker_artifact import BookKey, book_key_to_relpath, read_artifact, write_artifact  # noqa: E402
+from linker_artifact import (  # noqa: E402
+    BookKey,
+    book_key_to_relpath,
+    content_hash,
+    read_artifact,
+    write_artifact,
+)
 from line_baseline import (  # noqa: E402
     DIRECTORY_NAME as LINE_BASELINE_DIRECTORY,
     build_line_baseline,
@@ -433,6 +439,99 @@ def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
     return len(plan["changed"])
 
 
+def restore_completed_local_checkpoint(
+    *, repo: str, snapshot: str, run_dir: str, changed_books_payload: list[dict]
+) -> int:
+    """Restore exact completed-book outputs and rebuild their done markers.
+
+    The durable cache already binds every byte to the request, parent, snapshot and
+    complete plan.  This second semantic gate proves that every cached record still
+    names the exact planned book/line/content/context and has valid UTF-16 offsets
+    before it can suppress work in a fresh engine invocation.
+    """
+    completed_path = os.path.join(run_dir, "completed_books.json")
+    if not os.path.isfile(completed_path):
+        return 0
+    try:
+        with open(completed_path, encoding="utf-8") as stream:
+            completed = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid completed-book checkpoint: {error}") from error
+    if not isinstance(completed, list):
+        raise RuntimeError("completed-book checkpoint must be an array")
+    from link_books import claim_id
+    plan = {
+        (item["source_name"], item["canonical_he_title"]): item
+        for item in changed_books_payload
+    }
+    seen = set()
+    done_dir = os.path.join(run_dir, "done")
+    os.makedirs(done_dir, exist_ok=True)
+    con = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    restored = 0
+    try:
+        for index, item in enumerate(completed):
+            if not isinstance(item, dict) or set(item) != {
+                "claim_id", "source_name", "canonical_he_title", "hash", "artifact"
+            }:
+                raise RuntimeError(f"completed-book checkpoint entry {index} has an invalid shape")
+            source_name = item["source_name"]
+            title = item["canonical_he_title"]
+            if not isinstance(source_name, str) or not source_name or not isinstance(title, str) or not title:
+                raise RuntimeError(f"completed-book checkpoint entry {index} has an invalid book key")
+            key = (source_name, title)
+            planned = plan.get(key)
+            if planned is None or item["hash"] != planned.get("hash"):
+                raise RuntimeError(f"completed-book checkpoint differs from exact plan for {key!r}")
+            book = BookKey(source_name, title)
+            cid = claim_id(book)
+            if item["claim_id"] != cid or cid in seen:
+                raise RuntimeError(f"completed-book checkpoint claim mismatch/duplicate for {key!r}")
+            seen.add(cid)
+            artifact_name = item["artifact"]
+            if artifact_name is not None and artifact_name != f"{cid}.jsonl":
+                raise RuntimeError(f"completed-book checkpoint artifact mismatch for {key!r}")
+            destination = os.path.join(repo, book_key_to_relpath(book))
+            if artifact_name is None:
+                try:
+                    os.remove(destination)
+                except FileNotFoundError:
+                    pass
+            else:
+                cached = os.path.join(run_dir, "completed_artifacts", artifact_name)
+                if not os.path.isfile(cached):
+                    raise RuntimeError(f"completed-book artifact is missing for {key!r}")
+                rows = con.execute(
+                    "SELECT line_index, content, context_ref FROM lines_snapshot "
+                    "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index",
+                    key,
+                ).fetchall()
+                current = {line_index: (content or "", context_ref) for line_index, content, context_ref in rows}
+                records = list(read_artifact(cached))
+                if not records:
+                    raise RuntimeError(f"completed-book artifact is empty instead of absent for {key!r}")
+                for record in records:
+                    if record.book_key != book or record.line_index not in current:
+                        raise RuntimeError(f"completed-book artifact identity differs for {key!r}")
+                    content, context_ref = current[record.line_index]
+                    if record.source_hash != content_hash(content):
+                        raise RuntimeError(f"completed-book artifact source hash differs for {key!r}")
+                    if record.context_ref is not None and record.context_ref != context_ref:
+                        raise RuntimeError(f"completed-book artifact context differs for {key!r}")
+                    if record.end > len(content.encode("utf-16-le")) // 2:
+                        raise RuntimeError(f"completed-book artifact offset exceeds source for {key!r}")
+                import shutil
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                temporary = f"{destination}.checkpoint-restore-{os.getpid()}"
+                shutil.copy2(cached, temporary)
+                os.replace(temporary, destination)
+            open(os.path.join(done_dir, cid), "w").close()
+            restored += 1
+    finally:
+        con.close()
+    return restored
+
+
 def run_incremental(args) -> int:
     """End-to-end incremental update. Returns the number of books re-linked."""
     repo = os.path.abspath(args.repo)
@@ -538,8 +637,21 @@ def run_incremental(args) -> int:
             if not os.path.isdir(os.path.join(args.run_dir, "checkpoints")):
                 raise RuntimeError("--resume-checkpoints requires a restored checkpoints directory")
             _log("accepted exact-plan local checkpoint; stale ledgers were discarded")
+            restored_completed = restore_completed_local_checkpoint(
+                repo=args.repo,
+                snapshot=args.snapshot,
+                run_dir=args.run_dir,
+                changed_books_payload=changed_books_payload,
+            )
+            if restored_completed:
+                _log(f"restored {restored_completed} completed book output(s) from exact local checkpoint")
         else:
             shutil.rmtree(os.path.join(args.run_dir, "checkpoints"), ignore_errors=True)
+            shutil.rmtree(os.path.join(args.run_dir, "completed_artifacts"), ignore_errors=True)
+            try:
+                os.remove(os.path.join(args.run_dir, "completed_books.json"))
+            except FileNotFoundError:
+                pass
             with open(only, "w", encoding="utf-8") as fh:
                 json.dump(changed_books_payload, fh, ensure_ascii=False)
         requested_ner_lines = sum(
@@ -819,8 +931,8 @@ def main():
     ap.add_argument("--engine-workers", type=int, default=1,
                     help="parallel link_books.py processes (claim-ledger coordinated)")
     ap.add_argument("--resume-checkpoints", action="store_true",
-                    help="reuse exact-plan immutable batch shards restored into --run-dir; "
-                         "done/claim/failed ledgers are always rebuilt")
+                    help="reuse exact-plan immutable batch shards and verified completed-book "
+                         "outputs restored into --run-dir; claim/failed ledgers are rebuilt")
     ap.add_argument("--worker-stall-seconds", type=int, default=1800,
                     help="kill only a worker whose per-batch heartbeat is stale this long")
     ap.add_argument("--forbid-full-relink", action="store_true",

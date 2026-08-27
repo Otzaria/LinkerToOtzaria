@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -13,15 +14,32 @@ class LocalCheckpointCacheTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.run = self.root / "run"
         self.cache = self.root / "cache"
-        claim = "a" * 40
+        self.repo = self.root / "repo"
+        self.book = {
+            "source_name": "Source",
+            "canonical_he_title": "Book",
+            "hash": "1" * 16,
+            "ner_ranges": [[0, 1]],
+            "reuse": [],
+        }
+        claim = hashlib.sha1(b"Source\0Book").hexdigest()
+        self.claim = claim
         (self.run / "checkpoints" / claim).mkdir(parents=True)
-        (self.run / "changed_books.json").write_text('[{"book":"exact"}]', encoding="utf-8")
+        (self.run / "changed_books.json").write_text(
+            json.dumps([self.book]), encoding="utf-8"
+        )
         (self.run / "checkpoints" / claim / "000000000000.jsonl").write_text(
             '{"record":"exact"}\n', encoding="utf-8"
         )
+        (self.run / "done").mkdir()
+        (self.run / "done" / claim).write_text("", encoding="utf-8")
+        artifact = self.repo / "artifacts" / "Source" / "Book.jsonl"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text('{"record":"complete"}\n', encoding="utf-8")
         self.args = argparse.Namespace(
             cache_root=str(self.cache),
             run_dir=str(self.run),
+            repo=str(self.repo),
             source_run_id=123,
             source_run_attempt=1,
             request_id="b" * 64,
@@ -35,23 +53,45 @@ class LocalCheckpointCacheTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_round_trip_restores_only_plan_and_immutable_shards(self):
+    def test_round_trip_restores_plan_shards_and_completed_outputs(self):
         cache.save(self.args)
         (self.run / "changed_books.json").unlink()
-        (self.run / "checkpoints" / ("a" * 40) / "000000000000.jsonl").unlink()
-        (self.run / "done").mkdir()
+        (self.run / "checkpoints" / self.claim / "000000000000.jsonl").unlink()
         (self.run / "done" / "stale").write_text("", encoding="utf-8")
 
         cache.restore(self.args)
 
         self.assertEqual(
             json.loads((self.run / "changed_books.json").read_text(encoding="utf-8")),
-            [{"book": "exact"}],
+            [self.book],
         )
         self.assertTrue(
-            (self.run / "checkpoints" / ("a" * 40) / "000000000000.jsonl").is_file()
+            (self.run / "checkpoints" / self.claim / "000000000000.jsonl").is_file()
         )
+        completed = json.loads((self.run / "completed_books.json").read_text(encoding="utf-8"))
+        self.assertEqual(completed[0]["claim_id"], self.claim)
+        self.assertEqual(completed[0]["artifact"], f"{self.claim}.jsonl")
+        self.assertTrue((self.run / "completed_artifacts" / f"{self.claim}.jsonl").is_file())
         self.assertTrue((self.run / "done" / "stale").is_file())
+
+    def test_schema_one_cache_remains_restorable(self):
+        cache.save(self.args)
+        source = cache.cache_path(self.args)
+        (source / "completed_books.json").unlink()
+        if (source / "completed_artifacts").is_dir():
+            for item in (source / "completed_artifacts").iterdir():
+                item.unlink()
+            (source / "completed_artifacts").rmdir()
+        manifest_path = source / "checkpoint_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["schema_version"] = 1
+        manifest["files"] = cache.listed_files(source)
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        cache.restore(self.args)
+        self.assertFalse((self.run / "completed_books.json").exists())
 
     def test_digest_tamper_is_rejected(self):
         cache.save(self.args)
