@@ -178,6 +178,10 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("--resume-checkpoints", workflow)
         self.assertIn("ARGS+=(--engine-workers 4)", workflow)
         self.assertIn("ARGS+=(--engine-restart-limit 2)", workflow)
+        self.assertIn(
+            "inputs.target == 'local' && inputs.allow_full_relink && 1440",
+            workflow,
+        )
         self.assertIn("LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)
 

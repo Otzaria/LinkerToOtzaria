@@ -231,10 +231,14 @@ jobs:
     # itself stops at 60 minutes so packaging + release upload retain real headroom.
     # Its per-book checkpoints are published on that bounded failure and an exact rerun
     # of this databaseId resumes them instead of spending the next session from zero.
+    # An explicitly authorized local full baseline can exceed the ordinary
+    # eight-hour serial-child ceiling even on the GPU runner. Give that one
+    # narrowly gated migration path 24 hours; ordinary weekly deltas retain
+    # the shorter ceiling so a wedged run still fails closed promptly.
     # Server-only legacy/manual runs keep their existing serial/full ceilings.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
     # this timeout remains the coarse backstop for failures outside the engine loop.
-    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.library_run_id != '' && 480 || 7200) }}
+    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.target == 'local' && inputs.allow_full_relink && 1440 || (inputs.library_run_id != '' && 480 || 7200)) }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
