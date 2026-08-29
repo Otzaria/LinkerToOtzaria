@@ -1,0 +1,57 @@
+--- a/app.py
++++ b/app.py
+@@ -5,6 +5,7 @@
+ from flask import Flask, request, jsonify
+ from named_entity_recognizer import NERFactory
+ from app_helper import make_recognize_entities_output, make_bulk_recognize_entities_output
++from otzaria_microbatch import OrderedMicroBatcher
+ 
+ 
+ class JSONFormatter(logging.Formatter):
+@@ -97,7 +98,16 @@
+ 
+     with app.app_context():
+         models_by_type_and_lang = create_models_from_config(app.config)
+-    
++
++    bulk_batcher = OrderedMicroBatcher(
++        lambda texts, lang, with_span_text: make_bulk_recognize_entities_output(
++            texts,
++            models_by_type_and_lang["named_entity"][lang],
++            models_by_type_and_lang["ref_part"][lang],
++            with_span_text,
++        )
++    )
++
+     duration_ms = (time.time() - start_time) * 1000
+     logger.info("App creation completed", extra={'duration': duration_ms})
+ 
+@@ -108,9 +118,8 @@
+         if not data or 'text' not in data:
+             return jsonify({"error": "Missing 'text' in request body."}), 400
+         with_span_text = request.args.get('with_span_text', '0') == '1'
+-        ner_model = models_by_type_and_lang['named_entity'][data['lang']]
+-        ref_part_model = models_by_type_and_lang['ref_part'][data['lang']]
+-        return jsonify(make_recognize_entities_output(data['text'], ner_model, ref_part_model, with_span_text)), 200
++        result = bulk_batcher.submit([data['text']], data['lang'], with_span_text)
++        return jsonify(result['results'][0]), 200
+ 
+     @app.route('/bulk-recognize-entities', methods=['POST'])
+     @timing_and_logging
+@@ -119,11 +128,12 @@
+         if not data or 'texts' not in data:
+             return jsonify({"error": "Missing 'texts' in request body."}), 400
+         with_span_text = request.args.get('with_span_text', '0') == '1'
+-        ner_model = models_by_type_and_lang['named_entity'][data['lang']]
+-        ref_part_model = models_by_type_and_lang['ref_part'][data['lang']]
+         texts = data['texts']
+-        results = make_bulk_recognize_entities_output(texts, ner_model, ref_part_model, with_span_text)
+-        return jsonify(results), 200
++        return jsonify(bulk_batcher.submit(texts, data['lang'], with_span_text)), 200
++
++    @app.route('/otzaria-microbatch-metrics', methods=['GET'])
++    def otzaria_microbatch_metrics():
++        return jsonify(bulk_batcher.metrics()), 200
+     return app
+ 
+ 

@@ -30,6 +30,9 @@ jobs:
       GPU_SERVER_COMMIT: d9da16119e9c0de64224d7b187cd999b2ead4bad
       LINKER_STACK_ROLE: ner
       NER_WORKERS: '1'
+      NER_THREADS: '8'
+      LINKER_NER_MICROBATCH_TEXTS: '150'
+      LINKER_NER_MICROBATCH_WAIT_MS: '8'
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +97,16 @@ jobs:
               raise SystemExit(f"unexpected NER response shape: {value!r}")
           print(json.dumps(value, ensure_ascii=False, sort_keys=True))
           PY
+          curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics | tee "$RUNNER_TEMP/ner-microbatch-metrics.json"
+          python3 - "$RUNNER_TEMP/ner-microbatch-metrics.json" <<'PY'
+          import json, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          required = {"batches", "requests", "texts", "model_seconds", "queue_seconds", "max_texts", "wait_ms"}
+          if set(value) != required or value["requests"] < 1 or value["texts"] < 2:
+              raise SystemExit(f"unexpected microbatch metrics: {value!r}")
+          print(json.dumps(value, sort_keys=True))
+          PY
+          python3 ci/ner_shared_model_probe.py | tee "$RUNNER_TEMP/ner-shared-model-probe.json"
           test -s stack/engine_fingerprint.txt
           cat stack/engine_fingerprint.txt
 

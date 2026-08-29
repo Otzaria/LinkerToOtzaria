@@ -33,6 +33,12 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('DUMP_ARCHIVE_DIR="$CACHE/dump-archives/$DUMP_CONTENT_ID"', setup)
         self.assertIn('tar -xzf "$DUMP_ARCHIVE"', setup)
         self.assertNotIn('tar -xzf "$CACHE/dump-dl/dump.tar.gz"', setup)
+        self.assertIn('ci/gpu_server_microbatch.patch', setup)
+        self.assertIn('--worker-class gthread --threads "$NER_THREADS"', setup)
+        self.assertIn('from otzaria_microbatch import OrderedMicroBatcher', setup)
+        self.assertIn('"${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"', setup)
+        self.assertIn("NER_THREADS: '8'", canary)
+        self.assertIn("ci/ner_shared_model_probe.py", canary)
 
     def test_recovery_guards_are_event_driven_and_exact(self):
         root = Path(__file__).parents[1]
@@ -184,6 +190,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)
+        self.assertIn("LINKER_NER_MICROBATCH_TEXTS", workflow)
+        self.assertIn("inputs.target == 'local' && '150'", workflow)
 
     def test_kaggle_is_ner_only_and_resolution_runs_on_server(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(

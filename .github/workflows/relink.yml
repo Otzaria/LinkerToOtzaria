@@ -683,6 +683,14 @@ jobs:
           # front was measured slower because it creates GPU-queue and memory contention.
           # Kaggle/server retain their independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
+          # One gthread process owns the single GPU model.  Its ordered micro-batcher
+          # coalesces concurrent resolver requests into the GPU-server's native
+          # 150-line device batch, so CPU resolution can overlap the next inference
+          # without a second model process.  Link-resolution input remains 100 lines,
+          # so the existing per-line linker artifact boundary is unchanged.
+          NER_THREADS: ${{ inputs.target == 'local' && '8' || '1' }}
+          LINKER_NER_MICROBATCH_TEXTS: ${{ inputs.target == 'local' && '150' || '25' }}
+          LINKER_NER_MICROBATCH_WAIT_MS: ${{ inputs.target == 'local' && '8' || '0' }}
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
           # A local worker recycle releases its book claim immediately. Polling the
           # exact ledger every 10s keeps a giant checkpointed book moving without the
@@ -832,6 +840,9 @@ jobs:
           # dropping the already-validated migration and demanding a full relink.
           [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
           "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
+          if [ "$TARGET" = local ]; then
+            curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics
+          fi
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
       # Both are skipped on dry_run: a canary measures the engine, ships nothing.

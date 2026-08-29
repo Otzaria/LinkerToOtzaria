@@ -383,12 +383,36 @@ MODEL_PATHS = [
     {"arch": "spacy", "lang": "he", "path": "$SUBREF_MODEL", "type": "ref_part"},
 ]
 EOF
+# Keep one GPU-resident model process, but let its HTTP threads accumulate compatible
+# resolver requests for its single ordered inference thread.  A second gunicorn worker
+# would load a second spaCy/CuPy model and duplicate VRAM; this overlay instead shares
+# the one model safely.  The patch is deliberately tied to the pinned upstream app.py
+# and fails closed if that source layout changes.
+MICROBATCH_SOURCE="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"
+MICROBATCH_PATCH="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.patch"
+[ -f "$MICROBATCH_SOURCE" ] && [ -f "$MICROBATCH_PATCH" ] || {
+  echo "::error::missing maintained GPU micro-batcher overlay"
+  exit 1
+}
+install -m 0644 "$MICROBATCH_SOURCE" "$GPU/app/otzaria_microbatch.py"
+if ! git -C "$GPU" apply --reverse --check "$MICROBATCH_PATCH" 2>/dev/null; then
+  git -C "$GPU" apply "$MICROBATCH_PATCH"
+fi
+grep -Fq 'from otzaria_microbatch import OrderedMicroBatcher' "$GPU/app/app.py" || {
+  echo "::error::GPU micro-batcher overlay was not applied"
+  exit 1
+}
 # A gunicorn from a previous run survives on a self-hosted runner with the OLD models
 # still in memory — a health check alone would keep it and silently contradict the
 # fingerprint. Restart whenever the NER service identity (models+gpu-server+config)
 # differs from the one that launched the running process.
 GUNICORN_WORKERS="${NER_WORKERS:-3}"
-NER_ID="$MODELS_TAG:$GPU_SOURCE_ID:$(sha256sum "$GPU/app/local_config.py" | cut -c1-12):w$GUNICORN_WORKERS"
+NER_THREADS="${NER_THREADS:-8}"
+[[ "$GUNICORN_WORKERS" =~ ^[1-9][0-9]*$ ]] && [[ "$NER_THREADS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::NER_WORKERS and NER_THREADS must be positive integers"
+  exit 1
+}
+NER_ID="$MODELS_TAG:$GPU_SOURCE_ID:$(sha256sum "$GPU/app/local_config.py" "$GPU/app/otzaria_microbatch.py" | sha256sum | cut -c1-12):w$GUNICORN_WORKERS:t$NER_THREADS"
 NER_MARKER="$CACHE/.ner-identity"
 NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
@@ -431,7 +455,7 @@ if [ "$STACK_ROLE" != resolver ] && ! curl -fsS -m 5 -X POST "$NER_URL" -H 'Cont
   # gunicorn as a module through the verified interpreter so the bundle is truly
   # relocatable rather than relying on a textual shebang rewrite.
   setsid env APP_CONFIG=local_config.py "$GPU/.venv/bin/python" -m gunicorn.app.wsgiapp \
-      -w "$GUNICORN_WORKERS" --timeout 600 \
+      -w "$GUNICORN_WORKERS" --worker-class gthread --threads "$NER_THREADS" --timeout 600 \
       --pid "$NER_PIDFILE" -b 127.0.0.1:5051 'app:create_app()' \
       >"$CACHE/gunicorn.log" 2>&1 &
   NER_LAUNCH_PID=$!
@@ -477,6 +501,8 @@ fi
     "${LINKER_REPO:-$PWD}/src/incremental.py" \
     "${LINKER_REPO:-$PWD}/src/ner_handoff.py" \
     "${LINKER_REPO:-$PWD}/src/precompute_ner.py" \
+    "${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py" \
+    "${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.patch" \
     | sha256sum | cut -c1-16)"
   for name in he_ref_ner he_subref_ner; do
     whl=$(find "$MODELS" -name "${name}-*.whl" | head -1)
