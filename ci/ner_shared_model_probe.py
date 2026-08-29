@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise the one-model NER service with concurrent resolver-shaped requests.
+"""Benchmark the shared-model NER service with resolver-shaped concurrency.
 
-This is a canary/profiling probe, not a linker stage.  It verifies that eight HTTP
-waiters are consolidated by the ordered micro-batcher while every result retains its
-request-local order and shape.
+This is a canary/profiling probe, not a linker stage.  It compares the same request
+set at 1/2/4/8-way concurrency, requires exact decoded output identity, and reports
+throughput plus server-side batch occupancy.  That distinguishes an under-fed model
+from saturated inference without loading a second model into VRAM.
 """
 from __future__ import annotations
 
@@ -56,24 +57,46 @@ def post(request_number: int, gate: threading.Barrier | None = None) -> list[dic
 
 
 def main() -> None:
-    # First establish exact serial results.  The concurrent phase below must return
-    # byte-equivalent decoded JSON for every request before it may claim batching.
-    serial = [post(number) for number in range(REQUESTS)]
-    before = get_metrics()
-    gate = threading.Barrier(REQUESTS)
-    started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=REQUESTS) as pool:
-        concurrent = list(pool.map(lambda number: post(number, gate), range(REQUESTS)))
-    elapsed = time.monotonic() - started
-    after = get_metrics()
-    delta = {key: after[key] - before[key] for key in ("batches", "requests", "texts", "model_seconds", "queue_seconds")}
-    if concurrent != serial:
-        raise RuntimeError("concurrent micro-batching changed NER output")
-    if delta["requests"] != REQUESTS or delta["texts"] != REQUESTS * LINES_PER_REQUEST:
-        raise RuntimeError(f"micro-batcher accounting differs: {delta!r}")
-    if not 1 <= delta["batches"] < REQUESTS:
-        raise RuntimeError(f"requests were not consolidated by one-model batcher: {delta!r}")
-    print(json.dumps({"elapsed_seconds": round(elapsed, 6), "delta": delta, "after": after}, sort_keys=True))
+    metric_keys = (
+        "batches", "requests", "texts", "model_seconds", "queue_seconds",
+        "failures", "timeouts",
+    )
+
+    def run(concurrency: int) -> tuple[list[list[dict]], dict]:
+        before = get_metrics()
+        started = time.monotonic()
+        output: list[list[dict] | None] = [None] * REQUESTS
+        for group_start in range(0, REQUESTS, concurrency):
+            numbers = list(range(group_start, min(group_start + concurrency, REQUESTS)))
+            gate = threading.Barrier(len(numbers)) if len(numbers) > 1 else None
+            with ThreadPoolExecutor(max_workers=len(numbers)) as pool:
+                futures = {number: pool.submit(post, number, gate) for number in numbers}
+                for number, future in futures.items():
+                    output[number] = future.result()
+        elapsed = time.monotonic() - started
+        after = get_metrics()
+        delta = {key: after[key] - before[key] for key in metric_keys}
+        if delta["requests"] != REQUESTS or delta["texts"] != REQUESTS * LINES_PER_REQUEST:
+            raise RuntimeError(f"micro-batcher accounting differs at c={concurrency}: {delta!r}")
+        if delta["failures"] or delta["timeouts"]:
+            raise RuntimeError(f"micro-batcher failed at c={concurrency}: {delta!r}")
+        return [value for value in output if value is not None], {
+            "concurrency": concurrency,
+            "elapsed_seconds": round(elapsed, 6),
+            "texts_per_second": round(REQUESTS * LINES_PER_REQUEST / elapsed, 3),
+            "delta": delta,
+        }
+
+    serial, serial_case = run(1)
+    cases = [serial_case]
+    for concurrency in (2, 4, 8):
+        output, case = run(concurrency)
+        if output != serial:
+            raise RuntimeError(f"c={concurrency} micro-batching changed NER output")
+        cases.append(case)
+    if not 1 <= cases[-1]["delta"]["batches"] < REQUESTS:
+        raise RuntimeError(f"eight requests were not consolidated: {cases[-1]!r}")
+    print(json.dumps({"cases": cases, "after": get_metrics()}, sort_keys=True))
 
 
 if __name__ == "__main__":

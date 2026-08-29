@@ -34,10 +34,14 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('tar -xzf "$DUMP_ARCHIVE"', setup)
         self.assertNotIn('tar -xzf "$CACHE/dump-dl/dump.tar.gz"', setup)
         self.assertIn('ci/gpu_server_microbatch.patch', setup)
+        self.assertIn('git -C "$GPU" checkout -- app/app.py', setup)
+        self.assertIn(
+            'git -C "$GPU" apply --check --directory=app "$MICROBATCH_PATCH"', setup
+        )
         self.assertIn('--worker-class gthread --threads "$NER_THREADS"', setup)
         self.assertIn('from otzaria_microbatch import OrderedMicroBatcher', setup)
         self.assertIn('"${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"', setup)
-        self.assertIn("NER_THREADS: '8'", canary)
+        self.assertIn("NER_THREADS: '16'", canary)
         self.assertIn("ci/ner_shared_model_probe.py", canary)
 
     def test_recovery_guards_are_event_driven_and_exact(self):
@@ -297,6 +301,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             "src/incremental.py",
             "src/ner_handoff.py",
             "src/precompute_ner.py",
+            "ci/gpu_server_microbatch.py",
+            "ci/gpu_server_microbatch.patch",
         ):
             digest.update((root / relative_path).read_bytes())
         engine_component = f"engine_src={digest.hexdigest()[:16]}"

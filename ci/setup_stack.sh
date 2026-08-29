@@ -395,9 +395,15 @@ MICROBATCH_PATCH="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.patch"
   exit 1
 }
 install -m 0644 "$MICROBATCH_SOURCE" "$GPU/app/otzaria_microbatch.py"
-if ! git -C "$GPU" apply --reverse --check "$MICROBATCH_PATCH" 2>/dev/null; then
-  git -C "$GPU" apply "$MICROBATCH_PATCH"
-fi
+# Reset exactly the generated overlay target to the pinned checkout, then apply the
+# current maintained patch.  Reverse-check idempotence alone breaks as soon as the
+# maintained patch itself changes and an older overlay is still present in the cache.
+git -C "$GPU" checkout -- app/app.py
+git -C "$GPU" apply --check --directory=app "$MICROBATCH_PATCH" || {
+  echo "::error::GPU micro-batcher patch no longer applies to the pinned gpu-server"
+  exit 1
+}
+git -C "$GPU" apply --directory=app "$MICROBATCH_PATCH"
 grep -Fq 'from otzaria_microbatch import OrderedMicroBatcher' "$GPU/app/app.py" || {
   echo "::error::GPU micro-batcher overlay was not applied"
   exit 1
@@ -412,7 +418,27 @@ NER_THREADS="${NER_THREADS:-8}"
   echo "::error::NER_WORKERS and NER_THREADS must be positive integers"
   exit 1
 }
-NER_ID="$MODELS_TAG:$GPU_SOURCE_ID:$(sha256sum "$GPU/app/local_config.py" "$GPU/app/otzaria_microbatch.py" | sha256sum | cut -c1-12):w$GUNICORN_WORKERS:t$NER_THREADS"
+MICROBATCH_TEXTS="${LINKER_NER_MICROBATCH_TEXTS:-150}"
+MICROBATCH_WAIT_MS="${LINKER_NER_MICROBATCH_WAIT_MS:-8}"
+NER_REQUEST_TIMEOUT_SECONDS="${LINKER_NER_REQUEST_TIMEOUT_SECONDS:-540}"
+[[ "$MICROBATCH_TEXTS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::LINKER_NER_MICROBATCH_TEXTS must be a positive integer"
+  exit 1
+}
+[[ "$MICROBATCH_WAIT_MS" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+  echo "::error::LINKER_NER_MICROBATCH_WAIT_MS must be a non-negative number"
+  exit 1
+}
+[[ "$NER_REQUEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::LINKER_NER_REQUEST_TIMEOUT_SECONDS must be a positive integer"
+  exit 1
+}
+# Include the patch and every scheduler setting in the live-service identity.  Merely
+# hashing the copied module allowed an old Gunicorn to survive a patch/window change.
+NER_IMPLEMENTATION_ID=$(sha256sum \
+  "$GPU/app/local_config.py" "$GPU/app/otzaria_microbatch.py" "$MICROBATCH_PATCH" \
+  | sha256sum | cut -c1-12)
+NER_ID="$MODELS_TAG:$GPU_SOURCE_ID:$NER_IMPLEMENTATION_ID:w$GUNICORN_WORKERS:t$NER_THREADS:b$MICROBATCH_TEXTS:q$MICROBATCH_WAIT_MS:r$NER_REQUEST_TIMEOUT_SECONDS"
 NER_MARKER="$CACHE/.ner-identity"
 NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
