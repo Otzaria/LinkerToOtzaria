@@ -219,7 +219,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    # local: complete unsplit run on the durable x64/ROCm host.
+    # local: GPU NER then CPU resolution on the durable x64/ROCm host.
     # server: legacy unsplit fallback on the Oracle ARM box.
     # kaggle: a throwaway GPU VM (see kaggle/) that plans + produces raw NER only;
     # Mongo/Django resolution belongs to the separate `resolve` job on Oracle.
@@ -485,12 +485,13 @@ jobs:
             source_json="$RUNNER_TEMP/local-checkpoint-source.json"
             gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID/attempts/$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" > "$source_json"
             expected_title="relink-recovery request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
-            jq -e --argjson attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" --arg title "$expected_title" '
+            jq -e --argjson attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" \
+              --arg title "$expected_title" --arg head_sha "$GITHUB_SHA" '
               .status == "completed" and (.conclusion == "cancelled" or .conclusion == "failure") and
               .event == "workflow_dispatch" and .path == ".github/workflows/relink.yml" and
-              .run_attempt == $attempt and .display_title == $title
+              .run_attempt == $attempt and .display_title == $title and .head_sha == $head_sha
             ' "$source_json" >/dev/null || {
-              echo "::error::local checkpoint source is not the exact terminal recovery attempt"; exit 1;
+              echo "::error::local checkpoint source is not the exact terminal recovery attempt at this Linker commit"; exit 1;
             }
           fi
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
@@ -647,7 +648,9 @@ jobs:
             --sefaria-metadata-sha256 "$SEFARIA_METADATA_SHA256"
 
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
-      # target=server retains the legacy Mongo+NER+Django path. The server path runs as
+      # local runs the same raw-NER handoff first, then stops the GPU model and starts
+      # sixteen CPU-only resolver processes. target=server retains the legacy combined
+      # Mongo+NER+Django fallback. The server path runs as
       # ONE step under a host lease: a kernel flock whose FD is
       # held by this step's shell for the phase's whole life and released by the kernel
       # on ANY death — crash, cancel, OOM — so there is no stale-lock state and no
@@ -664,9 +667,9 @@ jobs:
       # Any per-book/per-line failure fails this step (and the waiting build) loudly —
       # see incremental.py + link_books.py. The fingerprint covers everything that
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
-      # so flipping e.g. --bavli-convention also forces a full relink. 3 workers keep
-      # a deliberate full relink inside the job ceiling while leaving OOM headroom on
-      # the 22GB host — a single book was observed to drive one worker past 7GB anon.
+      # so flipping e.g. --bavli-convention also forces a full relink. The legacy
+      # server fallback keeps three workers for OOM headroom on its 22GB host; local
+      # resolution uses sixteen bounded, cooperative workers after unloading the GPU.
       # NER teardown is bound to this same step's EXIT trap — still under the lease, so
       # it can never kill another run's fresh stack (that run needs the lease first) —
       # freeing ~3GB of models for whatever resumes on the shared host either way.
@@ -674,14 +677,10 @@ jobs:
         id: compute
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # The local ROCm host loads exactly one model process. Exact-stack measurement
-          # on a 30,742-line mixed workload found four resolver workers fastest and safe
-          # (4/6/8/10 workers: 304/314/324/494 seconds, byte-identical output); higher
-          # counts only contend for the one GPU queue and multiply Sefaria memory.
-          # Bounded worker replacement keeps all four useful without duplicating the
-          # model's VRAM. Preserve exact snapshot order: forcing all giant books to the
-          # front was measured slower because it creates GPU-queue and memory contention.
-          # Kaggle/server retain their independently measured process counts.
+          # The local ROCm host loads exactly one model process only during raw NER.
+          # Resolution starts after stop_ner releases its VRAM, so its sixteen workers
+          # no longer contend for one synchronous GPU queue. Kaggle/server retain their
+          # independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           # One gthread process owns the single GPU model.  Its ordered micro-batcher
           # coalesces concurrent resolver requests into the GPU-server's native
@@ -693,6 +692,8 @@ jobs:
           LINKER_NER_MICROBATCH_WAIT_MS: ${{ inputs.target == 'local' && '8' || '0' }}
           LINKER_NER_REQUEST_TIMEOUT_SECONDS: '540'
           LINKER_BATCH_LINES: ${{ inputs.target == 'kaggle' && '25' || '100' }}
+          LINKER_BATCH_CHARS: ${{ inputs.target == 'kaggle' && '60000' || '120000' }}
+          LINKER_GC_EVERY_BATCHES: '20'
           # A local worker recycle releases its book claim immediately. Polling the
           # exact ledger every 10s keeps a giant checkpointed book moving without the
           # old one-minute handoff gaps; other hosts retain the conservative default.
@@ -750,6 +751,13 @@ jobs:
           finish_compute() {
             rc=$?
             trap - EXIT
+            if [ -n "${TELEMETRY_PID:-}" ]; then
+              kill "$TELEMETRY_PID" 2>/dev/null || true
+              wait "$TELEMETRY_PID" 2>/dev/null || true
+            fi
+            mkdir -p "$RUN_DIR/perf"
+            cp "${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/gunicorn.log" \
+              "$RUN_DIR/perf/gunicorn.log" 2>/dev/null || true
             if [ "$TARGET" = local ] && [ -n "$LIBRARY_RUN_ID" ] &&
                [ -f "$RUN_DIR/changed_books.json" ] && [ -d "$RUN_DIR/checkpoints" ]; then
               python3 ci/local_checkpoint_cache.py save \
@@ -776,6 +784,12 @@ jobs:
             exit "$rc"
           }
           trap finish_compute EXIT
+          if [ "$TARGET" = local ]; then
+            mkdir -p "$RUN_DIR/perf"
+            python3 ci/collect_perf_telemetry.py \
+              --output "$RUN_DIR/perf/host.jsonl" --interval 10 &
+            TELEMETRY_PID=$!
+          fi
           if [ "$TARGET" = kaggle ]; then
             export LINKER_STACK_ROLE=ner
           else
@@ -800,36 +814,61 @@ jobs:
             --python "$SEF_PROJECT/.venv/bin/python"
             --engine-fingerprint "$FINGERPRINT"
           )
-          if [ "$TARGET" = kaggle ]; then
+          if [ "$TARGET" = kaggle ] || [ "$TARGET" = local ]; then
             PLAN="$RUN_DIR/ner-plan.json"
             PLAN_ARGS=("${ARGS[@]}" --plan-only "$PLAN" --relink-request-id "$RELINK_REQUEST_ID")
             [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
-          CHECKPOINT_ARGS=()
-          if [ -n "${NER_CHECKPOINT_SOURCE_RUN_ID:-}" ]; then
-            CHECKPOINT_ARGS+=(
-              --checkpoint-engine-fingerprint "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
-            )
-          fi
-          # The prebuilt venv contains Sefaria's dependencies but intentionally does
-          # not install the checkout itself as a wheel. Expose the exact pinned
-          # checkout only to the raw-NER producer so its training-time normalizer is
-          # importable without reintroducing Django/Mongo into the GPU process.
-          PYTHONPATH="$SEF_PROJECT${PYTHONPATH:+:$PYTHONPATH}" \
-          "$SEF_PROJECT/.venv/bin/python" src/precompute_ner.py \
+            CHECKPOINT_ARGS=()
+            if [ -n "${NER_CHECKPOINT_SOURCE_RUN_ID:-}" ]; then
+              CHECKPOINT_ARGS+=(
+                --checkpoint-engine-fingerprint "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
+              )
+            fi
+            if [ "$TARGET" = local ]; then
+              NER_BUNDLE_DIR="$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/raw-ner/$RELINK_REQUEST_ID"
+              NER_PRODUCER_WORKERS=4
+              DEADLINE_ARGS=()
+            else
+              NER_BUNDLE_DIR="$RUN_DIR/ner-handoff"
+              NER_PRODUCER_WORKERS=2
+              DEADLINE_ARGS=(--deadline-seconds 3600)
+            fi
+            # The prebuilt venv contains Sefaria's dependencies but intentionally does
+            # not install the checkout itself as a wheel. Expose the exact pinned
+            # checkout only to the raw-NER producer so its training-time normalizer is
+            # importable without reintroducing Django/Mongo into the GPU process.
+            PYTHONPATH="$SEF_PROJECT${PYTHONPATH:+:$PYTHONPATH}" \
+            "$SEF_PROJECT/.venv/bin/python" src/precompute_ner.py \
               --snapshot inputs/lines_snapshot.db \
               --plan "$PLAN" \
-              --output "$RUN_DIR/ner-handoff" \
+              --output "$NER_BUNDLE_DIR" \
               --relink-request-id "$RELINK_REQUEST_ID" \
               --engine-fingerprint "$FINGERPRINT" \
-              --workers 2 \
-              --deadline-seconds 3600 \
+              --workers "$NER_PRODUCER_WORKERS" \
+              "${DEADLINE_ARGS[@]}" \
               "${CHECKPOINT_ARGS[@]}"
+          fi
+          if [ "$TARGET" = kaggle ]; then
             exit 0
           fi
           if [ "$TARGET" = local ]; then
-            ARGS+=(--engine-workers 4)
+            echo "final local raw-NER micro-batch metrics:"
+            curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics || true
+            bash ci/stop_ner.sh
+            # Sixteen resolver processes own the sixteen CPU cores. Prevent native
+            # libraries inside each Python process from creating another thread pool.
+            export MALLOC_ARENA_MAX=2
+            export OMP_NUM_THREADS=1
+            export OPENBLAS_NUM_THREADS=1
+            export MKL_NUM_THREADS=1
+            export NUMEXPR_NUM_THREADS=1
+            ARGS+=(
+              --ner-bundle-dir "$NER_BUNDLE_DIR"
+              --relink-request-id "$RELINK_REQUEST_ID"
+              --engine-workers 16
+            )
             [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           elif [ -n "$LIBRARY_RUN_ID" ]; then
             ARGS+=(--engine-workers 2)
@@ -845,6 +884,17 @@ jobs:
           # dropping the already-validated migration and demanding a full relink.
           [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
           "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
+
+      - name: Upload local performance diagnostics
+        if: always() && inputs.target == 'local'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linker-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/run/perf
+            ${{ github.workspace }}/run/logs/perf-*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
       # ── Publish FIRST, commit the baseline LAST (atomicity, see header) ──
       # Both are skipped on dry_run: a canary measures the engine, ships nothing.
@@ -1002,6 +1052,13 @@ jobs:
       # The workspace persists between runs on this self-hosted runner — without this,
       # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
       # removed here is re-fetched deterministically by the next run.
+      - name: Remove completed durable local raw-NER checkpoint
+        if: inputs.target == 'local' && steps.compute.outcome == 'success'
+        run: >-
+          python3 ci/cleanup_local_ner_cache.py
+          --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT"
+          --request-id "${{ inputs.relink_request_id }}"
+
       - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
         if: always()
         run: rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
@@ -1179,6 +1236,7 @@ jobs:
           SEF_TAG: ${{ steps.tags.outputs.sefaria_tag }}
           NER_BUNDLE_DIR: ${{ runner.temp }}/ner/handoff
           LINKER_BATCH_LINES: 25
+          LINKER_BATCH_CHARS: 60000
           LINKER_STACK_ROLE: resolver
           LINKER_NER_SCOPE: /run/lock/otzaria/linker-ner.scope.json
           LINKER_NER_SCOPE_MODE: 0644

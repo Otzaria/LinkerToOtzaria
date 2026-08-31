@@ -35,6 +35,12 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertNotIn('tar -xzf "$CACHE/dump-dl/dump.tar.gz"', setup)
         self.assertIn('ci/gpu_server_microbatch.patch', setup)
         self.assertIn('git -C "$GPU" checkout -- app/app.py', setup)
+        self.assertIn('git -C "$SEF" checkout --', setup)
+        self.assertIn('sefaria/model/linker/referenceable_book_node.py', setup)
+        self.assertIn('git -C "$SEF" apply --check "$PATCH"', setup)
+        resolver_patch = (root / "ci/sefaria_resolver.patch").read_text(encoding="utf-8")
+        self.assertIn("@lru_cache(maxsize=64)", resolver_patch)
+        self.assertIn("nodes.array()", resolver_patch)
         self.assertIn(
             'git -C "$GPU" apply --check --directory=app "$MICROBATCH_PATCH"', setup
         )
@@ -184,9 +190,16 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("ci/local_checkpoint_cache.py restore", workflow)
         self.assertIn("ci/local_checkpoint_cache.py save", workflow)
+        self.assertIn(".head_sha == $head_sha", workflow)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
-        self.assertIn("ARGS+=(--engine-workers 4)", workflow)
+        self.assertIn("--engine-workers 16", workflow)
+        self.assertIn('bash ci/stop_ner.sh', workflow)
+        self.assertIn('--ner-bundle-dir "$NER_BUNDLE_DIR"', workflow)
+        self.assertIn('NER_BUNDLE_DIR="$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/raw-ner/', workflow)
+        self.assertIn("ci/collect_perf_telemetry.py", workflow)
+        self.assertIn("export OMP_NUM_THREADS=1", workflow)
+        self.assertIn("export OPENBLAS_NUM_THREADS=1", workflow)
         self.assertIn("ARGS+=(--engine-restart-limit 2)", workflow)
         self.assertIn(
             "inputs.target == 'local' && inputs.allow_full_relink && 1440",
@@ -203,13 +216,14 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("export LINKER_STACK_ROLE=ner", workflow)
         self.assertIn("src/precompute_ner.py", workflow)
-        self.assertIn("--workers 2", workflow)
+        self.assertIn("NER_PRODUCER_WORKERS=2", workflow)
         self.assertIn("name: Resolve raw NER on the durable CPU host", workflow)
         self.assertIn("runs-on: [self-hosted, Linux, ARM64, server-2]", workflow)
         self.assertIn("LINKER_STACK_ROLE: resolver", workflow)
         self.assertIn("--ner-bundle-dir", workflow)
         self.assertIn("--engine-workers 2", workflow)
         self.assertIn("LINKER_BATCH_LINES: 25", workflow)
+        self.assertIn("LINKER_BATCH_CHARS: 60000", workflow)
         self.assertIn("flock -w 3600 9", workflow)
 
     def test_serial_kaggle_timeout_fits_ephemeral_session(self):
@@ -256,7 +270,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn(".merge_base_commit.sha == $source", workflow)
         self.assertIn("raw-NER recovery release identity/assets differ", workflow)
         self.assertNotIn("actions/download-artifact", workflow)
-        self.assertNotIn("actions/upload-artifact", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("linker-perf-${{ github.run_id }}", workflow)
 
     def test_arm_resolver_uses_the_verified_kaggle_runtime_lock(self):
         root = Path(__file__).parents[1]

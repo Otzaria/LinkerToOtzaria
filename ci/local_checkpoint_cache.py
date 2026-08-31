@@ -23,6 +23,7 @@ import time
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 SHARD_PATH = re.compile(r"checkpoints/[0-9a-f]{40}/[0-9]{12}\.jsonl\Z")
+PRIOR_PATH = re.compile(r"checkpoints/[0-9a-f]{40}/prior\.(?:jsonl|absent)\Z")
 COMPLETED_ARTIFACT_PATH = re.compile(r"completed_artifacts/[0-9a-f]{40}\.jsonl\Z")
 CLAIM_ID = re.compile(r"[0-9a-f]{40}\Z")
 IDENTITY_FIELDS = (
@@ -81,6 +82,7 @@ def listed_files(root: Path) -> list[dict]:
         if (
             relative not in {"changed_books.json", "completed_books.json"}
             and not SHARD_PATH.fullmatch(relative)
+            and not PRIOR_PATH.fullmatch(relative)
             and not COMPLETED_ARTIFACT_PATH.fullmatch(relative)
         ):
             raise RuntimeError(f"unsafe/unexpected checkpoint member: {relative}")
@@ -184,7 +186,14 @@ def save(args: argparse.Namespace) -> None:
     ) as temporary_name:
         temporary = Path(temporary_name)
         shutil.copy2(changed_books, temporary / "changed_books.json")
-        shutil.copytree(checkpoints, temporary / "checkpoints")
+        # Advisory batch-lock files describe only live kernel ownership. They are
+        # neither progress nor portable recovery state, and copying them would make
+        # the strict member allow-list reject an otherwise valid checkpoint.
+        shutil.copytree(
+            checkpoints,
+            temporary / "checkpoints",
+            ignore=shutil.ignore_patterns(".batch-locks"),
+        )
         completed = _snapshot_completed(source, repo, temporary)
         (temporary / "completed_books.json").write_text(
             json.dumps(completed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

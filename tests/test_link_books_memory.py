@@ -13,6 +13,92 @@ import link_books  # noqa: E402
 
 
 class WorkerMemoryTest(unittest.TestCase):
+    def test_transport_batches_bound_lines_and_characters_without_dropping_giant_line(self):
+        lines = [
+            (0, "אבג", None),
+            (1, "דהו", None),
+            (2, "ז" * 12, None),
+            (3, "חטי", None),
+        ]
+        with mock.patch.object(link_books, "BATCH_LINES", 3), \
+                mock.patch.object(link_books, "BATCH_CHARS", 7):
+            batches = list(link_books.transport_batches(lines))
+        self.assertEqual(
+            [(start, [row[0] for row in batch]) for start, batch in batches],
+            [(0, [0, 1]), (2, [2]), (3, [3])],
+        )
+
+    def test_periodic_heartbeat_runs_during_one_blocked_batch(self):
+        calls = []
+        with link_books.periodic_heartbeat(lambda: calls.append(time.monotonic()), interval=0.01):
+            time.sleep(0.035)
+        self.assertGreaterEqual(len(calls), 3)
+
+    def test_cpu_resolver_starts_largest_books_first(self):
+        books = [link_books.BookKey("s", "small"), link_books.BookKey("s", "large")]
+        self.assertEqual(
+            [
+                book.canonical_he_title
+                for book in link_books.largest_books_first(
+                    books, {("s", "small"): 1, ("s", "large"): 4}
+                )
+            ],
+            ["large", "small"],
+        )
+
+    def test_cooperative_batch_claim_is_kernel_exclusive_and_resumable(self):
+        class Doc:
+            resolved_refs = []
+
+        class Linker:
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+                return [Doc() for _ in texts]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "checkpoint")
+            os.makedirs(checkpoint)
+            first = link_books.BatchClaim.acquire(checkpoint, 0)
+            self.assertIsNotNone(first)
+            self.assertIsNone(link_books.BatchClaim.acquire(checkpoint, 0))
+            with self.assertRaises(link_books.BookWorkInProgress):
+                link_books.process_book_checkpointed(
+                    Linker(), link_books.BookKey("s", "b"), [(0, "אב", None)],
+                    lambda _line: None, lambda: None, checkpoint,
+                    os.path.join(tmp, "out.jsonl"), lambda *_args: None,
+                    cooperative=True,
+                    prior_lock_path=os.path.join(tmp, "prior.lock"),
+                )
+            first.release()
+            count, _words = link_books.process_book_checkpointed(
+                Linker(), link_books.BookKey("s", "b"), [(0, "אב", None)],
+                lambda _line: None, lambda: None, checkpoint,
+                os.path.join(tmp, "out.jsonl"), lambda *_args: None,
+                cooperative=True,
+                prior_lock_path=os.path.join(tmp, "prior.lock"),
+            )
+            self.assertEqual(count, 0)
+
+    def test_cooperative_reuse_captures_prior_artifact_before_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "checkpoint")
+            output = os.path.join(tmp, "artifact.jsonl")
+            os.makedirs(tmp, exist_ok=True)
+            with open(output, "w", encoding="utf-8") as stream:
+                stream.write("old\n")
+            captured = link_books.capture_prior_artifact(
+                checkpoint, output, os.path.join(tmp, "claim", "prior.lock")
+            )
+            with open(output, "w", encoding="utf-8") as stream:
+                stream.write("new\n")
+            self.assertEqual(
+                link_books.capture_prior_artifact(
+                    checkpoint, output, os.path.join(tmp, "claim", "prior.lock")
+                ),
+                captured,
+            )
+            with open(captured, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "old\n")
+
     def test_snapshot_contract_requires_context_schema_and_policy(self):
         connection = sqlite3.connect(":memory:")
         connection.execute(

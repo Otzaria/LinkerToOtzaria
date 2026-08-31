@@ -17,11 +17,12 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey  # noqa: E402
 from link_books import (  # noqa: E402
+    BATCH_CHARS,
     BATCH_LINES,
     all_book_keys,
     book_lines,
     claim_id,
-    is_ner_eligible_line,
+    transport_batches,
     validate_snapshot_contract,
 )
 from ner_handoff import (  # noqa: E402
@@ -49,17 +50,42 @@ def _log(label: str, message: str) -> None:
 
 def _post_bulk(url: str, texts: list[str]) -> list[dict]:
     import requests
-
-    response = requests.post(
-        url.rstrip("/") + "/bulk-recognize-entities",
-        json={"texts": texts, "lang": "he"},
-        timeout=600,
-    )
-    response.raise_for_status()
+    endpoint = url.rstrip("/") + "/bulk-recognize-entities"
+    response = None
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                endpoint,
+                json={"texts": texts, "lang": "he"},
+                timeout=600,
+            )
+        except (requests.ConnectionError, requests.Timeout) as error:
+            if attempt == 2:
+                raise RuntimeError(
+                    f"GPU transport failed after {attempt + 1} attempts: "
+                    f"{type(error).__name__}: {error}"
+                ) from error
+            time.sleep(2 ** attempt)
+            continue
+        if response.status_code in {502, 503, 504} and attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
+        if not response.ok:
+            body = response.text[:2000].replace("\n", "\\n")
+            raise RuntimeError(
+                f"GPU server HTTP {response.status_code} for {len(texts)} texts; "
+                f"body={body!r}"
+            )
+        break
+    assert response is not None
     try:
         data = json.loads(response.text, object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise RuntimeError(f"GPU server returned invalid/duplicate-key JSON: {error}") from error
+        body = response.text[:2000].replace("\n", "\\n")
+        raise RuntimeError(
+            f"GPU server returned invalid/duplicate-key JSON for {len(texts)} texts: "
+            f"{error}; status={response.status_code}; body={body!r}"
+        ) from error
     if type(data) is not dict or set(data) != {"results"} or type(data["results"]) is not list:
         raise RuntimeError("GPU server returned an invalid bulk response")
     if len(data["results"]) != len(texts):
@@ -153,6 +179,7 @@ def _checkpoint_document(args, books, hashes, ner_ranges) -> dict:
         "snapshot_sha256": sha256_file(args.snapshot),
         "engine_fingerprint": args.engine_fingerprint,
         "batch_lines": BATCH_LINES,
+        "batch_chars": BATCH_CHARS,
         "books": [
             {
                 "source_name": book.source_name,
@@ -482,15 +509,8 @@ def _produce_book(
     current_indices = {line_index for line_index, _, _ in lines}
     if not selected_indices <= current_indices:
         raise RuntimeError(f"NER plan selects absent lines for {book!r}")
-    for start in range(0, len(lines), BATCH_LINES):
-        batch = [
-            (line_index, content, context_ref)
-            for line_index, content, context_ref in lines[start:start + BATCH_LINES]
-            if line_index in selected_indices and is_ner_eligible_line(content)
-        ]
+    for start, batch in transport_batches(lines, selected_indices):
         _heartbeat(root, cid, worker_hb)
-        if not batch:
-            continue
         expected_starts.add(start)
         normalized = recognizer._normalize_input([content for _, content, _ in batch])
         existing = by_start.get(start)
@@ -511,11 +531,13 @@ def _produce_book(
         try:
             results = _post_bulk(args.ner_url, normalized)
         except Exception as error:
-            _log(args.worker_label, f"bulk failure at {book.canonical_he_title!r}/{start}: {error}; replaying lines")
+            _log(
+                args.worker_label,
+                f"bulk failure at {book.canonical_he_title!r}/{start}: {error}; "
+                "checking service and retrying the identical batch once",
+            )
             _wait_for_ner(args.ner_url, args.worker_label)
-            results = []
-            for text in normalized:
-                results.extend(_post_bulk(args.ner_url, [text]))
+            results = _post_bulk(args.ner_url, normalized)
         line_records = [
             {
                 "line_index": line_index,
@@ -703,6 +725,7 @@ def finalize(args) -> int:
         "snapshot_sha256": sha256_file(args.snapshot),
         "engine_fingerprint": args.engine_fingerprint,
         "batch_lines": BATCH_LINES,
+        "batch_chars": BATCH_CHARS,
         "books": descriptors,
     })
     _log("driver", f"finalized NER handoff for {len(books)} book(s)")

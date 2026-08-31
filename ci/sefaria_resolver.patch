@@ -39,3 +39,63 @@ index 74985d0..9b7ed96 100644
              r = r.subref([sublen])
  
          return r
+diff --git a/sefaria/model/linker/referenceable_book_node.py b/sefaria/model/linker/referenceable_book_node.py
+index c6c3687..b252028 100644
+--- a/sefaria/model/linker/referenceable_book_node.py
++++ b/sefaria/model/linker/referenceable_book_node.py
+@@ -2,6 +2,8 @@ import dataclasses
+ import copy
+ import re
++import atexit
+ from collections import defaultdict
++from functools import lru_cache
+ from typing import Union, Optional
+ from threading import Lock
+ from sefaria.model import abstract as abst
+@@ -174,8 +175,7 @@ class NamedReferenceableBookNode(IndexNodeReferenceableBookNode):
+         # the schema node for this referenceable node has a dibur hamatchil child
+         if isinstance(thingy, schema.NumberedTitledTreeNode) and thingy.is_segment_level_dibur_hamatchil():
+             tref = self.ref().normal()
+-            logger.info(f"Querying DH for {tref}")
+-            return [DiburHamatchilNodeSet({"container_refs": tref})]
++            return [_cached_dibur_hamatchil_nodes(tref)]
+         # the schema node for this referenceable is a JAN. JANs act as both named and numbered nodes
+         if isinstance(thingy, schema.JaggedArrayNode) and len(thingy.children) == 0:
+             return [NumberedReferenceableBookNode(thingy)]
+@@ -313,7 +313,7 @@ class NumberedReferenceableBookNode(IndexNodeReferenceableBookNode):
+             return []
+         children = []
+         if self._ja_node.is_segment_level_dibur_hamatchil():
+-            children += [DiburHamatchilNodeSet({"container_refs": context_ref.normal()})]
++            children += [_cached_dibur_hamatchil_nodes(context_ref.normal())]
+             if serial['depth'] == 1:
+                 return children
+         if context_ref is not None:
+@@ -516,2 +517,27 @@ PASSAGE_MATCHER = PassageMatcher()
++@lru_cache(maxsize=64)
++def _cached_dibur_hamatchil_nodes(tref: str):
++    """Materialize one immutable process-local Mongo result per container ref."""
++    logger.info(f"Querying DH for {tref} (cache miss)")
++    nodes = DiburHamatchilNodeSet({"container_refs": tref})
++    # AbstractMongoSet otherwise keeps a live cursor until first iteration. Force
++    # materialization before caching; subsequent iterations reuse its stable records.
++    nodes.array()
++    return nodes
++
++
++def _log_dibur_hamatchil_cache_info():
++    info = _cached_dibur_hamatchil_nodes.cache_info()
++    logger.info(
++        "DH cache summary",
++        hits=info.hits,
++        misses=info.misses,
++        maxsize=info.maxsize,
++        currsize=info.currsize,
++    )
++
++
++atexit.register(_log_dibur_hamatchil_cache_info)
++
++
+ class DiburHamatchilNodeSet(abst.AbstractMongoSet, ReferenceableBookNode):
+     recordClass = DiburHamatchilNode

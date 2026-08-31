@@ -54,6 +54,11 @@ class LocalCheckpointCacheTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_round_trip_restores_plan_shards_and_completed_outputs(self):
+        prior = self.run / "checkpoints" / self.claim / "prior.jsonl"
+        prior.write_text('{"record":"prior"}\n', encoding="utf-8")
+        locks = self.run / "checkpoints" / self.claim / ".batch-locks"
+        locks.mkdir()
+        (locks / "000000000000.lock").write_text("ephemeral", encoding="utf-8")
         cache.save(self.args)
         (self.run / "changed_books.json").unlink()
         (self.run / "checkpoints" / self.claim / "000000000000.jsonl").unlink()
@@ -67,6 +72,15 @@ class LocalCheckpointCacheTest(unittest.TestCase):
         )
         self.assertTrue(
             (self.run / "checkpoints" / self.claim / "000000000000.jsonl").is_file()
+        )
+        self.assertEqual(
+            (self.run / "checkpoints" / self.claim / "prior.jsonl").read_text(
+                encoding="utf-8"
+            ),
+            '{"record":"prior"}\n',
+        )
+        self.assertFalse(
+            (self.run / "checkpoints" / self.claim / ".batch-locks").exists()
         )
         completed = json.loads((self.run / "completed_books.json").read_text(encoding="utf-8"))
         self.assertEqual(completed[0]["claim_id"], self.claim)

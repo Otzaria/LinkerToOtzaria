@@ -136,14 +136,20 @@ fi
 SEFARIA_SOURCE_ID="$(source_identity "$SEF" "${SEFARIA_COMMIT:-}")"
 GPU_SOURCE_ID="$(source_identity "$GPU" "${GPU_SERVER_COMMIT:-}")"
 
-# Resolver fixes we maintain on top of the pin (see the patch header): two upstream
-# crashes (empty-section pad, None-ref dedup) that took whole LINES down — with
-# fail-loud they would fail every run touching those books. Idempotent apply;
-# the patch hash is part of the engine fingerprint below.
+# Resolver fixes we maintain on top of the pin (see the patch header): upstream
+# crash guards plus a process-local materialized DH-query cache. Reset only the
+# managed patch targets before applying: reverse-check idempotence cannot migrate a
+# persistent checkout from an older version of this maintained patch.
 PATCH="${LINKER_REPO:-$PWD}/ci/sefaria_resolver.patch"
-if ! git -C "$SEF" apply --reverse --check "$PATCH" 2>/dev/null; then
-  git -C "$SEF" apply "$PATCH"
-fi
+git -C "$SEF" checkout -- \
+  sefaria/model/linker/ref_resolver.py \
+  sefaria/model/linker/referenceable_book_node.py \
+  sefaria/model/text.py
+git -C "$SEF" apply --check "$PATCH" || {
+  echo "::error::maintained Sefaria resolver patch no longer applies to the pin"
+  exit 1
+}
+git -C "$SEF" apply "$PATCH"
 
 # ── 2. Python venv (numpy<2 — thinc/spaCy binary compat, learned in the POC) ─
 # The venv carries an identity (python + requirements hash + commit); any change

@@ -13,7 +13,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -248,12 +248,13 @@ class NerBundle:
         changed_books: list[dict],
         expected_book_hashes: dict[tuple[str, str], str] | None = None,
         expected_batch_lines: int | None = None,
+        expected_batch_chars: int | None = None,
     ):
         self.root = Path(root).resolve()
         manifest = load_json_strict(self.root / "ner_manifest.json")
         required = {
             "schema_version", "relink_request_id", "snapshot_sha256", "engine_fingerprint",
-            "batch_lines", "books",
+            "batch_lines", "batch_chars", "books",
         }
         if type(manifest) is not dict or set(manifest) != required:
             raise RuntimeError("NER manifest has an invalid key set")
@@ -269,6 +270,10 @@ class NerBundle:
             raise RuntimeError("NER manifest batch_lines is invalid")
         if expected_batch_lines is not None and manifest["batch_lines"] != expected_batch_lines:
             raise RuntimeError("NER manifest batch size differs from resolver transport boundary")
+        if type(manifest["batch_chars"]) is not int or manifest["batch_chars"] <= 0:
+            raise RuntimeError("NER manifest batch_chars is invalid")
+        if expected_batch_chars is not None and manifest["batch_chars"] != expected_batch_chars:
+            raise RuntimeError("NER manifest character budget differs from resolver transport boundary")
         expected = []
         expected_ranges = {}
         for index, item in enumerate(changed_books):
@@ -306,6 +311,7 @@ class NerBundle:
         if list(self.books) != expected:
             raise RuntimeError("NER manifest book order/set differs from the resolver changed-book plan")
         self.batch_lines = manifest["batch_lines"]
+        self.batch_chars = manifest["batch_chars"]
 
     def _below_root(self, relative: str) -> Path:
         path = (self.root / relative).resolve()

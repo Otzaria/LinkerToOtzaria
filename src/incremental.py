@@ -276,7 +276,7 @@ def write_meta(repo: str, *, sefaria_export_tag, snapshot_sha256, book_count,
                ambiguity_policy="drop", bavli_convention=False, generated_at=None,
                engine_fingerprint=None) -> None:
     meta = {
-        "schema_version": 2,
+        "schema_version": 3,
         "description": "Lineage of the last linker run (see stage 3). Source-change clock = snapshot.",
         "snapshot": {"sha256": snapshot_sha256, "book_count": book_count},
         "sefaria": {"export_tag": sefaria_export_tag},
@@ -730,6 +730,12 @@ def run_incremental(args) -> int:
         engine_fingerprint=fingerprint,
     )
     _log("book baseline + exact line baseline + meta.json updated")
+    if getattr(args, "ner_bundle_dir", None):
+        # Cooperative resolver shards are recovery state, not release state. Keep
+        # them through every fail-closed gate above; remove only after both baselines
+        # and metadata have advanced successfully.
+        import shutil
+        shutil.rmtree(os.path.join(args.run_dir, "checkpoints"), ignore_errors=True)
     return len(changed)
 
 

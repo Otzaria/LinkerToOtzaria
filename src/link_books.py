@@ -23,8 +23,10 @@ import re
 import resource
 import sqlite3
 import sys
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 
 # django/requests are imported lazily (main/ner_alive): the incremental driver imports
 # this module for claim_id alone and must not drag the whole Sefaria stack with it.
@@ -38,12 +40,19 @@ from line_baseline import indices_from_ranges  # noqa: E402
 # of batching. Tunable per host: GPU serving OOMs on 100-line batches of monster books
 # (16GB VRAM), so Kaggle runs use a smaller batch via env.
 BATCH_LINES = int(os.environ.get("LINKER_BATCH_LINES", "100"))
+# A line-count ceiling alone lets one pathological HTML/data row dominate a batch.
+# Keep ordinary batches large, but split before the aggregate source text becomes
+# unreasonably expensive for normalization, JSON transport, or resolution.  A single
+# over-budget line is still emitted alone so no source row can be silently skipped.
+BATCH_CHARS = int(os.environ.get("LINKER_BATCH_CHARS", "120000"))
 # Give up on a dead NER after this long (crash-looped GPU service, not a blip).
 NER_MAX_WAIT_SEC = int(os.environ.get("LINKER_NER_MAX_WAIT_SEC", "1800"))
 # Self-recycle above this many bytes. Overridable per machine: recycling costs a full
 # library reload (~8s on M-series, ~22s on Neoverse-N1), so give workers headroom when
 # RAM allows (e.g. 3e9 on a 22GB box with 2 workers) and keep the tight default for CI.
 RSS_CAP = float(os.environ.get("LINKER_RSS_CAP_BYTES", 1.8e9))
+GC_EVERY_BATCHES = max(1, int(os.environ.get("LINKER_GC_EVERY_BATCHES", "20")))
+HEARTBEAT_SECONDS = max(5, int(os.environ.get("LINKER_HEARTBEAT_SECONDS", "30")))
 CLAIM_STALE_SEC = 900    # compatibility argument; the kernel lock is liveness authority
 RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
@@ -69,6 +78,63 @@ def is_ner_eligible_line(content: str) -> bool:
         return False
     visible = _HTML_TAG_RE.sub(" ", content)
     return len(_HEBREW_RE.findall(visible)) >= 2
+
+
+def transport_batches(lines, selected_indices=None):
+    """Yield deterministic, content-bounded NER/resolver batches.
+
+    ``batch_start`` is the first row's ordinal position in the immutable per-book
+    snapshot, not its user-visible line index.  Producer and resolver share this
+    helper, making the raw-NER handoff fail closed if either boundary changes.
+    """
+    selected = None if selected_indices is None else set(selected_indices)
+    batch = []
+    batch_chars = 0
+    batch_start = None
+    for position, row in enumerate(lines):
+        line_index, content, _context_ref = row
+        if selected is not None and line_index not in selected:
+            continue
+        if not is_ner_eligible_line(content):
+            continue
+        size = len(content)
+        if batch and (len(batch) >= BATCH_LINES or batch_chars + size > BATCH_CHARS):
+            yield batch_start, batch
+            batch = []
+            batch_chars = 0
+            batch_start = None
+        if batch_start is None:
+            batch_start = position
+        batch.append(row)
+        batch_chars += size
+    if batch:
+        yield batch_start, batch
+
+
+@contextmanager
+def periodic_heartbeat(callback, interval=HEARTBEAT_SECONDS):
+    """Refresh a live worker/book claim while one resolver batch is blocked."""
+    stop = threading.Event()
+    errors = []
+
+    def run():
+        while not stop.wait(interval):
+            try:
+                callback()
+            except BaseException as error:  # surfaced on the owning worker thread
+                errors.append(error)
+                return
+
+    callback()
+    thread = threading.Thread(target=run, name="linker-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+    if errors:
+        raise RuntimeError("periodic linker heartbeat failed") from errors[0]
 
 
 def validate_snapshot_contract(con) -> None:
@@ -231,6 +297,74 @@ class BookClaim:
             self.released = True
 
 
+class BatchClaim:
+    """Kernel-owned non-blocking claim for one immutable resolver batch."""
+
+    def __init__(self, fd):
+        self.fd = fd
+
+    @classmethod
+    def acquire(cls, checkpoint_dir: str, batch_start: int):
+        import fcntl
+
+        lock_dir = os.path.join(checkpoint_dir, ".batch-locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        path = os.path.join(lock_dir, f"{batch_start:012d}.lock")
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        return cls(fd)
+
+    def release(self):
+        import fcntl
+
+        if self.fd is None:
+            return
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+
+
+class BookWorkInProgress(Exception):
+    """Another worker owns at least one missing batch; rescan without failing."""
+
+
+def capture_prior_artifact(checkpoint_dir, out_path, lock_path):
+    """Snapshot the old artifact once before cooperative assemblers can replace it."""
+    import fcntl
+    import shutil
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    prior = os.path.join(checkpoint_dir, "prior.jsonl")
+    absent = os.path.join(checkpoint_dir, "prior.absent")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if not os.path.exists(prior) and not os.path.exists(absent):
+            if os.path.isfile(out_path):
+                # Keep an interrupted copy beside the run-scoped lock rather than
+                # inside the durable checkpoint allow-list. A killed worker may
+                # leave this file behind, but checkpoint save deliberately excludes
+                # claim state and another worker can safely replace it.
+                temporary = f"{lock_path}.{os.getpid()}.tmp"
+                shutil.copy2(out_path, temporary)
+                os.replace(temporary, prior)
+            else:
+                with open(absent, "xb") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        return prior if os.path.isfile(prior) else None
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def ner_alive() -> bool:
     import requests
     try:
@@ -269,6 +403,23 @@ def book_lines(con, bk: BookKey) -> list[tuple[int, str, str]]:
         "WHERE source_name=? AND canonical_he_title=? ORDER BY line_index",
         (bk.source_name, bk.canonical_he_title),
     ).fetchall()
+
+
+def largest_books_first(books, eligible_line_counts):
+    """Deterministically start expensive CPU books early without rescanning SQLite."""
+    wanted = {(book.source_name, book.canonical_he_title) for book in books}
+    if set(eligible_line_counts) != wanted or any(
+        type(value) is not int or value < 0 for value in eligible_line_counts.values()
+    ):
+        raise RuntimeError("could not size every requested resolver book")
+    return sorted(
+        books,
+        key=lambda book: (
+            -eligible_line_counts[(book.source_name, book.canonical_he_title)],
+            book.source_name,
+            book.canonical_he_title,
+        ),
+    )
 
 
 def disambiguate_bavli(cands):
@@ -312,17 +463,10 @@ def process_book(
     """
     records: list[LinkRecord] = []
     words = 0
-    for i in range(0, len(lines), BATCH_LINES):
-        batch = [
-            (li, content, context_ref)
-            for li, content, context_ref in lines[i:i + BATCH_LINES]
-            if is_ner_eligible_line(content)
-        ]
+    for batch_start, batch in transport_batches(lines):
         heartbeat()
-        if not batch:
-            continue
         batch_records, batch_words = process_batch(
-            linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+            linker, bk, batch, skipped_log, batch_start=batch_start, precomputed=precomputed,
             context_ref_factory=context_ref_factory,
         )
         records.extend(batch_records)
@@ -332,9 +476,10 @@ def process_book(
 
 def process_batch(
     linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None,
-    context_ref_factory=None,
+    context_ref_factory=None, metrics=None,
 ):
     """Link one transport batch. Output is independent of neighbouring batches."""
+    started = time.perf_counter()
     words = sum(len(content.split()) for _, content, _ in batch)
     context_objects = []
     for _line_index, _content, context_ref in batch:
@@ -346,6 +491,7 @@ def process_batch(
             # Non-Sefaria books may have titles that Ref cannot parse. They still
             # link context-free; relative citations fail closed below.
             context_objects.append(None)
+    context_done = time.perf_counter()
     try:
         if precomputed is not None:
             docs = precomputed.resolve_batch(
@@ -384,6 +530,7 @@ def process_batch(
                 raise RuntimeError(
                     f"line {li} failed to link: {type(le).__name__}: {le}") from le
 
+    resolve_done = time.perf_counter()
     records: list[LinkRecord] = []
     for (line_index, content, context_ref), context_object, doc in zip(batch, context_objects, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
@@ -421,12 +568,25 @@ def process_batch(
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
                 raise RuntimeError(
                     f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
+    if metrics is not None:
+        finished = time.perf_counter()
+        metrics.update({
+            "batch_start": batch_start,
+            "lines": len(batch),
+            "chars": sum(len(content) for _, content, _ in batch),
+            "words": words,
+            "context_seconds": context_done - started,
+            "resolve_seconds": resolve_done - context_done,
+            "mapping_seconds": finished - resolve_done,
+            "links": len(records),
+        })
     return records, words
 
 
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
     precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
+    metric_log=None, cooperative=False, prior_lock_path=None,
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -470,8 +630,15 @@ def process_book_checkpointed(
     ):
         raise RuntimeError(f"line plan does not exactly partition {bk!r}")
     reused_records = []
-    if reuse_by_old and os.path.exists(out_path):
-        for record in read_artifact(out_path):
+    prior_artifact = out_path
+    if cooperative and reuse_by_old:
+        if not prior_lock_path:
+            raise RuntimeError("cooperative line reuse requires a prior-artifact lock")
+        prior_artifact = capture_prior_artifact(
+            checkpoint_dir, out_path, prior_lock_path
+        )
+    if reuse_by_old and prior_artifact and os.path.exists(prior_artifact):
+        for record in read_artifact(prior_artifact):
             if record.book_key != bk:
                 raise RuntimeError(
                     f"prior artifact contains a different book identity for {bk!r}"
@@ -507,19 +674,9 @@ def process_book_checkpointed(
     shard_paths = []
     total_words = 0
     batches_this_life = 0
-    for i in range(0, len(lines), BATCH_LINES):
-        batch = [
-            (li, content, context_ref)
-            for li, content, context_ref in lines[i:i + BATCH_LINES]
-            if li in ner_indices and is_ner_eligible_line(content)
-        ]
+    for i, batch in transport_batches(lines, ner_indices):
         total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
-        # A large changed book may reuse almost every line.  Do not create thousands
-        # of empty checkpoint shards for batches that contain no requested NER work;
-        # the exact line partition above already proves those lines are accounted for.
-        if not batch:
-            continue
         shard = os.path.join(checkpoint_dir, f"{i:012d}.jsonl")
         shard_paths.append(shard)
         if os.path.exists(shard):
@@ -558,22 +715,51 @@ def process_book_checkpointed(
                         f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
                     )
             continue
-        records, _ = process_batch(
-            linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
-            context_ref_factory=context_ref_factory,
-        )
-        write_artifact(shard, records)
+        batch_claim = BatchClaim.acquire(checkpoint_dir, i) if cooperative else None
+        if cooperative and batch_claim is None:
+            continue
+        try:
+            # A peer may have committed the shard between our first existence check
+            # and this lock acquisition. Its atomic rename is the completion marker.
+            if os.path.exists(shard):
+                continue
+            metrics = {}
+            records, _ = process_batch(
+                linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
+                context_ref_factory=context_ref_factory, metrics=metrics,
+            )
+            write_started = time.perf_counter()
+            write_artifact(shard, records)
+            write_done = time.perf_counter()
+        finally:
+            if batch_claim is not None:
+                batch_claim.release()
         batches_this_life += 1
         # Drop batch-local resolved documents before measuring current RSS.  The
         # long-lived Sefaria caches remain; those are precisely what exec recycles.
         del records
         import gc
-        gc.collect()
         current_rss = rss_bytes()
+        gc_started = time.perf_counter()
+        collected = 0
+        if batches_this_life % GC_EVERY_BATCHES == 0 or current_rss >= RSS_CAP * 0.8:
+            collected = gc.collect()
+            current_rss = rss_bytes()
+        gc_done = time.perf_counter()
+        if metric_log is not None:
+            metric_log({
+                **metrics,
+                "write_fsync_seconds": write_done - write_started,
+                "gc_seconds": gc_done - gc_started,
+                "gc_collected": collected,
+                "rss_bytes": current_rss,
+            })
         if recycle_needed(current_rss, RSS_CAP, batches_this_life):
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 
+    if cooperative and any(not os.path.isfile(path) for path in shard_paths):
+        raise BookWorkInProgress
     records = list(reused_records)
     records.extend(chain.from_iterable(read_artifact(path) for path in shard_paths))
     records.sort(key=lambda record: (record.line_index, record.start, record.end, record.target_ref))
@@ -691,6 +877,20 @@ def main():
         with open(os.path.join(run, "logs", "skipped_lines.log"), "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def metric_log(value):
+        import json as _json
+        payload = {
+            "unix": time.time(),
+            "worker": args.label,
+            **value,
+        }
+        with open(
+            os.path.join(run, "logs", f"perf-{args.label}.jsonl"),
+            "a",
+            encoding="utf-8",
+        ) as stream:
+            stream.write(_json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     import django
     django.setup()
@@ -767,6 +967,14 @@ def main():
             ],
             expected_book_hashes=expected_hashes,
             expected_batch_lines=BATCH_LINES,
+            expected_batch_chars=BATCH_CHARS,
+        )
+        books = largest_books_first(
+            books,
+            {
+                key: manifest["eligible_line_count"]
+                for key, manifest in precomputed.books.items()
+            },
         )
         log(f"verified raw-NER handoff for {len(books)} changed book(s); live GPU disabled")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")
@@ -802,8 +1010,9 @@ def main():
         while True:
             if os.path.exists(os.path.join(run, "done", cid)):
                 break
-            claim = BookClaim.acquire(run, cid)
-            if claim is None:
+            cooperative = precomputed is not None
+            claim = None if cooperative else BookClaim.acquire(run, cid)
+            if not cooperative and claim is None:
                 break  # another live worker owns it — it will mark done/failed
             lines = book_lines(con, bk)
             item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
@@ -841,25 +1050,38 @@ def main():
                     )
                     # The next exec (or a peer) must be able to claim the same book
                     # immediately and resume its immutable batch shards.
-                    claim.release()
+                    if claim is not None:
+                        claim.release()
                     con.close()
                     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-                record_count, words = process_book_checkpointed(
-                    linker, bk, lines, skipped_log,
-                    lambda: (worker_heartbeat(), claim.heartbeat()),
-                    checkpoint_dir, out_path, recycle_worker,
-                    precomputed=precomputed,
-                    ner_indices=ner_indices,
-                    reuse=reuse,
-                    context_ref_factory=Ref,
+                heartbeat = lambda: (
+                    worker_heartbeat(),
+                    claim.heartbeat() if claim is not None else None,
                 )
+                with periodic_heartbeat(heartbeat):
+                    record_count, words = process_book_checkpointed(
+                        linker, bk, lines, skipped_log, heartbeat,
+                        checkpoint_dir, out_path, recycle_worker,
+                        precomputed=precomputed,
+                        ner_indices=ner_indices,
+                        reuse=reuse,
+                        context_ref_factory=Ref,
+                        metric_log=metric_log,
+                        cooperative=cooperative,
+                        prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
+                    )
+            except BookWorkInProgress:
+                # Helpers filled other batches in this and later books. A rescan will
+                # assemble once every atomic shard exists; this is ordinary contention.
+                break
             except Exception as e:
                 if precomputed is None and ner_indices and not ner_alive():
                     # Infrastructure outage, not a book problem: release the claim, wait
                     # for NER, and retry this book (any worker may pick it up meanwhile).
                     log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
-                    claim.release()
+                    if claim is not None:
+                        claim.release()
                     wait_for_ner(log)
                     continue
                 log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
@@ -873,7 +1095,8 @@ def main():
                 with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
                     _json.dump(bk.to_dict(), ff, ensure_ascii=False)
                 open(os.path.join(run, "done", cid), "w").close()
-                claim.release()
+                if claim is not None:
+                    claim.release()
                 break
 
             # Atomic per-book output: write the artifact only when the whole book is linked.
@@ -883,8 +1106,12 @@ def main():
                 os.remove(out_path)
             open(os.path.join(run, "done", cid), "w").close()
             import shutil
-            shutil.rmtree(checkpoint_dir, ignore_errors=True)
-            claim.release()
+            # Cooperative helpers may still be validating/assembling the same stable
+            # shards. Keep them for the run; the next invocation resets checkpoints.
+            if not cooperative:
+                shutil.rmtree(checkpoint_dir, ignore_errors=True)
+            if claim is not None:
+                claim.release()
             processed += 1
             log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
             worker_heartbeat()
@@ -893,7 +1120,7 @@ def main():
         # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
         # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
         current_rss = rss_bytes()
-        if recycle_needed(current_rss, RSS_CAP, processed):
+        if precomputed is None and recycle_needed(current_rss, RSS_CAP, processed):
             log(
                 f"recycling (current RSS {current_rss} over cap {int(RSS_CAP)}) "
                 f"after {processed} books this life"
@@ -901,10 +1128,10 @@ def main():
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
     log(f"no more books (processed {processed} this life); exiting")
-    try:
-        os.remove(heartbeat_path)
-    except FileNotFoundError:
-        pass
+    # Leave the final heartbeat in place until the supervisor observes process exit.
+    # Deleting it created a race where a still-live cleanly-exiting worker was treated
+    # as stale from its original spawn time and killed with SIGTERM.
+    worker_heartbeat()
 
 
 if __name__ == "__main__":
