@@ -39,7 +39,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('sefaria/model/linker/referenceable_book_node.py', setup)
         self.assertIn('git -C "$SEF" apply --check "$PATCH"', setup)
         resolver_patch = (root / "ci/sefaria_resolver.patch").read_text(encoding="utf-8")
-        self.assertIn("@lru_cache(maxsize=64)", resolver_patch)
+        self.assertIn("@lru_cache(maxsize=1024)", resolver_patch)
         self.assertIn("nodes.array()", resolver_patch)
         self.assertIn(
             'git -C "$GPU" apply --check --directory=app "$MICROBATCH_PATCH"', setup

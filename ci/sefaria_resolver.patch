@@ -72,7 +72,7 @@ index c6c3687..b252028 100644
                  return children
          if context_ref is not None:
 @@ -516,2 +517,27 @@ PASSAGE_MATCHER = PassageMatcher()
-+@lru_cache(maxsize=64)
++@lru_cache(maxsize=1024)
 +def _cached_dibur_hamatchil_nodes(tref: str):
 +    """Materialize one immutable process-local Mongo result per container ref."""
 +    logger.info(f"Querying DH for {tref} (cache miss)")
