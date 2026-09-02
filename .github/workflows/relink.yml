@@ -192,6 +192,17 @@ on:
 permissions:
   contents: write
 
+# The NetFree root is installed in the runner OS CA store.  Actions are Node
+# processes and Python requests can otherwise use private CA bundles, so bind
+# every network client explicitly to that store.
+env:
+  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
+  SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+  REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
+  PIP_CERT: /etc/ssl/certs/ca-certificates.crt
+
 # One PUBLISHING relink at a time, across BOTH targets. server and kaggle used to have
 # separate concurrency groups, so a server run and a kaggle run could run at once and each
 # publish to the same links-<tag> release (--clobber) and `git push` the shared baseline —
