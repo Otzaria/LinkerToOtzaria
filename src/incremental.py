@@ -54,6 +54,7 @@ from line_baseline import (  # noqa: E402
     plan_changed_books,
     validate_baseline_identity,
 )
+from ner_handoff import SCHEMA_VERSION  # noqa: E402
 
 
 # ── target_ref rewrite for en-renames (no linking) ──────────────────────────
@@ -404,7 +405,7 @@ def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
     plan = compute_incremental_plan(args)
     current = plan["current"]
     document = {
-        "schema_version": 2,
+        "schema_version": SCHEMA_VERSION,
         "relink_request_id": relink_request_id,
         "snapshot_sha256": sha256_of_file(args.snapshot),
         "changelog_sha256": sha256_of_file(args.changelog) if args.changelog else None,
