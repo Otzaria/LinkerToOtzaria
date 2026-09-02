@@ -660,7 +660,7 @@ jobs:
 
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
       # local runs the same raw-NER handoff first, then stops the GPU model and starts
-      # sixteen CPU-only resolver processes. target=server retains the legacy combined
+      # twelve CPU-only resolver processes. target=server retains the legacy combined
       # Mongo+NER+Django fallback. The server path runs as
       # ONE step under a host lease: a kernel flock whose FD is
       # held by this step's shell for the phase's whole life and released by the kernel
@@ -680,7 +680,7 @@ jobs:
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
       # so flipping e.g. --bavli-convention also forces a full relink. The legacy
       # server fallback keeps three workers for OOM headroom on its 22GB host; local
-      # resolution uses sixteen bounded, cooperative workers after unloading the GPU.
+      # resolution uses twelve bounded, cooperative workers after unloading the GPU.
       # NER teardown is bound to this same step's EXIT trap — still under the lease, so
       # it can never kill another run's fresh stack (that run needs the lease first) —
       # freeing ~3GB of models for whatever resumes on the shared host either way.
@@ -689,7 +689,7 @@ jobs:
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
           # The local ROCm host loads exactly one model process only during raw NER.
-          # Resolution starts after stop_ner releases its VRAM, so its sixteen workers
+          # Resolution starts after stop_ner releases its VRAM, so its twelve workers
           # no longer contend for one synchronous GPU queue. Kaggle/server retain their
           # independently measured process counts.
           NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
@@ -868,7 +868,8 @@ jobs:
             echo "final local raw-NER micro-batch metrics:"
             curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics || true
             bash ci/stop_ner.sh
-            # Sixteen resolver processes own the sixteen CPU cores. Prevent native
+            # Twelve resolver processes: 16 x ~2GB RSS exhausted the ~32GB WSL VM
+            # (OOM-killed workers, then the job was cancelled) on 2026-09-02. Prevent native
             # libraries inside each Python process from creating another thread pool.
             export MALLOC_ARENA_MAX=2
             export OMP_NUM_THREADS=1
@@ -878,7 +879,7 @@ jobs:
             ARGS+=(
               --ner-bundle-dir "$NER_BUNDLE_DIR"
               --relink-request-id "$RELINK_REQUEST_ID"
-              --engine-workers 16
+              --engine-workers 12
             )
             [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           elif [ -n "$LIBRARY_RUN_ID" ]; then
