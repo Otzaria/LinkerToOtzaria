@@ -100,6 +100,29 @@ class IncrementalE2ETest(unittest.TestCase):
             rows.append((sn, ct, 0, val))
         return rows
 
+    def test_plan_only_output_passes_the_handoff_validator(self):
+        """--plan-only is consumed by precompute_ner via ner_handoff.validate_plan; the
+        written schema_version must be the one the validator expects (regression: the
+        writer pinned 2 after the handoff contract moved to 3, failing every local run)."""
+        import json
+        from ner_handoff import SCHEMA_VERSION, validate_plan
+        _snapshot(self.snap, self._rows())
+        plan_path = os.path.join(self.tmp, "ner-plan.json")
+        request_id = "c" * 64
+        args = self._args()
+        args.engine_fingerprint = "engine-v1"   # always supplied by relink.yml
+        self.assertEqual(inc.write_incremental_plan(args, plan_path, request_id), 3)
+        with open(plan_path, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        self.assertEqual(plan["schema_version"], SCHEMA_VERSION)
+        validated = validate_plan(
+            plan,
+            request_id=request_id,
+            snapshot_sha256=inc.sha256_of_file(self.snap),
+            engine_fingerprint=plan["engine_fingerprint"],
+        )
+        self.assertEqual(len(validated["changed"]), 3)
+
     def test_relink_tracks_snapshot_and_never_orphans(self):
         import json
         # run1: baseline empty -> every book is "new" -> relink all 3.
