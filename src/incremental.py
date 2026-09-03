@@ -796,14 +796,29 @@ def _run_engine(args, only_books_path):
         ]
     env = dict(os.environ, PYTHONPATH=args.sef_project + ":" + os.environ.get("PYTHONPATH", ""))
     workers = max(1, int(getattr(args, "engine_workers", 1) or 1))
-    _log(f"running engine ({workers} worker(s)): " + " ".join(base_cmd))
+    restart_limit = max(0, int(getattr(args, "engine_restart_limit", 2) or 0))
+    stall = float(getattr(args, "worker_stall_seconds", 1800) or 1800)
+    # --engine-pool: ONE engine process loads the Sefaria library and forks the workers
+    # from it (copy-on-write), instead of N processes each loading their own ~2 GB copy.
+    # The master supervises its children (link_books.run_pool) with the same heartbeat,
+    # stall and bounded-replacement contract; this driver supervises only the master,
+    # whose heartbeat label is "pool".
+    pool = bool(getattr(args, "engine_pool", False))
+    if pool:
+        base_cmd += ["--pool-workers", str(workers)]
+        env["LINKER_POOL_RESTART_LIMIT"] = str(restart_limit)
+        env["LINKER_POOL_STALL_SECONDS"] = str(stall)
+    _log(f"running engine ({workers} worker(s){', pooled' if pool else ''}): " + " ".join(base_cmd))
     lease_fds = ()
     try:
         os.fstat(9)
         lease_fds = (9,)
     except OSError:
         pass
-    worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
+    if pool:
+        worker_labels = ["pool"]
+    else:
+        worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
     heartbeat_dir = os.path.join(os.path.abspath(args.run_dir), "worker-heartbeats")
     os.makedirs(heartbeat_dir, exist_ok=True)
 
@@ -834,7 +849,6 @@ def _run_engine(args, only_books_path):
     active = {}
     spawned_at = {}
     restart_counts = {label: 0 for label in worker_labels}
-    restart_limit = max(0, int(getattr(args, "engine_restart_limit", 2) or 0))
     scope_dir = os.environ.get("LINKER_ENGINE_SCOPE_DIR")
     scope_tool = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -878,7 +892,6 @@ def _run_engine(args, only_books_path):
             spawn_worker(label)
 
         codes = []
-        stall = float(getattr(args, "worker_stall_seconds", 1800) or 1800)
         while active:
             time.sleep(1)
             now = time.time()
@@ -986,6 +999,9 @@ def main():
     ap.add_argument("--bavli-convention", action="store_true")
     ap.add_argument("--engine-fingerprint", default=None,
                     help="engine identity (commits/models/policy); a change forces a FULL relink")
+    ap.add_argument("--engine-pool", action="store_true",
+                    help="load the Sefaria library once and fork --engine-workers resolver "
+                         "children from it (copy-on-write) instead of N independent loads")
     ap.add_argument("--engine-workers", type=int, default=1,
                     help="parallel link_books.py processes (claim-ledger coordinated)")
     ap.add_argument("--resume-checkpoints", action="store_true",

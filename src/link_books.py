@@ -56,6 +56,13 @@ HEARTBEAT_SECONDS = max(5, int(os.environ.get("LINKER_HEARTBEAT_SECONDS", "30"))
 CLAIM_STALE_SEC = 900    # compatibility argument; the kernel lock is liveness authority
 RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
+# Exit status a forked pool child uses to ask the warm master for a fresh image (see
+# run_pool): the equivalent of the standalone worker's self-exec, without reloading
+# the library.  Distinct from every status the engine or the kernel otherwise produces.
+RECYCLE_EXIT_CODE = 75
+# True inside a run_pool child: switches the recycle cap to private memory and the
+# recycle action from execv to a pool exit.
+_POOL_CHILD = False
 
 _HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
@@ -187,6 +194,249 @@ def rss_bytes() -> int:
         # Last-resort estimate.  ru_maxrss is bytes on macOS and KiB elsewhere.
         multiplier = 1 if sys.platform == "darwin" else 1024
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * multiplier
+
+
+def private_bytes() -> int:
+    """Private (non-shared) resident bytes of this process, from ``/proc/self/smaps_rollup``.
+
+    A forked pool child shares the master's loaded library copy-on-write, so its plain
+    RSS starts at the master's size and says nothing about the child's own growth.  In
+    pool mode the recycle cap therefore judges ``Private_Clean + Private_Dirty``: the
+    pages this child actually owns (its Ref cache, batch documents, dirtied shared pages).
+    """
+    total = 0
+    with open("/proc/self/smaps_rollup", encoding="ascii") as fh:
+        for line in fh:
+            if line.startswith(("Private_Clean:", "Private_Dirty:")):
+                total += int(line.split()[1]) * 1024
+    return total
+
+
+def worker_memory_bytes() -> int:
+    """The figure the recycle cap is judged against for this worker image."""
+    if _POOL_CHILD:
+        return private_bytes()
+    return rss_bytes()
+
+
+def prepare_pool_child(snapshot: str, run_dir: str, label: str):
+    """Per-child state after fork: Django handles closed, own SQLite handle, own
+    heartbeat path, and proof that the private-memory cap can be judged here.
+
+    Returns ``(connection, heartbeat_path)``.  Kept outside main() so the one piece of
+    the pool that touches inherited resources is unit-testable without Sefaria.
+    """
+    try:
+        from django.db import connections as _django_connections
+        _django_connections.close_all()
+    except Exception:
+        pass
+    # The recycle cap judges PRIVATE memory in a pool child (see private_bytes); fail
+    # loudly here rather than letting every child trip the zero-progress guard if the
+    # kernel lacks smaps_rollup.
+    try:
+        private_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            "--pool-workers requires /proc/self/smaps_rollup for the private "
+            f"memory cap: {error}"
+        ) from error
+    connection = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    return connection, os.path.join(run_dir, "worker-heartbeats", label)
+
+
+def _recycle_process() -> None:
+    """Replace this worker image.
+
+    Standalone workers exec themselves afresh (a full library reload).  A pool child
+    instead exits with RECYCLE_EXIT_CODE so the master forks a fresh child from its
+    already-loaded image; the caller has already released every claim it held.
+    """
+    if _POOL_CHILD:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(RECYCLE_EXIT_CODE)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
+             restart_limit=2, stall_seconds=1800.0, log=print, poll_seconds=1.0) -> int:
+    """Fork ``worker_count`` resolver children from this already-loaded process.
+
+    The master keeps the loaded Sefaria library, resolver tries and verified NER
+    bundle; every child shares those pages copy-on-write instead of loading its own
+    ~2 GB copy.  ``gc.freeze()`` moves the shared objects out of every child's
+    collector so their GC traffic does not needlessly dirty shared pages.
+
+    Per child the master reproduces the standalone supervisor contract: a heartbeat
+    file per label that a stall watchdog judges, bounded replacement of a child that
+    dies with a nonzero status, and an immediate re-fork of a child that exits with
+    RECYCLE_EXIT_CODE (the pool's cheap equivalent of self-exec).  The master refreshes
+    its own heartbeat (``master_label``) so the outer driver's watchdog sees it alive
+    while children work.  Children stay in the master's process group, so the outer
+    driver's group TERM/KILL reaches them; the master also forwards SIGTERM itself.
+
+    ``child_setup(label)`` runs in the child before ``child_body()``; the body's int
+    return (None = 0) becomes the child's exit status.  Returns 0 when the last life
+    of every label ended cleanly, else 1 — the driver still judges the ledger.
+    """
+    import gc
+    import json as _json
+    import signal
+    import traceback
+
+    heartbeat_dir = os.path.join(run_dir, "worker-heartbeats")
+    os.makedirs(heartbeat_dir, exist_ok=True)
+    master_hb = os.path.join(heartbeat_dir, master_label)
+    labels = [f"w{n:02d}" for n in range(1, int(worker_count) + 1)]
+    active = {}          # label -> (pid, spawned_at)
+    codes = {label: [] for label in labels}
+    restarts = {label: 0 for label in labels}
+    terminating = False
+
+    def touch_master():
+        open(master_hb, "a").close()
+        os.utime(master_hb, None)
+
+    def fork_child(label):
+        try:
+            os.remove(os.path.join(heartbeat_dir, label))
+        except FileNotFoundError:
+            pass
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            pid = os.fork()
+        except OSError as error:
+            # EAGAIN/ENOMEM is exactly the host state this pool exists to survive: give
+            # up on THIS label (the driver judges the ledger; peers keep working) rather
+            # than unwinding into finally and terminating every healthy sibling.
+            log(f"pool: fork for {label} failed ({error}); leaving it to its peers")
+            codes[label].append(1)
+            return None
+        if pid == 0:
+            code = 1
+            try:
+                global _POOL_CHILD
+                _POOL_CHILD = True
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                child_setup(label)
+                result = child_body()
+                code = 0 if result is None else int(result)
+            except SystemExit as error:
+                if error.code is None:
+                    code = 0
+                else:
+                    code = error.code if isinstance(error.code, int) else 1
+            except BaseException:
+                traceback.print_exc()
+                code = 1
+            finally:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(code)
+        active[label] = (pid, time.time())
+        return pid
+
+    def signal_children(sig):
+        for _label, (pid, _spawned) in list(active.items()):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+
+    def reap_nonblocking():
+        # Poll only the children this pool owns: waitpid(-1) would also swallow the
+        # status of any subprocess a future master might run.
+        for label, (child_pid, _spawned) in list(active.items()):
+            try:
+                pid, status = os.waitpid(child_pid, os.WNOHANG)
+            except ChildProcessError:
+                del active[label]
+                return label, 1
+            if pid == 0:
+                continue
+            del active[label]
+            if os.WIFSIGNALED(status):
+                return label, -os.WTERMSIG(status)
+            return label, os.WEXITSTATUS(status)
+        return None
+
+    def on_term(_signum, _frame):
+        nonlocal terminating
+        terminating = True
+        signal_children(signal.SIGTERM)
+
+    previous = signal.signal(signal.SIGTERM, on_term)
+    # Drop the garbage the library load left behind before freezing: frozen objects
+    # are inherited by every child and never collected again.
+    gc.collect()
+    gc.freeze()
+    try:
+        for label in labels:
+            fork_child(label)
+        while active:
+            touch_master()
+            reaped = reap_nonblocking()
+            if reaped is not None:
+                label, code = reaped
+                if terminating:
+                    codes[label].append(code)
+                    continue
+                if code == RECYCLE_EXIT_CODE:
+                    log(f"pool: {label} recycled; forking a fresh child from the warm master")
+                    fork_child(label)
+                    continue
+                codes[label].append(code)
+                if code == 0:
+                    continue
+                if restarts[label] >= restart_limit:
+                    log(
+                        f"pool: {label} exited {code}; bounded replacement limit "
+                        f"{restart_limit} exhausted — peers may still complete its books"
+                    )
+                    continue
+                restarts[label] += 1
+                log(
+                    f"pool: {label} exited {code} before finishing; starting bounded "
+                    f"replacement {restarts[label]}/{restart_limit}"
+                )
+                fork_child(label)
+                continue
+            now = time.time()
+            for label, (pid, spawned) in list(active.items()):
+                try:
+                    last = max(spawned, os.path.getmtime(os.path.join(heartbeat_dir, label)))
+                except OSError:
+                    last = spawned
+                if now - last > stall_seconds:
+                    log(f"pool: {label} pid={pid} has no heartbeat for {now - last:.0f}s; killing it")
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            time.sleep(poll_seconds)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        signal_children(signal.SIGTERM)
+        deadline = time.time() + float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
+        while active and time.time() < deadline:
+            if reap_nonblocking() is None:
+                time.sleep(0.2)
+        signal_children(signal.SIGKILL)
+        while active:
+            if reap_nonblocking() is None:
+                time.sleep(0.2)
+        try:
+            os.makedirs(os.path.join(run_dir, "logs"), exist_ok=True)
+            with open(os.path.join(run_dir, "logs", "pool-exit-codes.json"), "w", encoding="utf-8") as fh:
+                _json.dump(codes, fh, sort_keys=True)
+        except OSError:
+            pass
+    unclean = sorted(label for label, seen in codes.items() if seen and seen[-1] != 0)
+    log(f"pool: exit codes {codes}" + (f"; unclean labels {unclean}" if unclean else ""))
+    return 1 if unclean else 0
 
 
 def recycle_needed(current_rss: int, cap: float, processed: int) -> bool:
@@ -739,12 +989,12 @@ def process_book_checkpointed(
         # long-lived Sefaria caches remain; those are precisely what exec recycles.
         del records
         import gc
-        current_rss = rss_bytes()
+        current_rss = worker_memory_bytes()
         gc_started = time.perf_counter()
         collected = 0
         if batches_this_life % GC_EVERY_BATCHES == 0 or current_rss >= RSS_CAP * 0.8:
             collected = gc.collect()
-            current_rss = rss_bytes()
+            current_rss = worker_memory_bytes()
         gc_done = time.perf_counter()
         if metric_log is not None:
             metric_log({
@@ -753,6 +1003,7 @@ def process_book_checkpointed(
                 "gc_seconds": gc_done - gc_started,
                 "gc_collected": collected,
                 "rss_bytes": current_rss,
+                "memory_kind": "private" if _POOL_CHILD else "rss",
             })
         if recycle_needed(current_rss, RSS_CAP, batches_this_life):
             on_recycle(current_rss, batches_this_life)
@@ -844,6 +1095,9 @@ def main():
                     help="raw-NER handoff root; disables all live GPU calls")
     ap.add_argument("--expected-engine-fingerprint", default=None)
     ap.add_argument("--expected-relink-request-id", default=None)
+    ap.add_argument("--pool-workers", type=int, default=0,
+                    help="load the library once, then fork this many resolver children "
+                         "from it (copy-on-write); this process becomes their master")
     args = ap.parse_args()
 
     global _BAVLI_CONVENTION
@@ -979,159 +1233,187 @@ def main():
         log(f"verified raw-NER handoff for {len(books)} changed book(s); live GPU disabled")
     log(f"worker up: {len(books)} books in snapshot, bavli_convention={_BAVLI_CONVENTION}")
 
-    def pending_books():
-        # A single pass is not enough: a worker walks PAST a book whose claim a peer
-        # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
-        # one-pass world ever comes back, and the whole run fails hours later on the
-        # completeness assertion. Rescan until every book is done: a worker may recover
-        # a stale claim only after the dead owner has also released its kernel lock, so
-        # each round either shrinks the set or politely waits a live peer out.
-        remaining = books
-        while remaining:
-            for bk in remaining:
-                yield bk
-            remaining = [bk for bk in remaining
-                         if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
-            if remaining:
-                worker_heartbeat()
-                log(
-                    f"rescan: {len(remaining)} book(s) still lack a done marker; "
-                    f"sleeping {RESCAN_WAIT_SEC}s"
-                )
-                time.sleep(RESCAN_WAIT_SEC)
-
-    processed = 0
-    for bk in pending_books():
-        cid = claim_id(bk)
-        # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
-        # next one — every other worker may already be past it, and a book with neither
-        # `done` nor `failed` would silently advance the baseline (the driver also
-        # asserts completeness, but the engine must not create the gap to begin with).
-        while True:
-            if os.path.exists(os.path.join(run, "done", cid)):
-                break
-            cooperative = precomputed is not None
-            claim = None if cooperative else BookClaim.acquire(run, cid)
-            if not cooperative and claim is None:
-                break  # another live worker owns it — it will mark done/failed
-            lines = book_lines(con, bk)
-            item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
-            if "ner_ranges" in item:
-                ner_indices = indices_from_ranges(item["ner_ranges"])
-                reuse_value = item.get("reuse")
-                if type(reuse_value) is not list:
-                    raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
-                reuse = []
-                for index, pair in enumerate(reuse_value):
-                    if (
-                        type(pair) is not list
-                        or len(pair) != 2
-                        or any(type(value) is not int for value in pair)
-                    ):
-                        raise RuntimeError(
-                            f"invalid line reuse pair {index} for {bk!r}"
-                        )
-                    reuse.append(tuple(pair))
-            else:
-                ner_indices = {line_index for line_index, _, _ in lines}
-                reuse = []
-            out_path = os.path.join(args.repo, book_key_to_relpath(bk))
-            checkpoint_dir = os.path.join(run, "checkpoints", cid)
-            t0 = time.time()
-            try:
-                worker_heartbeat()
-                if precomputed is None and ner_indices:
-                    wait_for_ner(log)
-
-                def recycle_worker(current_rss, batches):
+    def _worker_loop():
+        """One worker life: claim, link and mark books until none remain."""
+        def pending_books():
+            # A single pass is not enough: a worker walks PAST a book whose claim a peer
+            # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
+            # one-pass world ever comes back, and the whole run fails hours later on the
+            # completeness assertion. Rescan until every book is done: a worker may recover
+            # a stale claim only after the dead owner has also released its kernel lock, so
+            # each round either shrinks the set or politely waits a live peer out.
+            remaining = books
+            while remaining:
+                for bk in remaining:
+                    yield bk
+                remaining = [bk for bk in remaining
+                             if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
+                if remaining:
+                    worker_heartbeat()
                     log(
-                        f"recycling mid-book (current RSS {current_rss} over cap "
-                        f"{int(RSS_CAP)}) after {batches} checkpointed batch(es) this life"
+                        f"rescan: {len(remaining)} book(s) still lack a done marker; "
+                        f"sleeping {RESCAN_WAIT_SEC}s"
                     )
-                    # The next exec (or a peer) must be able to claim the same book
-                    # immediately and resume its immutable batch shards.
-                    if claim is not None:
-                        claim.release()
-                    con.close()
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    time.sleep(RESCAN_WAIT_SEC)
 
-                heartbeat = lambda: (
-                    worker_heartbeat(),
-                    claim.heartbeat() if claim is not None else None,
-                )
-                with periodic_heartbeat(heartbeat):
-                    record_count, words = process_book_checkpointed(
-                        linker, bk, lines, skipped_log, heartbeat,
-                        checkpoint_dir, out_path, recycle_worker,
-                        precomputed=precomputed,
-                        ner_indices=ner_indices,
-                        reuse=reuse,
-                        context_ref_factory=Ref,
-                        metric_log=metric_log,
-                        cooperative=cooperative,
-                        prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
+        processed = 0
+        for bk in pending_books():
+            cid = claim_id(bk)
+            # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
+            # next one — every other worker may already be past it, and a book with neither
+            # `done` nor `failed` would silently advance the baseline (the driver also
+            # asserts completeness, but the engine must not create the gap to begin with).
+            while True:
+                if os.path.exists(os.path.join(run, "done", cid)):
+                    break
+                cooperative = precomputed is not None
+                claim = None if cooperative else BookClaim.acquire(run, cid)
+                if not cooperative and claim is None:
+                    break  # another live worker owns it — it will mark done/failed
+                lines = book_lines(con, bk)
+                item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
+                if "ner_ranges" in item:
+                    ner_indices = indices_from_ranges(item["ner_ranges"])
+                    reuse_value = item.get("reuse")
+                    if type(reuse_value) is not list:
+                        raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
+                    reuse = []
+                    for index, pair in enumerate(reuse_value):
+                        if (
+                            type(pair) is not list
+                            or len(pair) != 2
+                            or any(type(value) is not int for value in pair)
+                        ):
+                            raise RuntimeError(
+                                f"invalid line reuse pair {index} for {bk!r}"
+                            )
+                        reuse.append(tuple(pair))
+                else:
+                    ner_indices = {line_index for line_index, _, _ in lines}
+                    reuse = []
+                out_path = os.path.join(args.repo, book_key_to_relpath(bk))
+                checkpoint_dir = os.path.join(run, "checkpoints", cid)
+                t0 = time.time()
+                try:
+                    worker_heartbeat()
+                    if precomputed is None and ner_indices:
+                        wait_for_ner(log)
+
+                    def recycle_worker(current_rss, batches):
+                        log(
+                            f"recycling mid-book (current RSS {current_rss} over cap "
+                            f"{int(RSS_CAP)}) after {batches} checkpointed batch(es) this life"
+                        )
+                        # The next exec (or a peer) must be able to claim the same book
+                        # immediately and resume its immutable batch shards.
+                        if claim is not None:
+                            claim.release()
+                        con.close()
+                        _recycle_process()
+
+                    heartbeat = lambda: (
+                        worker_heartbeat(),
+                        claim.heartbeat() if claim is not None else None,
                     )
-            except BookWorkInProgress:
-                # Helpers filled other batches in this and later books. A rescan will
-                # assemble once every atomic shard exists; this is ordinary contention.
-                break
-            except Exception as e:
-                if precomputed is None and ner_indices and not ner_alive():
-                    # Infrastructure outage, not a book problem: release the claim, wait
-                    # for NER, and retry this book (any worker may pick it up meanwhile).
-                    log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
+                    with periodic_heartbeat(heartbeat):
+                        record_count, words = process_book_checkpointed(
+                            linker, bk, lines, skipped_log, heartbeat,
+                            checkpoint_dir, out_path, recycle_worker,
+                            precomputed=precomputed,
+                            ner_indices=ner_indices,
+                            reuse=reuse,
+                            context_ref_factory=Ref,
+                            metric_log=metric_log,
+                            cooperative=cooperative,
+                            prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
+                        )
+                except BookWorkInProgress:
+                    # Helpers filled other batches in this and later books. A rescan will
+                    # assemble once every atomic shard exists; this is ordinary contention.
+                    break
+                except Exception as e:
+                    if precomputed is None and ner_indices and not ner_alive():
+                        # Infrastructure outage, not a book problem: release the claim, wait
+                        # for NER, and retry this book (any worker may pick it up meanwhile).
+                        log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
+                        if claim is not None:
+                            claim.release()
+                        wait_for_ner(log)
+                        continue
+                    log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
+                    with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
+                        ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
+                    # Record the failure so the incremental driver FAILS the run loudly:
+                    # a book-level crash must never be silently absorbed into a done+exit-0.
+                    # The `done` marker still stops THIS run from retrying it (poison-book
+                    # loop guard). Content = the book_key (cid is not reversible).
+                    import json as _json
+                    with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
+                        _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+                    open(os.path.join(run, "done", cid), "w").close()
                     if claim is not None:
                         claim.release()
-                    wait_for_ner(log)
-                    continue
-                log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
-                with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
-                    ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
-                # Record the failure so the incremental driver FAILS the run loudly:
-                # a book-level crash must never be silently absorbed into a done+exit-0.
-                # The `done` marker still stops THIS run from retrying it (poison-book
-                # loop guard). Content = the book_key (cid is not reversible).
-                import json as _json
-                with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
-                    _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+                    break
+
+                # Atomic per-book output: write the artifact only when the whole book is linked.
+                # A book with zero links writes no file (kept clean); a previously-linked book
+                # that now yields nothing has its stale artifact removed.
+                if record_count == 0 and os.path.exists(out_path):
+                    os.remove(out_path)
                 open(os.path.join(run, "done", cid), "w").close()
+                import shutil
+                # Cooperative helpers may still be validating/assembling the same stable
+                # shards. Keep them for the run; the next invocation resets checkpoints.
+                if not cooperative:
+                    shutil.rmtree(checkpoint_dir, ignore_errors=True)
                 if claim is not None:
                     claim.release()
+                processed += 1
+                log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
+                worker_heartbeat()
                 break
 
-            # Atomic per-book output: write the artifact only when the whole book is linked.
-            # A book with zero links writes no file (kept clean); a previously-linked book
-            # that now yields nothing has its stale artifact removed.
-            if record_count == 0 and os.path.exists(out_path):
-                os.remove(out_path)
-            open(os.path.join(run, "done", cid), "w").close()
-            import shutil
-            # Cooperative helpers may still be validating/assembling the same stable
-            # shards. Keep them for the run; the next invocation resets checkpoints.
-            if not cooperative:
-                shutil.rmtree(checkpoint_dir, ignore_errors=True)
-            if claim is not None:
-                claim.release()
-            processed += 1
-            log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
+            # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
+            # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
+            current_rss = worker_memory_bytes()
+            if precomputed is None and recycle_needed(current_rss, RSS_CAP, processed):
+                log(
+                    f"recycling (current RSS {current_rss} over cap {int(RSS_CAP)}) "
+                    f"after {processed} books this life"
+                )
+                _recycle_process()
+
+        log(f"no more books (processed {processed} this life); exiting")
+        # Leave the final heartbeat in place until the supervisor observes process exit.
+        # Deleting it created a race where a still-live cleanly-exiting worker was treated
+        # as stale from its original spawn time and killed with SIGTERM.
+        worker_heartbeat()
+
+    if args.pool_workers:
+        # Everything loaded above — Django, the library, the resolver tries, the
+        # verified NER bundle — is shared copy-on-write by every forked child.  A child
+        # only reopens its own SQLite handle and heartbeat; pymongo (4.x) resets its
+        # own connections after fork (MongoClient._after_fork), and Django's DB
+        # handles are closed so nothing inherited is used across the fork.
+        con.close()
+
+        def _child_setup(label):
+            nonlocal con, heartbeat_path
+            args.label = label
+            con, heartbeat_path = prepare_pool_child(args.snapshot, run, label)
             worker_heartbeat()
-            break
 
-        # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
-        # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
-        current_rss = rss_bytes()
-        if precomputed is None and recycle_needed(current_rss, RSS_CAP, processed):
-            log(
-                f"recycling (current RSS {current_rss} over cap {int(RSS_CAP)}) "
-                f"after {processed} books this life"
-            )
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+        log(f"pool master: forking {args.pool_workers} resolver child(ren) from the loaded library")
+        code = run_pool(
+            args.pool_workers, run, args.label, _child_setup, _worker_loop,
+            restart_limit=max(0, int(os.environ.get("LINKER_POOL_RESTART_LIMIT", "2"))),
+            stall_seconds=float(os.environ.get("LINKER_POOL_STALL_SECONDS", "1800")),
+            log=log,
+        )
+        worker_heartbeat()
+        sys.exit(code)
 
-    log(f"no more books (processed {processed} this life); exiting")
-    # Leave the final heartbeat in place until the supervisor observes process exit.
-    # Deleting it created a race where a still-live cleanly-exiting worker was treated
-    # as stale from its original spawn time and killed with SIGTERM.
-    worker_heartbeat()
+    _worker_loop()
 
 
 if __name__ == "__main__":
