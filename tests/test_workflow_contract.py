@@ -48,6 +48,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('from otzaria_microbatch import OrderedMicroBatcher', setup)
         self.assertIn('"${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"', setup)
         self.assertIn("NER_THREADS: '16'", canary)
+        self.assertIn("(inputs.target == 'local' && '2' ||", workflow)  # two GPU model processes
         self.assertIn("ci/ner_shared_model_probe.py", canary)
 
     def test_recovery_guards_are_event_driven_and_exact(self):
@@ -190,6 +191,16 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("ci/local_checkpoint_cache.py restore", workflow)
         self.assertIn("ci/local_checkpoint_cache.py save", workflow)
+        # The durable checkpoint is persisted periodically, not only by the EXIT trap
+        # (which never runs when the kernel OOM-kills the runner).
+        self.assertIn("LINKER_CHECKPOINT_SAVE_SECONDS", workflow)
+        self.assertIn("save_local_checkpoint || echo \"::warning::periodic local checkpoint save failed", workflow)
+        self.assertIn("kill \"$CHECKPOINT_SAVER_PID\"", workflow)
+        self.assertIn("pkill -TERM -P \"$CHECKPOINT_SAVER_PID\"", workflow)
+        self.assertIn('flock -w 1800 "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/.save-$RELINK_REQUEST_ID.lock"', workflow)
+        # target=local adopts its durable raw-NER bundle under an attested fingerprint.
+        self.assertIn("adopting the durable local raw-NER bundle under attested engine fingerprint", workflow)
+        self.assertIn('if [ -n "${NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT:-}" ]; then', workflow)
         self.assertIn(".head_sha == $head_sha", workflow)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)

@@ -183,7 +183,9 @@ on:
       ner_checkpoint_source_engine_fingerprint:
         description: >
           Producer recovery: operator-attested engine fingerprint recorded by the exact
-          source checkpoint. Required with ner_checkpoint_source_run_id. The restored
+          source checkpoint. Required with ner_checkpoint_source_run_id on Kaggle. On
+          target=local it is given ALONE (with recovery_mode) to adopt this request's
+          durable raw-NER bundle after an output-neutral engine change. The restored
           NER is still content-verified and replay-validated under the current engine.
         required: false
         default: ''
@@ -467,7 +469,17 @@ jobs:
             python3 ci/validate_printable_ascii.py \
               ner_checkpoint_source_engine_fingerprint 8192 \
               "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
-          if [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
+          if [ "$TARGET" = local ] && [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] &&
+             [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] && [ -z "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ]; then
+            # Local output-neutral engine migration: the durable raw-NER bundle of this
+            # request was produced under the attested fingerprint; precompute_ner
+            # content-verifies every book against the current request/snapshot before
+            # rebinding the fingerprint, and the resolver replay-validates it again.
+            [ -n "$RECOVERY_MODE" ] || {
+              echo "::error::local raw-NER fingerprint adoption requires recovery_mode"; exit 1;
+            }
+            echo "adopting the durable local raw-NER bundle under attested engine fingerprint"
+          elif [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] ||
              [ -n "$NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" ] ||
              [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ]; then
             [ -n "$NER_CHECKPOINT_SOURCE_RUN_ID" ] &&
@@ -475,6 +487,11 @@ jobs:
               [ -n "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT" ] || {
               echo "::error::checkpoint recovery requires both source coordinates and its engine fingerprint"; exit 1;
             }
+            if [ "$TARGET" = local ]; then
+              # The local producer resumes its own durable raw-NER bundle by request id;
+              # only the attested fingerprint travels through the inputs (see below).
+              echo "::error::target=local adopts its durable raw-NER bundle with ner_checkpoint_source_engine_fingerprint alone (no source coordinates)"; exit 1
+            fi
             [ -n "$RECOVERY_MODE" ] && [ "$TARGET" = kaggle ] || {
               echo "::error::checkpoint source coordinates require recovery_mode and target=kaggle"; exit 1;
             }
@@ -688,11 +705,12 @@ jobs:
         id: compute
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # The local ROCm host loads exactly one model process only during raw NER.
-          # Resolution starts after stop_ner releases its VRAM, so its twelve workers
-          # no longer contend for one synchronous GPU queue. Kaggle/server retain their
-          # independently measured process counts.
-          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
+          # The local ROCm host serves raw NER from two model processes: the 2026-09-02
+          # full relink showed one process saturated (model_seconds ~= wall, ~400
+          # texts/s) while the GPU sat at ~70% with VRAM nearly empty. Resolution starts
+          # after stop_ner releases the VRAM. Kaggle/server retain their independently
+          # measured process counts.
+          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '2' || (inputs.library_run_id != '' && '2' || '3')) }}
           # One gthread process owns the single GPU model.  Its ordered micro-batcher
           # coalesces concurrent resolver requests into the GPU-server's native
           # 150-line device batch, so CPU resolution can overlap the next inference
@@ -759,9 +777,34 @@ jobs:
           fi
           # Teardown by OWNED pid (gunicorn --pid via setup_stack), still under the
           # lease/serialization — never a broad pkill sweep of the whole host.
+          save_local_checkpoint() {
+            # Serialize every save of this request (periodic ticks and the final one
+            # from the EXIT trap) behind one kernel lock: two concurrent saves would
+            # race on the shared .replacement/.previous directories.
+            mkdir -p "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT"
+            flock -w 1800 "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/.save-$RELINK_REQUEST_ID.lock"             python3 ci/local_checkpoint_cache.py save \
+              --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
+              --run-dir "$RUN_DIR" \
+              --repo "$PWD" \
+              --source-run-id "$GITHUB_RUN_ID" \
+              --source-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --request-id "$RELINK_REQUEST_ID" \
+              --parent-run-id "$LIBRARY_RUN_ID" \
+              --parent-run-attempt "$PARENT_RUN_ATTEMPT" \
+              --snapshot-sha256 "$SNAPSHOT_SHA256" \
+              --sefaria-tag "$SEF_TAG" \
+              --sefaria-metadata-sha256 "$SEFARIA_METADATA_SHA256"
+          }
           finish_compute() {
             rc=$?
             trap - EXIT
+            if [ -n "${CHECKPOINT_SAVER_PID:-}" ]; then
+              # Stop the tick loop AND any save it is running (a killed subshell would
+              # otherwise leave that python child behind, racing the final save).
+              pkill -TERM -P "$CHECKPOINT_SAVER_PID" 2>/dev/null || true
+              kill "$CHECKPOINT_SAVER_PID" 2>/dev/null || true
+              wait "$CHECKPOINT_SAVER_PID" 2>/dev/null || true
+            fi
             if [ -n "${TELEMETRY_PID:-}" ]; then
               kill "$TELEMETRY_PID" 2>/dev/null || true
               wait "$TELEMETRY_PID" 2>/dev/null || true
@@ -771,18 +814,7 @@ jobs:
               "$RUN_DIR/perf/gunicorn.log" 2>/dev/null || true
             if [ "$TARGET" = local ] && [ -n "$LIBRARY_RUN_ID" ] &&
                [ -f "$RUN_DIR/changed_books.json" ] && [ -d "$RUN_DIR/checkpoints" ]; then
-              python3 ci/local_checkpoint_cache.py save \
-                --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" \
-                --run-dir "$RUN_DIR" \
-                --repo "$PWD" \
-                --source-run-id "$GITHUB_RUN_ID" \
-                --source-run-attempt "$GITHUB_RUN_ATTEMPT" \
-                --request-id "$RELINK_REQUEST_ID" \
-                --parent-run-id "$LIBRARY_RUN_ID" \
-                --parent-run-attempt "$PARENT_RUN_ATTEMPT" \
-                --snapshot-sha256 "$SNAPSHOT_SHA256" \
-                --sefaria-tag "$SEF_TAG" \
-                --sefaria-metadata-sha256 "$SEFARIA_METADATA_SHA256" || {
+              save_local_checkpoint || {
                   echo "::error::failed to persist the exact local Linker checkpoint"
                   [ "$rc" -ne 0 ] || rc=1
                 }
@@ -800,6 +832,19 @@ jobs:
             python3 ci/collect_perf_telemetry.py \
               --output "$RUN_DIR/perf/host.jsonl" --interval 10 &
             TELEMETRY_PID=$!
+          fi
+          # Four relinks on 2026-09-02/03 lost 2M+ resolved lines each: the durable
+          # checkpoint was written only by the EXIT trap, which never runs when the
+          # kernel OOM-kills the runner. Persist it periodically as well; shards are
+          # atomic renames, so a save that races a writer either sees a shard or not.
+          if [ "$TARGET" = local ] && [ -n "$LIBRARY_RUN_ID" ]; then
+            (
+              while sleep "${LINKER_CHECKPOINT_SAVE_SECONDS:-600}"; do
+                [ -f "$RUN_DIR/changed_books.json" ] && [ -d "$RUN_DIR/checkpoints" ] || continue
+                save_local_checkpoint || echo "::warning::periodic local checkpoint save failed; retrying next interval"
+              done
+            ) &
+            CHECKPOINT_SAVER_PID=$!
           fi
           if [ "$TARGET" = kaggle ]; then
             export LINKER_STACK_ROLE=ner
@@ -832,7 +877,7 @@ jobs:
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
             CHECKPOINT_ARGS=()
-            if [ -n "${NER_CHECKPOINT_SOURCE_RUN_ID:-}" ]; then
+            if [ -n "${NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT:-}" ]; then
               CHECKPOINT_ARGS+=(
                 --checkpoint-engine-fingerprint "$NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT"
               )

@@ -400,11 +400,12 @@ MODEL_PATHS = [
     {"arch": "spacy", "lang": "he", "path": "$SUBREF_MODEL", "type": "ref_part"},
 ]
 EOF
-# Keep one GPU-resident model process, but let its HTTP threads accumulate compatible
-# resolver requests for its single ordered inference thread.  A second gunicorn worker
-# would load a second spaCy/CuPy model and duplicate VRAM; this overlay instead shares
-# the one model safely.  The patch is deliberately tied to the pinned upstream app.py
-# and fails closed if that source layout changes.
+# Each gunicorn worker owns one GPU-resident model and lets its HTTP threads
+# accumulate compatible resolver requests for its single ordered inference thread
+# (the overlay below).  NER_WORKERS picks how many such processes share the GPU:
+# the local host runs two, since one process saturated at ~400 texts/s while the
+# card sat at ~70% with VRAM to spare (2026-09-02).  The patch is deliberately tied
+# to the pinned upstream app.py and fails closed if that source layout changes.
 MICROBATCH_SOURCE="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"
 MICROBATCH_PATCH="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.patch"
 [ -f "$MICROBATCH_SOURCE" ] && [ -f "$MICROBATCH_PATCH" ] || {

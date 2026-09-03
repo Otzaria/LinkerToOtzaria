@@ -192,7 +192,9 @@ def save(args: argparse.Namespace) -> None:
         shutil.copytree(
             checkpoints,
             temporary / "checkpoints",
-            ignore=shutil.ignore_patterns(".batch-locks"),
+            # A periodic save from a LIVE run also sees writers' in-flight
+            # ``<shard>.<pid>.tmp`` files; they are not checkpoint members.
+            ignore=shutil.ignore_patterns(".batch-locks", "*.tmp"),
         )
         completed = _snapshot_completed(source, repo, temporary)
         (temporary / "completed_books.json").write_text(
