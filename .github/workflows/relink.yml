@@ -922,6 +922,19 @@ jobs:
             # + runner stays well inside the VM. Prevent native libraries inside each
             # Python process from creating another thread pool.
             export LINKER_RSS_CAP_BYTES=1200000000
+            # Heavy books (a few texts grew a resolver to 6-12 GB inside one book and
+            # took the VM down): defer a book that grows a pool child by >0.8 GB of
+            # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
+            # wins over batch-by-batch recycling - finish every ordinary book first,
+            # then resolve the deferred ones at most two at a time under an 8 GB cap
+            # (idle workers recycle so the heavy pair gets the RAM they shed).
+            # RLIMIT_AS is the last resort so a runaway line ends in a MemoryError
+            # inside its worker instead of the kernel OOM killer.
+            export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
+            export LINKER_HEAVY_BOOK_SLOTS=2
+            export LINKER_HEAVY_RSS_CAP_BYTES=8000000000
+            export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
+            export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
             export MALLOC_ARENA_MAX=2
             export OMP_NUM_THREADS=1
             export OPENBLAS_NUM_THREADS=1

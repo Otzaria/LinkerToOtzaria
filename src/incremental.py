@@ -620,7 +620,10 @@ def run_incremental(args) -> int:
         # shards and writes new done markers. (logs/ is append-only diagnostics — kept.)
         import shutil
         resume_checkpoints = bool(getattr(args, "resume_checkpoints", False))
-        for d in ("done", "claim", "failed"):
+        # heavy/ and heavy-slots/ are this run's deferral decisions and slot locks; a
+        # stale marker from another request would send a book straight to the heavy
+        # phase, so they are recomputed from scratch like the rest of the ledger.
+        for d in ("done", "claim", "failed", "heavy", "heavy-slots"):
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         if resume_checkpoints:

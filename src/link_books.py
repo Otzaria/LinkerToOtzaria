@@ -55,6 +55,27 @@ GC_EVERY_BATCHES = max(1, int(os.environ.get("LINKER_GC_EVERY_BATCHES", "20")))
 HEARTBEAT_SECONDS = max(5, int(os.environ.get("LINKER_HEARTBEAT_SECONDS", "30")))
 CLAIM_STALE_SEC = 900    # compatibility argument; the kernel lock is liveness authority
 RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
+# Heavy books.  A handful of texts grow a resolver by many GB inside one book (one
+# reached 12.5 GB on 2026-09-03 and took the whole VM down).  Instead of dropping such
+# a book, a worker that grows by more than this many bytes over the book (judged on the
+# same figure as the recycle cap) DEFERS it: its finished shards stay, a marker sends
+# it to the heavy phase, and the worker recycles.  0 disables deferral.
+HEAVY_BOOK_GROWTH_BYTES = float(os.environ.get("LINKER_HEAVY_BOOK_GROWTH_BYTES", 2.5e9))
+# The heavy phase starts only once every other book is done; then at most this many
+# deferred books resolve concurrently (kernel-locked slots), so even 12 GB each fits.
+HEAVY_BOOK_SLOTS = max(1, int(os.environ.get("LINKER_HEAVY_BOOK_SLOTS", "2")))
+# Recycle cap while resolving a deferred book under a slot: the ordinary cap would
+# recycle such a worker after nearly every batch.  Judged on the same figure as RSS_CAP.
+HEAVY_RSS_CAP = float(os.environ.get("LINKER_HEAVY_RSS_CAP_BYTES", 8e9))
+# A worker idling in the heavy phase (no free slot) still holds the private memory it
+# accumulated; above this many bytes it recycles so the heavy books get that RAM.
+HEAVY_IDLE_RECYCLE_BYTES = float(os.environ.get("LINKER_HEAVY_IDLE_RECYCLE_BYTES", 3e8))
+# Last-resort address-space ceilings (RLIMIT_AS soft limit, bytes; 0 = unlimited).  A
+# single line that balloons past the deferral check gets a MemoryError inside THIS
+# worker - which defers the book in the normal phase and fails it in the heavy phase -
+# instead of the kernel OOM killer taking down the runner.
+WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_WORKER_ADDRESS_SPACE_BYTES", "0")))
+HEAVY_WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES", "0")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 # Exit status a forked pool child uses to ask the warm master for a fresh image (see
 # run_pool): the equivalent of the standalone worker's self-exec, without reloading
@@ -580,6 +601,121 @@ class BatchClaim:
             self.fd = None
 
 
+class BookDeferred(Exception):
+    """Raised between batches when the current book grew this worker past
+    HEAVY_BOOK_GROWTH_BYTES; the caller marks it heavy and recycles."""
+
+    def __init__(self, bk, growth_bytes, batches):
+        super().__init__(f"{bk.source_name}/{bk.canonical_he_title} grew this worker by "
+                         f"{growth_bytes} bytes over {batches} batch(es)")
+        self.book_key = bk
+        self.growth_bytes = growth_bytes
+        self.batches = batches
+
+
+def is_memory_error(error: BaseException) -> bool:
+    """True if ``error`` is, or was caused by, a MemoryError (process_batch wraps
+    per-line failures in RuntimeError with the original as __cause__)."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, MemoryError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def apply_address_space_limit(limit_bytes: int) -> int:
+    """Set this process's RLIMIT_AS soft limit (never above the hard limit).
+
+    Returns the soft limit actually applied, or 0 when disabled/unsupported."""
+    if not limit_bytes or limit_bytes <= 0 or not hasattr(resource, "RLIMIT_AS"):
+        return 0
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    wanted = int(limit_bytes)
+    if hard != resource.RLIM_INFINITY and wanted > hard:
+        wanted = hard
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (wanted, hard))
+    except (ValueError, OSError):
+        return 0
+    return wanted
+
+
+def heavy_marker_path(run_dir: str, cid: str) -> str:
+    return os.path.join(run_dir, "heavy", cid)
+
+
+def mark_heavy(run_dir: str, cid: str, bk: BookKey, growth_bytes: int, reason: str) -> None:
+    """Persist the deferral decision for every worker (and every later life) to see."""
+    import json as _json
+    os.makedirs(os.path.join(run_dir, "heavy"), exist_ok=True)
+    path = heavy_marker_path(run_dir, cid)
+    temporary = f"{path}.tmp-{os.getpid()}"
+    with open(temporary, "w", encoding="utf-8") as fh:
+        _json.dump({**bk.to_dict(), "growth_bytes": int(growth_bytes), "reason": reason,
+                    "unix": time.time()}, fh, ensure_ascii=False)
+    os.replace(temporary, path)
+
+
+def gate_heavy_book(run_dir: str, cid: str, heavy_phase: bool) -> str:
+    """Decide how a worker may touch a book right now.
+
+    Returns "normal" (no marker), "skip" (marked heavy but ordinary books are still
+    pending somewhere - a peer may have marked it a moment ago; it must wait for the
+    heavy phase, or two slot-holders at 8 GB each would run beside ten ordinary
+    workers), or "heavy" (marked and the heavy phase has begun: take a slot).
+    """
+    if not os.path.exists(heavy_marker_path(run_dir, cid)):
+        return "normal"
+    return "heavy" if heavy_phase else "skip"
+
+
+def partition_pending(books, run_dir: str):
+    """Split undone books into (normal, heavy) preserving order."""
+    normal, heavy = [], []
+    for bk in books:
+        cid = claim_id(bk)
+        if os.path.exists(os.path.join(run_dir, "done", cid)):
+            continue
+        (heavy if os.path.exists(heavy_marker_path(run_dir, cid)) else normal).append(bk)
+    return normal, heavy
+
+
+class HeavySlot:
+    """One of HEAVY_BOOK_SLOTS kernel-locked slots; held while a heavy book resolves.
+
+    flock is released by the kernel on any death, so a slot can never leak."""
+
+    def __init__(self, fd: int, path: str):
+        self.fd = fd
+        self.path = path
+
+    @classmethod
+    def acquire(cls, run_dir: str, slots: int):
+        import fcntl
+        root = os.path.join(run_dir, "heavy-slots")
+        os.makedirs(root, exist_ok=True)
+        for index in range(slots):
+            path = os.path.join(root, f"{index:02d}.lock")
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+            return cls(fd, path)
+        return None
+
+    def release(self) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)   # closing drops the flock
+            finally:
+                self.fd = None
+
+
 class BookWorkInProgress(Exception):
     """Another worker owns at least one missing batch; rescan without failing."""
 
@@ -836,7 +972,8 @@ def process_batch(
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
     precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
-    metric_log=None, cooperative=False, prior_lock_path=None,
+    metric_log=None, cooperative=False, prior_lock_path=None, defer_when_heavy=True,
+    recycle_cap=None,
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -924,6 +1061,8 @@ def process_book_checkpointed(
     shard_paths = []
     total_words = 0
     batches_this_life = 0
+    cap = RSS_CAP if recycle_cap is None else float(recycle_cap)
+    memory_at_start = worker_memory_bytes()
     for i, batch in transport_batches(lines, ner_indices):
         total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
@@ -992,7 +1131,7 @@ def process_book_checkpointed(
         current_rss = worker_memory_bytes()
         gc_started = time.perf_counter()
         collected = 0
-        if batches_this_life % GC_EVERY_BATCHES == 0 or current_rss >= RSS_CAP * 0.8:
+        if batches_this_life % GC_EVERY_BATCHES == 0 or current_rss >= cap * 0.8:
             collected = gc.collect()
             current_rss = worker_memory_bytes()
         gc_done = time.perf_counter()
@@ -1005,7 +1144,14 @@ def process_book_checkpointed(
                 "rss_bytes": current_rss,
                 "memory_kind": "private" if _POOL_CHILD else "rss",
             })
-        if recycle_needed(current_rss, RSS_CAP, batches_this_life):
+        growth = current_rss - memory_at_start
+        if defer_when_heavy and HEAVY_BOOK_GROWTH_BYTES > 0 and growth > HEAVY_BOOK_GROWTH_BYTES:
+            # The shard just written stays; the book resumes in the heavy phase under
+            # a slot, and the caller recycles this bloated worker.  Deferral is judged
+            # BEFORE the recycle cap and its threshold must sit below that cap, or a
+            # ballooning book would only ever be recycled batch by batch, never deferred.
+            raise BookDeferred(bk, growth, batches_this_life)
+        if recycle_needed(current_rss, cap, batches_this_life):
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 
@@ -1235,6 +1381,9 @@ def main():
 
     def _worker_loop():
         """One worker life: claim, link and mark books until none remain."""
+        heavy_phase = False
+        apply_address_space_limit(WORKER_ADDRESS_SPACE_BYTES)
+
         def pending_books():
             # A single pass is not enough: a worker walks PAST a book whose claim a peer
             # holds — if that peer then dies mid-book (e.g. kernel OOM), nobody in a
@@ -1242,10 +1391,27 @@ def main():
             # completeness assertion. Rescan until every book is done: a worker may recover
             # a stale claim only after the dead owner has also released its kernel lock, so
             # each round either shrinks the set or politely waits a live peer out.
+            #
+            # Deferred (heavy) books come last: the heavy phase begins only once every
+            # ordinary book is DONE (not merely claimed), so the memory they may need is
+            # actually free, and HeavySlot bounds how many resolve at once.
+            nonlocal heavy_phase
             remaining = books
             while remaining:
-                for bk in remaining:
-                    yield bk
+                normal, heavy = partition_pending(remaining, run)
+                if normal:
+                    for bk in normal:
+                        yield bk
+                elif heavy:
+                    if not heavy_phase:
+                        heavy_phase = True
+                        applied = apply_address_space_limit(HEAVY_WORKER_ADDRESS_SPACE_BYTES)
+                        log(
+                            f"heavy phase: {len(heavy)} deferred book(s) remain; at most "
+                            f"{HEAVY_BOOK_SLOTS} in flight" + (f", address space {applied}" if applied else "")
+                        )
+                    for bk in heavy:
+                        yield bk
                 remaining = [bk for bk in remaining
                              if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
                 if remaining:
@@ -1256,9 +1422,38 @@ def main():
                     )
                     time.sleep(RESCAN_WAIT_SEC)
 
+        def defer_book(bk, cid, growth_bytes, reason):
+            # Persist the decision, then shed this bloated image: the book resumes from
+            # its shards in the heavy phase, under a slot, in a fresh worker.
+            mark_heavy(run, cid, bk, growth_bytes, reason)
+            log(
+                f"deferring {bk.source_name}/{bk.canonical_he_title!r} to the heavy phase "
+                f"({reason}; grew {growth_bytes} bytes); recycling"
+            )
+            worker_heartbeat()
+            con.close()
+            _recycle_process()
+
         processed = 0
         for bk in pending_books():
             cid = claim_id(bk)
+            gate = gate_heavy_book(run, cid, heavy_phase)
+            if gate == "skip":
+                continue
+            heavy = gate == "heavy"
+            slot = None
+            if heavy:
+                slot = HeavySlot.acquire(run, HEAVY_BOOK_SLOTS)
+                if slot is None:
+                    # Every slot is busy; another heavy book (or a rescan) comes next.
+                    # An idle worker gives its accumulated private memory back first.
+                    worker_heartbeat()
+                    if worker_memory_bytes() > HEAVY_IDLE_RECYCLE_BYTES:
+                        log("heavy phase: no free slot; recycling to release memory")
+                        con.close()
+                        _recycle_process()
+                    time.sleep(15)
+                    continue
             # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
             # next one — every other worker may already be past it, and a book with neither
             # `done` nor `failed` would silently advance the baseline (the driver also
@@ -1294,6 +1489,7 @@ def main():
                 out_path = os.path.join(args.repo, book_key_to_relpath(bk))
                 checkpoint_dir = os.path.join(run, "checkpoints", cid)
                 t0 = time.time()
+                memory_before_book = worker_memory_bytes()
                 try:
                     worker_heartbeat()
                     if precomputed is None and ner_indices:
@@ -1326,20 +1522,40 @@ def main():
                             metric_log=metric_log,
                             cooperative=cooperative,
                             prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
+                            defer_when_heavy=not heavy,
+                            recycle_cap=HEAVY_RSS_CAP if heavy else None,
                         )
                 except BookWorkInProgress:
                     # Helpers filled other batches in this and later books. A rescan will
                     # assemble once every atomic shard exists; this is ordinary contention.
+                    if slot is not None:
+                        slot.release()
                     break
+                except BookDeferred as deferred:
+                    if claim is not None:
+                        claim.release()
+                    defer_book(bk, cid, deferred.growth_bytes,
+                               f"grew past the heavy threshold after {deferred.batches} batch(es)")
                 except Exception as e:
+                    if not heavy and is_memory_error(e):
+                        # The address-space ceiling caught a runaway line. Nothing of this
+                        # image is trustworthy after MemoryError: defer the book and recycle
+                        # right away; the heavy phase retries it under a slot and ceiling.
+                        if claim is not None:
+                            claim.release()
+                        defer_book(bk, cid, worker_memory_bytes() - memory_before_book,
+                                   f"{type(e).__name__}: {e}")
                     if precomputed is None and ner_indices and not ner_alive():
                         # Infrastructure outage, not a book problem: release the claim, wait
                         # for NER, and retry this book (any worker may pick it up meanwhile).
+                        # The heavy slot, if any, stays held across the retry.
                         log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
                         if claim is not None:
                             claim.release()
                         wait_for_ner(log)
                         continue
+                    if slot is not None:
+                        slot.release()
                     log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
                     with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
                         ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
@@ -1368,6 +1584,8 @@ def main():
                     shutil.rmtree(checkpoint_dir, ignore_errors=True)
                 if claim is not None:
                     claim.release()
+                if slot is not None:
+                    slot.release()
                 processed += 1
                 log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
                 worker_heartbeat()
