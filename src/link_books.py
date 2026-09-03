@@ -62,11 +62,13 @@ RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
 # it to the heavy phase, and the worker recycles.  0 disables deferral.
 HEAVY_BOOK_GROWTH_BYTES = float(os.environ.get("LINKER_HEAVY_BOOK_GROWTH_BYTES", 2.5e9))
 # The heavy phase starts only once every other book is done; then at most this many
-# deferred books resolve concurrently (kernel-locked slots), so even 12 GB each fits.
+# deferred books resolve concurrently (kernel-locked slots).  Budget on the 32 GB VM:
+# slots x (HEAVY_RSS_CAP + one batch of growth, judged only between batches) + the
+# pool master + idle children + mongod's cache must stay below the VM.
 HEAVY_BOOK_SLOTS = max(1, int(os.environ.get("LINKER_HEAVY_BOOK_SLOTS", "2")))
 # Recycle cap while resolving a deferred book under a slot: the ordinary cap would
 # recycle such a worker after nearly every batch.  Judged on the same figure as RSS_CAP.
-HEAVY_RSS_CAP = float(os.environ.get("LINKER_HEAVY_RSS_CAP_BYTES", 8e9))
+HEAVY_RSS_CAP = float(os.environ.get("LINKER_HEAVY_RSS_CAP_BYTES", 5e9))
 # A worker idling in the heavy phase (no free slot) still holds the private memory it
 # accumulated; above this many bytes it recycles so the heavy books get that RAM.
 HEAVY_IDLE_RECYCLE_BYTES = float(os.environ.get("LINKER_HEAVY_IDLE_RECYCLE_BYTES", 3e8))
@@ -626,11 +628,32 @@ def is_memory_error(error: BaseException) -> bool:
     return False
 
 
-def apply_address_space_limit(limit_bytes: int) -> int:
+def virtual_bytes() -> int:
+    """This process's virtual size (what RLIMIT_AS is judged against); 0 if unknown."""
+    try:
+        with open("/proc/self/statm", encoding="ascii") as fh:
+            return int(fh.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError, AttributeError):
+        return 0
+
+
+def apply_address_space_limit(limit_bytes: int, log=None) -> int:
     """Set this process's RLIMIT_AS soft limit (never above the hard limit).
 
-    Returns the soft limit actually applied, or 0 when disabled/unsupported."""
+    RLIMIT_AS bounds VIRTUAL size, and a loaded Sefaria image already maps several GB
+    before the first book.  A ceiling the baseline crowds (less than half of it left)
+    would turn every book into a MemoryError - deferred, then failed - and waste the
+    whole relink; refuse it loudly instead, leaving the current limit in place.
+    Returns the soft limit actually applied, or 0 when disabled/unsupported/refused."""
     if not limit_bytes or limit_bytes <= 0 or not hasattr(resource, "RLIMIT_AS"):
+        return 0
+    baseline = virtual_bytes()
+    if baseline * 2 > limit_bytes:
+        if log is not None:
+            log(
+                f"address-space limit {int(limit_bytes)} refused: baseline virtual size "
+                f"{baseline} leaves less than half of it for book growth"
+            )
         return 0
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     wanted = int(limit_bytes)
@@ -1131,8 +1154,10 @@ def process_book_checkpointed(
         current_rss = worker_memory_bytes()
         gc_started = time.perf_counter()
         collected = 0
+        gc_ran = False
         if batches_this_life % GC_EVERY_BATCHES == 0 or current_rss >= cap * 0.8:
             collected = gc.collect()
+            gc_ran = True
             current_rss = worker_memory_bytes()
         gc_done = time.perf_counter()
         if metric_log is not None:
@@ -1145,6 +1170,13 @@ def process_book_checkpointed(
                 "memory_kind": "private" if _POOL_CHILD else "rss",
             })
         growth = current_rss - memory_at_start
+        if (defer_when_heavy and HEAVY_BOOK_GROWTH_BYTES > 0 and growth > HEAVY_BOOK_GROWTH_BYTES
+                and not gc_ran):
+            # Cyclic batch garbage is not book growth: collect once and judge again
+            # before sending the book to the serialized heavy phase.
+            gc.collect()
+            current_rss = worker_memory_bytes()
+            growth = current_rss - memory_at_start
         if defer_when_heavy and HEAVY_BOOK_GROWTH_BYTES > 0 and growth > HEAVY_BOOK_GROWTH_BYTES:
             # The shard just written stays; the book resumes in the heavy phase under
             # a slot, and the caller recycles this bloated worker.  Deferral is judged
@@ -1382,7 +1414,14 @@ def main():
     def _worker_loop():
         """One worker life: claim, link and mark books until none remain."""
         heavy_phase = False
-        apply_address_space_limit(WORKER_ADDRESS_SPACE_BYTES)
+        # Idle-recycle decisions are relative to this life's baseline: an absolute
+        # threshold below a fresh image's own footprint would recycle forever.
+        life_baseline = worker_memory_bytes()
+        applied = apply_address_space_limit(WORKER_ADDRESS_SPACE_BYTES, log)
+        log(
+            f"worker life: virtual size {virtual_bytes()}, address-space limit "
+            f"{applied or 'none'} (requested {WORKER_ADDRESS_SPACE_BYTES})"
+        )
 
         def pending_books():
             # A single pass is not enough: a worker walks PAST a book whose claim a peer
@@ -1405,10 +1444,12 @@ def main():
                 elif heavy:
                     if not heavy_phase:
                         heavy_phase = True
-                        applied = apply_address_space_limit(HEAVY_WORKER_ADDRESS_SPACE_BYTES)
+                        applied = apply_address_space_limit(HEAVY_WORKER_ADDRESS_SPACE_BYTES, log)
                         log(
                             f"heavy phase: {len(heavy)} deferred book(s) remain; at most "
-                            f"{HEAVY_BOOK_SLOTS} in flight" + (f", address space {applied}" if applied else "")
+                            f"{HEAVY_BOOK_SLOTS} in flight, address space "
+                            + (str(applied) if applied else
+                               f"kept at {resource.getrlimit(resource.RLIMIT_AS)[0] if hasattr(resource, 'RLIMIT_AS') else 'none'}")
                         )
                     for bk in heavy:
                         yield bk
@@ -1422,10 +1463,14 @@ def main():
                     )
                     time.sleep(RESCAN_WAIT_SEC)
 
-        def defer_book(bk, cid, growth_bytes, reason):
-            # Persist the decision, then shed this bloated image: the book resumes from
-            # its shards in the heavy phase, under a slot, in a fresh worker.
+        def defer_book(bk, cid, growth_bytes, reason, claim=None):
+            # Persist the decision BEFORE the claim goes (a peer walking a stale list
+            # must meet the marker, not a free claim), then shed this bloated image: the
+            # book resumes from its shards in the heavy phase, under a slot, in a fresh
+            # worker.
             mark_heavy(run, cid, bk, growth_bytes, reason)
+            if claim is not None:
+                claim.release()
             log(
                 f"deferring {bk.source_name}/{bk.canonical_he_title!r} to the heavy phase "
                 f"({reason}; grew {growth_bytes} bytes); recycling"
@@ -1446,150 +1491,153 @@ def main():
                 slot = HeavySlot.acquire(run, HEAVY_BOOK_SLOTS)
                 if slot is None:
                     # Every slot is busy; another heavy book (or a rescan) comes next.
-                    # An idle worker gives its accumulated private memory back first.
+                    # A pool child that idles here gives its accumulated PRIVATE memory
+                    # back to the heavy pair - judged against this life's baseline, so a
+                    # fresh image (pool child or exec'd standalone) never loops on itself.
                     worker_heartbeat()
-                    if worker_memory_bytes() > HEAVY_IDLE_RECYCLE_BYTES:
+                    time.sleep(15)
+                    if worker_memory_bytes() - life_baseline > HEAVY_IDLE_RECYCLE_BYTES:
                         log("heavy phase: no free slot; recycling to release memory")
                         con.close()
                         _recycle_process()
-                    time.sleep(15)
                     continue
             # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
             # next one — every other worker may already be past it, and a book with neither
             # `done` nor `failed` would silently advance the baseline (the driver also
             # asserts completeness, but the engine must not create the gap to begin with).
-            while True:
-                if os.path.exists(os.path.join(run, "done", cid)):
-                    break
-                cooperative = precomputed is not None
-                claim = None if cooperative else BookClaim.acquire(run, cid)
-                if not cooperative and claim is None:
-                    break  # another live worker owns it — it will mark done/failed
-                lines = book_lines(con, bk)
-                item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
-                if "ner_ranges" in item:
-                    ner_indices = indices_from_ranges(item["ner_ranges"])
-                    reuse_value = item.get("reuse")
-                    if type(reuse_value) is not list:
-                        raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
-                    reuse = []
-                    for index, pair in enumerate(reuse_value):
-                        if (
-                            type(pair) is not list
-                            or len(pair) != 2
-                            or any(type(value) is not int for value in pair)
-                        ):
-                            raise RuntimeError(
-                                f"invalid line reuse pair {index} for {bk!r}"
+            try:
+                while True:
+                    if os.path.exists(os.path.join(run, "done", cid)):
+                        break
+                    cooperative = precomputed is not None
+                    claim = None if cooperative else BookClaim.acquire(run, cid)
+                    if not cooperative and claim is None:
+                        break  # another live worker owns it — it will mark done/failed
+                    lines = book_lines(con, bk)
+                    item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
+                    if "ner_ranges" in item:
+                        ner_indices = indices_from_ranges(item["ner_ranges"])
+                        reuse_value = item.get("reuse")
+                        if type(reuse_value) is not list:
+                            raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
+                        reuse = []
+                        for index, pair in enumerate(reuse_value):
+                            if (
+                                type(pair) is not list
+                                or len(pair) != 2
+                                or any(type(value) is not int for value in pair)
+                            ):
+                                raise RuntimeError(
+                                    f"invalid line reuse pair {index} for {bk!r}"
+                                )
+                            reuse.append(tuple(pair))
+                    else:
+                        ner_indices = {line_index for line_index, _, _ in lines}
+                        reuse = []
+                    out_path = os.path.join(args.repo, book_key_to_relpath(bk))
+                    checkpoint_dir = os.path.join(run, "checkpoints", cid)
+                    t0 = time.time()
+                    memory_before_book = worker_memory_bytes()
+                    try:
+                        worker_heartbeat()
+                        if precomputed is None and ner_indices:
+                            wait_for_ner(log)
+
+                        def recycle_worker(current_rss, batches):
+                            log(
+                                f"recycling mid-book (current RSS {current_rss} over cap "
+                                f"{int(HEAVY_RSS_CAP if heavy else RSS_CAP)}) after {batches} "
+                                f"checkpointed batch(es) this life"
                             )
-                        reuse.append(tuple(pair))
-                else:
-                    ner_indices = {line_index for line_index, _, _ in lines}
-                    reuse = []
-                out_path = os.path.join(args.repo, book_key_to_relpath(bk))
-                checkpoint_dir = os.path.join(run, "checkpoints", cid)
-                t0 = time.time()
-                memory_before_book = worker_memory_bytes()
-                try:
-                    worker_heartbeat()
-                    if precomputed is None and ner_indices:
-                        wait_for_ner(log)
+                            # The next exec (or a peer) must be able to claim the same book
+                            # immediately and resume its immutable batch shards.
+                            if claim is not None:
+                                claim.release()
+                            con.close()
+                            _recycle_process()
 
-                    def recycle_worker(current_rss, batches):
-                        log(
-                            f"recycling mid-book (current RSS {current_rss} over cap "
-                            f"{int(RSS_CAP)}) after {batches} checkpointed batch(es) this life"
+                        heartbeat = lambda: (
+                            worker_heartbeat(),
+                            claim.heartbeat() if claim is not None else None,
                         )
-                        # The next exec (or a peer) must be able to claim the same book
-                        # immediately and resume its immutable batch shards.
+                        with periodic_heartbeat(heartbeat):
+                            record_count, words = process_book_checkpointed(
+                                linker, bk, lines, skipped_log, heartbeat,
+                                checkpoint_dir, out_path, recycle_worker,
+                                precomputed=precomputed,
+                                ner_indices=ner_indices,
+                                reuse=reuse,
+                                context_ref_factory=Ref,
+                                metric_log=metric_log,
+                                cooperative=cooperative,
+                                prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
+                                defer_when_heavy=not heavy,
+                                recycle_cap=HEAVY_RSS_CAP if heavy else None,
+                            )
+                    except BookWorkInProgress:
+                        # Helpers filled other batches in this and later books. A rescan will
+                        # assemble once every atomic shard exists; this is ordinary contention.
+                        break
+                    except BookDeferred as deferred:
+                        defer_book(bk, cid, deferred.growth_bytes,
+                                   f"grew past the heavy threshold after {deferred.batches} batch(es)",
+                                   claim)
+                    except Exception as e:
+                        if not heavy and is_memory_error(e):
+                            # The address-space ceiling caught a runaway line. Nothing of this
+                            # image is trustworthy after MemoryError: defer the book and recycle
+                            # right away; the heavy phase retries it under a slot and ceiling.
+                            defer_book(bk, cid, worker_memory_bytes() - memory_before_book,
+                                       f"{type(e).__name__}: {e}", claim)
+                        if precomputed is None and ner_indices and not ner_alive():
+                            # Infrastructure outage, not a book problem: release the claim, wait
+                            # for NER, and retry this book (any worker may pick it up meanwhile).
+                            # The heavy slot, if any, stays held across the retry.
+                            log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
+                            if claim is not None:
+                                claim.release()
+                            wait_for_ner(log)
+                            continue
+                        log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
+                        with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
+                            ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
+                        # Record the failure so the incremental driver FAILS the run loudly:
+                        # a book-level crash must never be silently absorbed into a done+exit-0.
+                        # The `done` marker still stops THIS run from retrying it (poison-book
+                        # loop guard). Content = the book_key (cid is not reversible).
+                        import json as _json
+                        with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
+                            _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+                        open(os.path.join(run, "done", cid), "w").close()
                         if claim is not None:
                             claim.release()
-                        con.close()
-                        _recycle_process()
+                        break
 
-                    heartbeat = lambda: (
-                        worker_heartbeat(),
-                        claim.heartbeat() if claim is not None else None,
-                    )
-                    with periodic_heartbeat(heartbeat):
-                        record_count, words = process_book_checkpointed(
-                            linker, bk, lines, skipped_log, heartbeat,
-                            checkpoint_dir, out_path, recycle_worker,
-                            precomputed=precomputed,
-                            ner_indices=ner_indices,
-                            reuse=reuse,
-                            context_ref_factory=Ref,
-                            metric_log=metric_log,
-                            cooperative=cooperative,
-                            prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
-                            defer_when_heavy=not heavy,
-                            recycle_cap=HEAVY_RSS_CAP if heavy else None,
-                        )
-                except BookWorkInProgress:
-                    # Helpers filled other batches in this and later books. A rescan will
-                    # assemble once every atomic shard exists; this is ordinary contention.
-                    if slot is not None:
-                        slot.release()
-                    break
-                except BookDeferred as deferred:
-                    if claim is not None:
-                        claim.release()
-                    defer_book(bk, cid, deferred.growth_bytes,
-                               f"grew past the heavy threshold after {deferred.batches} batch(es)")
-                except Exception as e:
-                    if not heavy and is_memory_error(e):
-                        # The address-space ceiling caught a runaway line. Nothing of this
-                        # image is trustworthy after MemoryError: defer the book and recycle
-                        # right away; the heavy phase retries it under a slot and ceiling.
-                        if claim is not None:
-                            claim.release()
-                        defer_book(bk, cid, worker_memory_bytes() - memory_before_book,
-                                   f"{type(e).__name__}: {e}")
-                    if precomputed is None and ner_indices and not ner_alive():
-                        # Infrastructure outage, not a book problem: release the claim, wait
-                        # for NER, and retry this book (any worker may pick it up meanwhile).
-                        # The heavy slot, if any, stays held across the retry.
-                        log(f"NER outage during {bk.canonical_he_title!r}; releasing claim and waiting")
-                        if claim is not None:
-                            claim.release()
-                        wait_for_ner(log)
-                        continue
-                    if slot is not None:
-                        slot.release()
-                    log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
-                    with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
-                        ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
-                    # Record the failure so the incremental driver FAILS the run loudly:
-                    # a book-level crash must never be silently absorbed into a done+exit-0.
-                    # The `done` marker still stops THIS run from retrying it (poison-book
-                    # loop guard). Content = the book_key (cid is not reversible).
-                    import json as _json
-                    with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
-                        _json.dump(bk.to_dict(), ff, ensure_ascii=False)
+                    # Atomic per-book output: write the artifact only when the whole book is linked.
+                    # A book with zero links writes no file (kept clean); a previously-linked book
+                    # that now yields nothing has its stale artifact removed.
+                    if record_count == 0 and os.path.exists(out_path):
+                        os.remove(out_path)
                     open(os.path.join(run, "done", cid), "w").close()
+                    import shutil
+                    # Cooperative helpers may still be validating/assembling the same stable
+                    # shards. Keep them for the run; the next invocation resets checkpoints.
+                    if not cooperative:
+                        shutil.rmtree(checkpoint_dir, ignore_errors=True)
                     if claim is not None:
                         claim.release()
+                    processed += 1
+                    log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
+                    worker_heartbeat()
                     break
-
-                # Atomic per-book output: write the artifact only when the whole book is linked.
-                # A book with zero links writes no file (kept clean); a previously-linked book
-                # that now yields nothing has its stale artifact removed.
-                if record_count == 0 and os.path.exists(out_path):
-                    os.remove(out_path)
-                open(os.path.join(run, "done", cid), "w").close()
-                import shutil
-                # Cooperative helpers may still be validating/assembling the same stable
-                # shards. Keep them for the run; the next invocation resets checkpoints.
-                if not cooperative:
-                    shutil.rmtree(checkpoint_dir, ignore_errors=True)
-                if claim is not None:
-                    claim.release()
+            finally:
+                # Every exit of the retry loop - done, a lost claim, contention, failure,
+                # success - gives the slot back here.  flock is per open file description,
+                # so a leaked slot fd would block even THIS worker's next acquire and,
+                # once every slot leaked, leave the heavy phase spinning until the job
+                # timeout.  (Recycling execs: the fd is O_CLOEXEC, the kernel drops it.)
                 if slot is not None:
                     slot.release()
-                processed += 1
-                log(f"done {bk.source_name}/{bk.canonical_he_title!r} lines={len(lines)} words={words} links={record_count} {time.time()-t0:.1f}s")
-                worker_heartbeat()
-                break
 
             # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
             # so releasing it here reclaims memory without abandoning a claimed, half-linked book.

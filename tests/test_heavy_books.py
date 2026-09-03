@@ -85,6 +85,24 @@ class DeferralTest(unittest.TestCase):
                 )
             self.assertEqual(count, 0)
 
+    def test_uncollected_batch_garbage_does_not_defer(self):
+        # Growth is judged after a collection: 1 GB at start, 5 GB of mostly cyclic
+        # garbage after the batch, 1.5 GB once collected -> not a heavy book.
+        bk = link_books.BookKey("source", "garbage")
+        lines = [(i, f"שורה {i}", "ספר") for i in range(2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(link_books, "BATCH_LINES", 2), \
+                    mock.patch.object(link_books, "RSS_CAP", 1e12), \
+                    mock.patch.object(link_books, "GC_EVERY_BATCHES", 1000), \
+                    mock.patch.object(link_books, "HEAVY_BOOK_GROWTH_BYTES", 2.5e9), \
+                    mock.patch.object(link_books, "worker_memory_bytes", side_effect=[1e9, 5e9, 1.5e9]):
+                count, _ = link_books.process_book_checkpointed(
+                    _Linker(), bk, lines, lambda _l: None, lambda: None,
+                    os.path.join(tmp, "cp"), os.path.join(tmp, "out.jsonl"),
+                    lambda _rss, _b: self.fail("unexpected recycle"),
+                )
+            self.assertEqual(count, 0)
+
     def test_growth_below_the_threshold_does_not_defer(self):
         bk = link_books.BookKey("source", "normal")
         lines = [(i, f"שורה {i}", "ספר") for i in range(3)]
@@ -152,8 +170,10 @@ class HeavySlotAndLimitTest(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
             self.assertNotEqual(first.path, second.path)
-            # flock is per open file description: a second acquire in this process
-            # would succeed on the same fd family, so prove exclusion from a child.
+            # flock is per open file description, so exclusion holds against a child
+            # AND against this process's own next acquire (a leaked slot fd would block
+            # the leaker itself - which is why the worker loop releases in `finally`).
+            self.assertIsNone(link_books.HeavySlot.acquire(run, 2))
             pid = os.fork()
             if pid == 0:
                 third = link_books.HeavySlot.acquire(run, 2)
@@ -179,6 +199,18 @@ class HeavySlotAndLimitTest(unittest.TestCase):
         _, status = os.waitpid(pid, 0)
         self.assertEqual(os.WEXITSTATUS(status), 0)
         self.assertEqual(link_books.apply_address_space_limit(0), 0)
+
+    def test_address_space_limit_is_refused_when_the_baseline_image_crowds_it(self):
+        import resource
+        notes = []
+        before = resource.getrlimit(resource.RLIMIT_AS)
+        # This process already maps far more than 2 KiB: the ceiling would MemoryError
+        # every allocation, so it must be refused, logged, and leave the limit alone.
+        self.assertEqual(link_books.apply_address_space_limit(2048, notes.append), 0)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_AS), before)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("refused", notes[0])
+        self.assertGreater(link_books.virtual_bytes(), 2048)
 
 
 if __name__ == "__main__":

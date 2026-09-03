@@ -926,13 +926,17 @@ jobs:
             # took the VM down): defer a book that grows a pool child by >0.8 GB of
             # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
             # wins over batch-by-batch recycling - finish every ordinary book first,
-            # then resolve the deferred ones at most two at a time under an 8 GB cap
-            # (idle workers recycle so the heavy pair gets the RAM they shed).
+            # then resolve the deferred ones at most two at a time under a 5 GB cap
+            # (idle workers recycle so the heavy pair gets the RAM they shed).  The
+            # cap is judged between batches, so budget one more batch of growth per
+            # slot: 2 x (5 + ~4) + master ~3 + idle + mongod 3 stays under the VM.
             # RLIMIT_AS is the last resort so a runaway line ends in a MemoryError
-            # inside its worker instead of the kernel OOM killer.
+            # inside its worker instead of the kernel OOM killer; it bounds VIRTUAL
+            # size, and the engine refuses a ceiling its baseline image already
+            # crowds (see apply_address_space_limit) rather than failing every book.
             export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
             export LINKER_HEAVY_BOOK_SLOTS=2
-            export LINKER_HEAVY_RSS_CAP_BYTES=8000000000
+            export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
             export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
             export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
             export MALLOC_ARENA_MAX=2

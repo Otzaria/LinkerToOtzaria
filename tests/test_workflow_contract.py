@@ -209,7 +209,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("LINKER_RSS_CAP_BYTES=1200000000", workflow)
         self.assertIn("LINKER_HEAVY_BOOK_SLOTS=2", workflow)
         self.assertIn("LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000", workflow)
-        self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=8000000000", workflow)
+        self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=5000000000", workflow)
         self.assertIn("LINKER_WORKER_ADDRESS_SPACE_BYTES=", workflow)
         self.assertIn('bash ci/stop_ner.sh', workflow)
         self.assertIn('--ner-bundle-dir "$NER_BUNDLE_DIR"', workflow)
