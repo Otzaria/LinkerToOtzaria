@@ -193,7 +193,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn(".head_sha == $head_sha", workflow)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
-        self.assertIn("--engine-workers 12", workflow)
+        self.assertIn("--engine-workers 8", workflow)
         self.assertIn('bash ci/stop_ner.sh', workflow)
         self.assertIn('--ner-bundle-dir "$NER_BUNDLE_DIR"', workflow)
         self.assertIn('NER_BUNDLE_DIR="$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/raw-ner/', workflow)

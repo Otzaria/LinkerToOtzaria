@@ -268,7 +268,18 @@ DUMP_ARCHIVE_SHA256="$(awk '$2 == "dump.tar.gz" {print $1}' "$CACHE/dump-sums/SH
   exit 1
 }
 if [ "$STACK_ROLE" != ner ]; then
-  pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log")
+  # WiredTiger otherwise reserves ~50% of VM RAM for its cache; on the ~32GB WSL host
+  # that starved eight-plus resolver processes and got the job OOM-killed. The dump is
+  # read-mostly, so a small cache costs little. A mongod that is already running
+  # without the cap (started by an older setup) is restarted with it.
+  MONGO_CACHE_GB="${LINKER_MONGO_CACHE_GB:-3}"
+  if pgrep -x mongod >/dev/null && ! pgrep -ax mongod | grep -qE -- "--wiredTigerCacheSizeGB $MONGO_CACHE_GB( |$)"; then
+    echo "restarting mongod with --wiredTigerCacheSizeGB $MONGO_CACHE_GB"
+    mongod --dbpath "$CACHE/mongo-data" --shutdown || pkill -x mongod || true
+    for _ in $(seq 1 30); do pgrep -x mongod >/dev/null || break; sleep 1; done
+    pgrep -x mongod >/dev/null && echo "::warning::mongod did not stop within 30s; continuing with the uncapped instance"
+  fi
+  pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log" --wiredTigerCacheSizeGB "$MONGO_CACHE_GB")
 fi
 if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
   mkdir -p "$DUMP_ARCHIVE_DIR"
