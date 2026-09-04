@@ -36,7 +36,8 @@ terminal.
 | Repo | Change | Why |
 |---|---|---|
 | SefariaExport | publishes `changelog_diff.json` (stage 0) | rename hint for target_ref rewrite |
-| SeforimLibrary | `dumpLines` step publishes `lines_snapshot.db.zst` (stage 4) | the linker's offset-accurate input |
+| SeforimLibrary | `dumpLines` step publishes `lines_snapshot.db.zst` on a content-addressed pre-release (stage 4) | the linker's offset-accurate input |
+| SeforimLibrary | DB release's `build_provenance.json` records `snapshot_release_tag` / `snapshot_zst_sha256` | lets a manual relink resolve and verify that pre-release, so the DB release need not carry a duplicate ~1 GiB copy |
 | SeforimLibrary | `generateLinkerLinks` Phase-2 (stage 5) | resolves target_ref → line, writes clickable links |
 | otzaria-library | `weekly-pipeline.yml` | orchestrates the single serial saga |
 | LinkerToOtzaria | `relink.yml` + `ci/*.sh` | GPU NER handoff, CPU resolution, immutable publish |

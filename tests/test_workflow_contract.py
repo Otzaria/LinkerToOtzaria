@@ -112,6 +112,57 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         )
         self.assertNotIn('REMOTE_SNAPSHOT_DIGEST="$(gh release view', workflow)
 
+    def test_manual_mode_resolves_the_snapshot_release_from_db_provenance(self):
+        # The SeforimLibrary DB release stopped publishing a second copy of
+        # lines_snapshot.db.zst (build provenance schema_version 5 on): the bytes
+        # only ever lived on the content-addressed pre-release the build published
+        # before its own relink, and the DB release now NAMES that pre-release.
+        # Standalone/manual mode must resolve it from build_provenance.json and
+        # verify the download against the digest recorded there — fail-closed,
+        # exactly as serial mode verifies the digest its parent pinned.
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        fetch = (root / "ci/fetch_relink_inputs.sh").read_text(encoding="utf-8")
+
+        for source in (workflow, fetch):
+            self.assertIn("-p build_provenance.json -D inputs --clobber", source)
+            self.assertIn(
+                "PROV_SNAPSHOT_SHA=\"$(jq -r '.snapshot_zst_sha256 // \"\"' "
+                'inputs/build_provenance.json)"',
+                source,
+            )
+            self.assertIn(
+                "PROV_SNAPSHOT_TAG=\"$(jq -r '.snapshot_release_tag // \"\"' "
+                'inputs/build_provenance.json)"',
+                source,
+            )
+            self.assertIn('[[ "$PROV_SNAPSHOT_SHA" =~ ^[0-9a-f]{64}$ ]]', source)
+            # The tag is never trusted on its own: it must be the digest's own
+            # content-addressed release, so a tampered or drifted provenance can
+            # never point the relink at unrelated bytes.
+            self.assertIn("lines-snapshot-sha256-$PROV_SNAPSHOT_SHA", source)
+            self.assertIn(
+                'gh release download "$PROV_SNAPSHOT_TAG" -R Otzaria/SeforimLibrary',
+                source,
+            )
+            self.assertIn("sha256:$PROV_SNAPSHOT_SHA", source)
+            # …and the bytes themselves are checked against that same digest.
+            self.assertIn(
+                'echo "$PROV_SNAPSHOT_SHA  inputs/lines_snapshot.db.zst" | sha256sum -c -',
+                source,
+            )
+            # The legacy branch (releases up to v26, provenance schema_version <= 4,
+            # which shipped the asset themselves) is a documented transitional path,
+            # not a silent fallback: it must say when it can be removed.
+            self.assertIn("from v27 on", source)
+
+        # The workflow reads the DB release itself only for its provenance.
+        self.assertIn(
+            'gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \\\n'
+            "              -p build_provenance.json -D inputs --clobber",
+            workflow,
+        )
+
     def test_server_host_lease_is_self_provisioning(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"

@@ -15,10 +15,14 @@ run-name: "${{ inputs.recovery_mode && 'relink-recovery' || 'relink' }} request=
 # and injects the links into the same DB before releasing. No cross-cycle lag: every DB
 # release ships a complete link set.
 #
-# STANDALONE MODE (manual dispatch, no library_run_id): fetches the snapshot from the
-# latest SeforimLibrary release instead — useful for re-running the linker between builds.
+# STANDALONE MODE (manual dispatch, no library_run_id): resolves the snapshot from the
+# latest final SeforimLibrary DB release's build_provenance.json — which names the
+# content-addressed pre-release carrying it, and the digest to verify it against —
+# instead of the DB release's own asset, which that release no longer ships. Useful for
+# re-running the linker between builds.
 #
-#   • lines_snapshot.db.zst  ← content-addressed snapshot release (serial) or latest DB release (manual).
+#   • lines_snapshot.db.zst  ← the content-addressed snapshot pre-release: pinned by the
+#     dispatching build (serial) or named by the latest DB release's provenance (manual).
 #     The ONLY source-change clock: the linker links this content and stamps source_hash from
 #     it, so change-detection + baseline track exactly this file (per-book content hashes).
 #   • changelog_diff.json    ← latest SefariaExport release — target_ref rewrite ONLY.
@@ -40,7 +44,8 @@ on:
         description: >
           Exact SeforimLibrary parent run id (serial-mode correlation). The snapshot bytes
           come from the content-addressed release derived from snapshot_sha256. Leave empty
-          to use the latest final SeforimLibrary DB release.
+          to take the snapshot release named by the latest final SeforimLibrary DB
+          release's build_provenance.json.
         required: false
         default: ''
         type: string
@@ -627,14 +632,46 @@ jobs:
             # Weekly DB releases are final. Resolve GitHub's stable Latest explicitly so
             # content-addressed snapshot pre-releases can never masquerade as a DB release.
             LIB_TAG=$(gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName)
-            echo "Standalone mode: snapshot from latest final SeforimLibrary release $LIB_TAG"
+            # The DB release stopped carrying a second copy of lines_snapshot.db.zst
+            # (build provenance schema_version 5 on): the bytes only ever lived on the
+            # content-addressed pre-release the build published before dispatching its
+            # own relink, and the DB release now NAMES that pre-release instead. Resolve
+            # it from build_provenance.json (a few KB) and verify the snapshot against
+            # the digest recorded there — the same fail-closed check serial mode makes,
+            # and strictly stronger than the old self-consistent descriptor compare.
+            rm -f inputs/build_provenance.json
             gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
-              -p 'lines_snapshot.db.zst' -D inputs --clobber
-            REMOTE_SNAPSHOT_DIGEST="$(gh api \
-              "repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG" \
-              --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
-            [[ "$REMOTE_SNAPSHOT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_SNAPSHOT_DIGEST#sha256:}" ]]
+              -p build_provenance.json -D inputs --clobber
+            PROV_SNAPSHOT_SHA="$(jq -r '.snapshot_zst_sha256 // ""' inputs/build_provenance.json)"
+            PROV_SNAPSHOT_TAG="$(jq -r '.snapshot_release_tag // ""' inputs/build_provenance.json)"
+            if [[ "$PROV_SNAPSHOT_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+              [ "$PROV_SNAPSHOT_TAG" = "lines-snapshot-sha256-$PROV_SNAPSHOT_SHA" ] || {
+                echo "::error::$LIB_TAG build_provenance.json snapshot tag does not match its snapshot digest"; exit 1;
+              }
+              echo "Standalone mode: snapshot pre-release $PROV_SNAPSHOT_TAG, named by $LIB_TAG build_provenance.json"
+              gh release download "$PROV_SNAPSHOT_TAG" -R Otzaria/SeforimLibrary \
+                -p lines_snapshot.db.zst -D inputs --clobber
+              REMOTE_SNAPSHOT_DIGEST="$(gh api \
+                "repos/Otzaria/SeforimLibrary/releases/tags/$PROV_SNAPSHOT_TAG" \
+                --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+              [ "$REMOTE_SNAPSHOT_DIGEST" = "sha256:$PROV_SNAPSHOT_SHA" ] || {
+                echo "::error::standalone snapshot release descriptor does not match the digest $LIB_TAG recorded"; exit 1;
+              }
+              echo "$PROV_SNAPSHOT_SHA  inputs/lines_snapshot.db.zst" | sha256sum -c -
+            else
+              # LEGACY: DB releases up to and including v26 shipped the snapshot as their
+              # own asset and their provenance (schema_version <= 4) names no pre-release.
+              # This branch keeps manual mode working until the latest DB release carries
+              # snapshot_release_tag, i.e. from v27 on — delete it then.
+              echo "Standalone mode: $LIB_TAG predates snapshot_release_tag — snapshot from the release asset"
+              gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
+                -p 'lines_snapshot.db.zst' -D inputs --clobber
+              REMOTE_SNAPSHOT_DIGEST="$(gh api \
+                "repos/Otzaria/SeforimLibrary/releases/tags/$LIB_TAG" \
+                --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+              [[ "$REMOTE_SNAPSHOT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+              [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_SNAPSHOT_DIGEST#sha256:}" ]]
+            fi
           fi
           ACTUAL_SNAPSHOT_SHA="$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)"
           echo "snapshot_zst_sha256=$ACTUAL_SNAPSHOT_SHA" >> "$GITHUB_OUTPUT"

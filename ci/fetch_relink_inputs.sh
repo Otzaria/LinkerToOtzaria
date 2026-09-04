@@ -30,12 +30,40 @@ if [ -n "${LIBRARY_RUN_ID:-}" ]; then
 else
   LIB_TAG="$(gh release view -R Otzaria/SeforimLibrary --json tagName -q .tagName)"
   [[ "$LIB_TAG" =~ ^[A-Za-z0-9._-]{1,150}$ ]]
+  # The DB release stopped carrying a second copy of lines_snapshot.db.zst (build
+  # provenance schema_version 5 on) — the bytes only ever lived on the
+  # content-addressed pre-release the build published before its own relink, and
+  # the DB release now NAMES that pre-release. Resolve it from
+  # build_provenance.json and verify the snapshot against the digest recorded
+  # there: the same fail-closed check serial mode makes above, and strictly
+  # stronger than the old self-consistent descriptor compare.
+  rm -f inputs/build_provenance.json
   gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
-    -p lines_snapshot.db.zst -D inputs --clobber
-  REMOTE_DIGEST="$(gh release view "$LIB_TAG" -R Otzaria/SeforimLibrary --json assets \
-    --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
-  [[ "$REMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-  [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_DIGEST#sha256:}" ]]
+    -p build_provenance.json -D inputs --clobber
+  PROV_SNAPSHOT_SHA="$(jq -r '.snapshot_zst_sha256 // ""' inputs/build_provenance.json)"
+  PROV_SNAPSHOT_TAG="$(jq -r '.snapshot_release_tag // ""' inputs/build_provenance.json)"
+  if [[ "$PROV_SNAPSHOT_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+    [[ "$PROV_SNAPSHOT_TAG" == "lines-snapshot-sha256-$PROV_SNAPSHOT_SHA" ]] || {
+      echo "::error::$LIB_TAG build_provenance.json snapshot tag does not match its snapshot digest" >&2; exit 1;
+    }
+    gh release download "$PROV_SNAPSHOT_TAG" -R Otzaria/SeforimLibrary \
+      -p lines_snapshot.db.zst -D inputs --clobber
+    REMOTE_DIGEST="$(gh release view "$PROV_SNAPSHOT_TAG" -R Otzaria/SeforimLibrary --json assets \
+      --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+    [[ "$REMOTE_DIGEST" == "sha256:$PROV_SNAPSHOT_SHA" ]]
+    echo "$PROV_SNAPSHOT_SHA  inputs/lines_snapshot.db.zst" | sha256sum -c -
+  else
+    # LEGACY: DB releases up to and including v26 shipped the snapshot themselves
+    # and their provenance (schema_version <= 4) names no pre-release. Keeps manual
+    # mode working until the latest DB release carries snapshot_release_tag, i.e.
+    # from v27 on — delete this branch then.
+    gh release download "$LIB_TAG" -R Otzaria/SeforimLibrary \
+      -p lines_snapshot.db.zst -D inputs --clobber
+    REMOTE_DIGEST="$(gh release view "$LIB_TAG" -R Otzaria/SeforimLibrary --json assets \
+      --jq '.assets[]|select(.name=="lines_snapshot.db.zst")|.digest')"
+    [[ "$REMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+    [[ "$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)" == "${REMOTE_DIGEST#sha256:}" ]]
+  fi
 fi
 ACTUAL_SNAPSHOT_SHA="$(sha256sum inputs/lines_snapshot.db.zst | cut -d' ' -f1)"
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
