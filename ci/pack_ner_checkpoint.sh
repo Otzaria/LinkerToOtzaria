@@ -28,8 +28,11 @@ if [ "$raw_bytes" -gt "$max_raw_bytes" ]; then
   echo "::error::NER checkpoint is ${raw_bytes} bytes, above safety cap ${max_raw_bytes}" >&2
   exit 1
 fi
+# shellcheck source=ci/zstd_mt.sh
+. "$(dirname "$0")/zstd_mt.sh"
+# Worker count only, and byte-neutral -- see the note in ci/pack_ner_handoff.sh.
 python3 "$(dirname "$0")/write_deterministic_tar.py" "$ROOT" checkpoint.json ner-data done failed partial \
-  | zstd -8 -T0 -o "$OUT" -f
+  | zstd -8 -T"$(zstd_workers)" -o "$OUT" -f
 sha256sum "$OUT" | cut -d' ' -f1 > "$OUT.sha256"
 packed_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$OUT")
 echo "packed resumable NER checkpoint: raw_bytes=$raw_bytes packed_bytes=$packed_bytes sha256=$(cat "$OUT.sha256")"

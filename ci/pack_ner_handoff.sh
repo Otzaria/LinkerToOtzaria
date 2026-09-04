@@ -25,8 +25,16 @@ if [ "$raw_bytes" -gt "$max_raw_bytes" ]; then
   echo "::error::raw-NER handoff is ${raw_bytes} bytes, above safety cap ${max_raw_bytes}" >&2
   exit 1
 fi
+# shellcheck source=ci/zstd_mt.sh
+. "$(dirname "$0")/zstd_mt.sh"
+# Worker count only: `-T0` uses physical cores, i.e. half this runner's CPUs.
+# Byte-neutral -- zstd's frame does not depend on the worker count -- so this
+# cannot move the content-addressed handoff sha.  Job size and overlap are left
+# at zstd's defaults here because, unlike the level-19 payload, this stage is
+# fed by the single-threaded write_deterministic_tar.py producer and has not
+# been profiled; tuning it blind could trade sha churn for nothing.
 python3 "$(dirname "$0")/write_deterministic_tar.py" "$ROOT" ner_manifest.json ner-data \
-  | zstd -12 -T0 -o "$OUT" -f
+  | zstd -12 -T"$(zstd_workers)" -o "$OUT" -f
 sha256sum "$OUT" | cut -d' ' -f1 > "$OUT.sha256"
 packed_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$OUT")
 echo "packed raw-NER handoff: raw_bytes=$raw_bytes packed_bytes=$packed_bytes sha256=$(cat "$OUT.sha256")"

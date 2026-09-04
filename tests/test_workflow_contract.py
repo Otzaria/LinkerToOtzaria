@@ -363,6 +363,43 @@ class RelinkWorkflowContractTest(unittest.TestCase):
                 "this semantic change must force a full relink, never fingerprint adoption",
             )
 
+    def test_pack_steps_saturate_the_runner_without_losing_determinism(self):
+        root = Path(__file__).parents[1]
+        policy = (root / "ci/zstd_mt.sh").read_text(encoding="utf-8")
+
+        # The worker count must come from the LOGICAL CPUs. `zstd -T0` resolves
+        # to physical cores, which is half of them on the WSL2 runner.
+        self.assertIn("nproc", policy)
+        self.assertIn("zstd_workers()", policy)
+        # Bounded so a very wide host cannot blow the memory budget, and a
+        # missing nproc degrades to zstd's own detection rather than failing.
+        self.assertIn("n=32", policy)
+        self.assertIn("n=0", policy)
+
+        packers = {
+            "ci/pack_and_publish.sh": "-19",
+            "ci/pack_ner_handoff.sh": "-12",
+            "ci/pack_ner_checkpoint.sh": "-8",
+        }
+        for relative, level in packers.items():
+            script = (root / relative).read_text(encoding="utf-8")
+            with self.subTest(script=relative):
+                self.assertIn("zstd_mt.sh", script)
+                # No pack step may go back to physical-core detection.
+                self.assertNotIn(f"zstd {level} -T0", script)
+                self.assertNotIn("-T0 -o", script)
+
+        payload = (root / "ci/pack_and_publish.sh").read_text(encoding="utf-8")
+        # Job size and overlap are pinned, so the payload bytes stop depending on
+        # zstd's version-specific multi-threading defaults.
+        self.assertIn("ZSTD_TUNING=(-19 -B4M --zstd=ovlog=6)", payload)
+        # Unsupported tuning must fail the step, never silently fall back to
+        # different settings -- that would make the payload sha host-dependent.
+        self.assertIn("refusing to pack with different settings", payload)
+        # The container is unchanged: still one plain zstd frame over the tar.
+        self.assertNotIn("--long", payload)
+        self.assertIn("-cf - artifacts line-baseline meta.json", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
