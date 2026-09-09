@@ -71,11 +71,12 @@ index c6c3687..b252028 100644
              if serial['depth'] == 1:
                  return children
          if context_ref is not None:
-@@ -516,2 +517,27 @@ PASSAGE_MATCHER = PassageMatcher()
+@@ -516,2 +517,28 @@ PASSAGE_MATCHER = PassageMatcher()
 +@lru_cache(maxsize=1024)
 +def _cached_dibur_hamatchil_nodes(tref: str):
 +    """Materialize one immutable process-local Mongo result per container ref."""
-+    logger.info(f"Querying DH for {tref} (cache miss)")
++    # DEBUG: one line per miss was 402k lines / 111 MB of a 123 MB relink log.
++    logger.debug(f"Querying DH for {tref} (cache miss)")
 +    nodes = DiburHamatchilNodeSet({"container_refs": tref})
 +    # AbstractMongoSet otherwise keeps a live cursor until first iteration. Force
 +    # materialization before caching; subsequent iterations reuse its stable records.

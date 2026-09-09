@@ -43,6 +43,13 @@ trap 'rm -rf "$TMP"' EXIT
 
 FAILURES=0
 REAPED=0
+# What was actually looked at. Guards 34014955650 and 34024277390 each printed one
+# line -- `reconcile complete: 0 orphan(s) reaped.` -- from which an auditor could not
+# tell a clean host from a listing that returned nothing at all. Both were correct
+# no-ops, and it took the parent build's logs to prove it.
+SCANNED_WORKFLOWS=0
+LISTED_RUNS=0
+STAMPED_RUNS=0
 SEEN_IDS_FILE="$TMP/seen-request-ids"
 : > "$SEEN_IDS_FILE"
 
@@ -122,7 +129,7 @@ handle_run() {
 }
 
 collect_workflow() {
-  local wf="$1" rows rid status title
+  local wf="$1" rows rid status title listed=0 stamped=0
   # Capture-then-parse: a listing failure must surface as a RED invocation, never as an
   # empty scan (the old process-substitution form swallowed gh's exit status).
   if ! rows=$(list_runs_active "$REPO" "$wf"); then
@@ -133,10 +140,15 @@ collect_workflow() {
   printf '%s\n' "$rows" > "$TMP/$wf.tsv"
   while IFS=$'\t' read -r rid status title; do
     [ -n "$rid" ] || continue
+    listed=$((listed+1))
     if [[ "$title" =~ ^(relink|relink-recovery|kaggle-relink)\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+      stamped=$((stamped+1))
       echo "$wf ${BASH_REMATCH[2]}" >> "$SEEN_IDS_FILE"
     fi
   done <<< "$rows"
+  SCANNED_WORKFLOWS=$((SCANNED_WORKFLOWS+1))
+  LISTED_RUNS=$((LISTED_RUNS+listed))
+  STAMPED_RUNS=$((STAMPED_RUNS+stamped))
 }
 
 collect_workflow relink.yml
@@ -169,4 +181,4 @@ if [ "$FAILURES" -gt 0 ]; then
   echo "::error::$FAILURES reconcile action(s) failed — retry with an exact manual invocation"
   exit 1
 fi
-echo "reconcile complete: $REAPED orphan(s) reaped."
+echo "reconcile: scanned $SCANNED_WORKFLOWS workflow(s) / $LISTED_RUNS live run(s) / $STAMPED_RUNS identity-stamped → $REAPED orphan(s) reaped"

@@ -12,7 +12,8 @@ if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expecte
     raise SystemExit("invalid publisher handoff digest sidecar")
 if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
     raise SystemExit("publisher handoff digest mismatch")
-allowed_roots = {"linker_links.zst", "linker_links.zst.sha256", "relink_manifest.json", "baseline", "meta.json"}
+allowed_roots = {"linker_links.zst", "linker_links.zst.sha256", "relink_manifest.json",
+                 "relink_work.json", "baseline", "meta.json"}
 with tarfile.open(archive, "r:") as bundle:
     members = bundle.getmembers()
     for member in members:
@@ -23,7 +24,8 @@ with tarfile.open(archive, "r:") as bundle:
             raise SystemExit(f"unexpected publisher handoff member: {member.name}")
     destination.mkdir(parents=True, exist_ok=True)
     bundle.extractall(destination, members=members, filter="data")
-required = ["linker_links.zst", "linker_links.zst.sha256", "relink_manifest.json", "baseline", "meta.json"]
+required = ["linker_links.zst", "linker_links.zst.sha256", "relink_manifest.json",
+            "relink_work.json", "baseline", "meta.json"]
 for name in required:
     if not (destination / name).exists():
         raise SystemExit(f"publisher handoff is missing {name}")

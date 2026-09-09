@@ -197,6 +197,24 @@ def read_artifact(path: str) -> Iterator[LinkRecord]:
                 raise ValueError(f"{path}:{lineno}: {exc}") from exc
 
 
+def remove_artifact(path: str) -> bool:
+    """Retire a book's artifact; True when THIS call removed it.
+
+    EAFP on purpose.  `if os.path.exists(p): os.remove(p)` is two syscalls with a
+    window between them, and more than one resolver process could reach the same
+    now-empty book: that window killed 36 workers across the two 2026-09-06 relinks
+    (`FileNotFoundError` raised at `link_books.py:1620`, `os.remove(out_path)`), each
+    death spending one of the two bounded restarts a label is allowed.  Removal is
+    idempotent — callers want the post-condition "no artifact at `path`", not the
+    syscall — so the loser of a race reports False instead of raising.
+    """
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def write_artifact(path: str, records: Iterable[LinkRecord]) -> int:
     """Write all records for a single book to `path`. Asserts every record shares the
     same book_key (one file per book). Returns the number of records written."""

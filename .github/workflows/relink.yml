@@ -869,6 +869,7 @@ jobs:
               curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics || true
             fi
             bash ci/stop_ner.sh || true
+            bash ci/stop_mongod.sh || true
             exit "$rc"
           }
           trap finish_compute EXIT
@@ -958,14 +959,22 @@ jobs:
             echo "final local raw-NER micro-batch metrics:"
             curl -fsS -m 10 http://127.0.0.1:5051/otzaria-microbatch-metrics || true
             bash ci/stop_ner.sh
-            # Memory budget for the ~32GB WSL VM (three relinks on 2026-09-02/03 were
-            # OOM-killed at 16 and 12 independent workers x ~2GB each, next to an
-            # uncapped mongod). --engine-pool loads the library ONCE and forks the
-            # resolvers from it, so the ~2GB library is shared copy-on-write; the cap
-            # below then bounds each child's PRIVATE growth (Ref cache, batch documents),
-            # not its shared RSS: 12 x 1.2GB private + ~2.5GB shared + mongod (3GB cache)
-            # + runner stays well inside the VM. Prevent native libraries inside each
-            # Python process from creating another thread pool.
+            # Memory budget for the WSL VM this job runs in: the VM of the RUNNER's
+            # own Windows account, sized by that account's .wslconfig (outside this
+            # repo), so the only honest figure for a run is its OWN perf/host.jsonl -
+            # relink 34016397157 measured MemTotal 41,072,256 KiB = 42.1 GB with 12 GiB
+            # of swap.  (This comment used to say "~32GB", which it never was.)  Do NOT
+            # size this job from the interactive WSL VM on the same machine: that one
+            # belongs to a different Windows account (26 GB, 32 GiB swap) and is a
+            # different VM - the swap figures alone tell them apart.
+            # Three relinks on 2026-09-02/03 were OOM-killed at 16 and 12
+            # independent workers x ~2GB each, next to an uncapped mongod.
+            # --engine-pool loads the library ONCE and forks the resolvers from it, so
+            # the ~2GB library is shared copy-on-write; the cap below then bounds each
+            # child's PRIVATE growth (Ref cache, batch documents), not its shared RSS:
+            # 12 x 1.2GB private + ~2.5GB shared + mongod (3GB cache) + runner = ~20 GB,
+            # comfortably inside the 42 GB measured. Prevent native libraries inside
+            # each Python process from creating another thread pool.
             export LINKER_RSS_CAP_BYTES=1200000000
             # Heavy books (a few texts grew a resolver to 6-12 GB inside one book and
             # took the VM down): defer a book that grows a pool child by >0.8 GB of
@@ -974,11 +983,22 @@ jobs:
             # then resolve the deferred ones at most two at a time under a 5 GB cap
             # (idle workers recycle so the heavy pair gets the RAM they shed).  The
             # cap is judged between batches, so budget one more batch of growth per
-            # slot: 2 x (5 + ~4) + master ~3 + idle + mongod 3 stays under the VM.
+            # slot: 2 x (5 + ~4) + master ~3 + idle + mongod 3 = ~24 GB, which fits
+            # the 42 GB the audited run measured only because the heavy phase is
+            # serialized and never overlaps the twelve-worker normal phase.
+            # A deferred book is additionally given a worker that has completed no book
+            # in its current life (LINKER_HEAVY_FRESH_WORKER, on by default): in
+            # 34016397157 one line asked for 11.9 GB on a worker already holding 75
+            # books' worth of Ref cache and failed the run, while the same book linked
+            # in 2.3 s on a fresh worker in the next run.  A MemoryError in the heavy
+            # phase now requeues the book once onto a fresh worker before failing.
             # RLIMIT_AS is the last resort so a runaway line ends in a MemoryError
             # inside its worker instead of the kernel OOM killer; it bounds VIRTUAL
-            # size, and the engine refuses a ceiling its baseline image already
-            # crowds (see apply_address_space_limit) rather than failing every book.
+            # size per process and is a ceiling, never a reservation (the 26 GB heavy
+            # ceiling below is ~62% of the 42 GB VM, so two heavy slots may map more
+            # than the VM holds - that is the point), and the engine refuses a ceiling
+            # its baseline image already crowds (see apply_address_space_limit) rather
+            # than failing every book.
             export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
             export LINKER_HEAVY_BOOK_SLOTS=2
             export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
@@ -1070,6 +1090,22 @@ jobs:
           PY
           cat relink_manifest.json
 
+      # What the run DID, as data, beside what it produced: books total/adopted/computed,
+      # links, the checkpoint it chained from, requeues, re-claims, worker replacements
+      # (src/incremental.build_work_provenance). Recovery 34021656701 adopted 5126 of 5127
+      # books and computed one, and its release was indistinguishable from a full relink's.
+      # The driver already wrote the object into the run dir; this only lifts it into the
+      # workspace the handoff tar is built from, and re-validates it at the producer so a
+      # malformed object can never reach a release.
+      - name: Collect relink work provenance
+        if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          rm -f relink_work.json
+          cp "$RUN_DIR/relink_work.json" relink_work.json
+          python3 ci/validate_relink_work.py relink_work.json \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
       - name: Retain verified local artifact-store payload
         if: ${{ !inputs.dry_run && inputs.target == 'local' && steps.compute.outcome == 'success' }}
         run: |
@@ -1095,7 +1131,7 @@ jobs:
         if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
         run: |
           set -euo pipefail
-          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json baseline meta.json
+          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json relink_work.json baseline meta.json
           sha256sum publisher_handoff.tar | cut -d' ' -f1 > publisher_handoff.tar.sha256
           bash ci/publish_release_handoff.sh \
             "linker-publisher-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
@@ -1198,6 +1234,14 @@ jobs:
           HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}
         run: |
           set -euo pipefail
+          # mongod is a --fork daemon the runner only reaps on a clean exit (run
+          # 34015274945: `Terminate orphan process: pid (1413) (mongod)`). Stop the
+          # one this run owns here too: this step is always(), so it also covers the
+          # cancel/death paths on which no EXIT trap ran.
+          # || true: this step is the payload-preservation path (run 33994031370).
+          # Hygiene must never abort it under set -e, so failures stay warnings, exactly
+          # as at the compute trap site.
+          bash ci/stop_mongod.sh || true
           preserved=""
           if [ -f linker_links.zst.sha256 ]; then
             sha="$(tr -d '\r\n' < linker_links.zst.sha256)"
@@ -1209,13 +1253,14 @@ jobs:
             if [ "$HANDOFF_PUBLISHED" = true ]; then
               rm -rf "$preserved"
             else
-              if [ -f relink_manifest.json ]; then
-                cp -f relink_manifest.json "$preserved/relink_manifest.json"
-              fi
+              for provenance in relink_manifest.json relink_work.json; do
+                [ -f "$provenance" ] || continue
+                cp -f "$provenance" "$preserved/$provenance"
+              done
               echo "unpublished payload retained for recovery: $preserved"
             fi
           fi
-          rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
+          rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json relink_work.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
 
   resolve:
     name: Resolve raw NER on the durable CPU host
@@ -1468,12 +1513,22 @@ jobs:
               stream.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
           PY
 
+      # Same object, same reason, on the Kaggle-resolver path (see the compute job).
+      - name: Collect relink work provenance
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          rm -f relink_work.json
+          cp "$RUN_DIR/relink_work.json" relink_work.json
+          python3 ci/validate_relink_work.py relink_work.json \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
       - name: Publish verified publisher handoff release
         id: publish_handoff
         if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
-          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json baseline meta.json
+          tar -cf publisher_handoff.tar linker_links.zst linker_links.zst.sha256 relink_manifest.json relink_work.json baseline meta.json
           sha256sum publisher_handoff.tar | cut -d' ' -f1 > publisher_handoff.tar.sha256
           bash ci/publish_release_handoff.sh \
             "linker-publisher-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
@@ -1489,6 +1544,14 @@ jobs:
           HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}
         run: |
           set -euo pipefail
+          # mongod is a --fork daemon the runner only reaps on a clean exit (run
+          # 34015274945: `Terminate orphan process: pid (1413) (mongod)`). Stop the
+          # one this run owns here too: this step is always(), so it also covers the
+          # cancel/death paths on which no EXIT trap ran.
+          # || true: this step is the payload-preservation path (run 33994031370).
+          # Hygiene must never abort it under set -e, so failures stay warnings, exactly
+          # as at the compute trap site.
+          bash ci/stop_mongod.sh || true
           preserved=""
           if [ -f linker_links.zst.sha256 ]; then
             sha="$(tr -d '\r\n' < linker_links.zst.sha256)"
@@ -1500,13 +1563,14 @@ jobs:
             if [ "$HANDOFF_PUBLISHED" = true ]; then
               rm -rf "$preserved"
             else
-              if [ -f relink_manifest.json ]; then
-                cp -f relink_manifest.json "$preserved/relink_manifest.json"
-              fi
+              for provenance in relink_manifest.json relink_work.json; do
+                [ -f "$provenance" ] || continue
+                cp -f "$provenance" "$preserved/$provenance"
+              done
               echo "unpublished payload retained for recovery: $preserved"
             fi
           fi
-          rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
+          rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json relink_work.json "$RUN_DIR" "$RUNNER_TEMP/ner"
 
   publish:
     name: Verify and publish immutable linker payload
@@ -1560,6 +1624,7 @@ jobs:
           test -f handoff/linker_links.zst
           test -f handoff/linker_links.zst.sha256
           test -f handoff/relink_manifest.json
+          test -f handoff/relink_work.json
           expected="$(tr -d '\r\n' < handoff/linker_links.zst.sha256)"
           [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
           [[ "$(sha256sum handoff/linker_links.zst | cut -d' ' -f1)" == "$expected" ]]
@@ -1568,6 +1633,8 @@ jobs:
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --request-id "$EXPECTED_REQUEST_ID" --parent-run-id "$EXPECTED_PARENT_RUN_ID" \
             --parent-run-attempt "$EXPECTED_PARENT_RUN_ATTEMPT"
+          python3 ci/validate_relink_work.py handoff/relink_work.json \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Publish content-addressed release without clobber
         id: release
         shell: bash
@@ -1578,7 +1645,7 @@ jobs:
           import hashlib, json
           from pathlib import Path
           root=Path("handoff")
-          names=("linker_links.zst","meta.json","relink_manifest.json")
+          names=("linker_links.zst","meta.json","relink_manifest.json","relink_work.json")
           def sha(path):
               digest=hashlib.sha256()
               with path.open("rb") as source:
@@ -1615,7 +1682,7 @@ jobs:
           from pathlib import Path
           value=json.loads(Path(sys.argv[1]).read_text())
           root=Path(sys.argv[2]); output=Path(sys.argv[3])
-          names=("linker_links.zst","meta.json","relink_manifest.json")
+          names=("linker_links.zst","meta.json","relink_manifest.json","relink_work.json")
           actual={item["name"]:(item["size"],item.get("digest")) for item in value["assets"]}
           if len(actual) != len(value["assets"]):
               raise SystemExit("duplicate asset names in immutable Linker draft")
@@ -1646,7 +1713,7 @@ jobs:
           from pathlib import Path
           value=json.loads(Path(sys.argv[1]).read_text())
           actual={item["name"]:(item["size"],item.get("digest")) for item in value["assets"]}
-          root=Path(sys.argv[2]); names=("linker_links.zst","meta.json","relink_manifest.json")
+          root=Path(sys.argv[2]); names=("linker_links.zst","meta.json","relink_manifest.json","relink_work.json")
           def file_sha256(path):
               digest=hashlib.sha256()
               with path.open("rb") as source:

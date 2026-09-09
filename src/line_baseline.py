@@ -175,12 +175,21 @@ def build_line_baseline(
     snapshot_sha256: str,
     engine_fingerprint: str | None,
     artifacts_root: str,
-) -> None:
+) -> int:
     """Rebuild the release-only line baseline from an accepted snapshot.
 
     Rebuilding all books is deliberately simple and fail-closed.  It is linear in
     the snapshot (about the same work as the existing book-hash pass) and happens
     only after every requested line was successfully linked or reused.
+
+    Returns the number of link records in the WHOLE published artifact store — the
+    number the release provenance reports (``relink_work.json``).  It is free here
+    and nowhere else: this pass already streams every artifact byte to digest it, so
+    the count costs one ``bytes.count`` per chunk instead of a second full pass over
+    a 667 MiB store.  It is exact rather than an estimate because
+    ``linker_artifact.write_artifact`` writes one ``json.dumps`` object per line and
+    terminates EVERY record with ``\\n`` (a record can contain no raw newline — JSON
+    escapes it), and a book with zero links has no file at all.
     """
     if not _HEX64.fullmatch(snapshot_sha256):
         raise RuntimeError("line baseline requires a full snapshot SHA-256")
@@ -192,6 +201,7 @@ def build_line_baseline(
     (temporary / "books").mkdir(parents=True)
     connection = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
     written = 0
+    link_records = 0
     try:
         for source_name, canonical_he_title in sorted(current_hashes):
             book = BookKey(source_name, canonical_he_title)
@@ -206,6 +216,7 @@ def build_line_baseline(
                 with artifact_path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         digest.update(chunk)
+                        link_records += chunk.count(b"\n")
                 artifact_sha256 = digest.hexdigest()
             _write_json_atomic(
                 _book_path(temporary, book),
@@ -244,6 +255,9 @@ def build_line_baseline(
             os.replace(backup, root_path)
         raise
     shutil.rmtree(backup, ignore_errors=True)
+    # Only after the swap succeeded: a caller must never record a link count for a
+    # baseline that was not actually published.
+    return link_records
 
 
 def validate_baseline_identity(

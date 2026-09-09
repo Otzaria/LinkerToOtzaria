@@ -7,6 +7,9 @@
 #   • standalone / request=none / legacy titles → never touched;
 #   • dispatcher + child sharing one id (cross-workflow) → NOT a duplicate;
 #   • two live runs of the SAME workflow sharing an id → exit 1, ZERO cancels;
+#   • the closing line states what was SCANNED, so 'all clean' and 'scanned
+#     zero' cannot read alike (guards 34014955650 / 34024277390 printed the same
+#     single line for both);
 #   • LISTING failure → RED tick with zero decisions (fail-closed, the old
 #     process-substitution form reported "0 orphans" in green);
 #   • malformed / statusless / non-numeric-attempt parent JSON → red, run left;
@@ -93,14 +96,17 @@ check "explicit failed-parent recovery → kept"        test "$(cancelled 108)" 
 check "recovery of successful parent → reaped"        test "$(cancelled 109)" -eq 1
 check "parent rerun does not cancel earlier recovery"  test "$(cancelled 110)" -eq 0
 check "dispatcher+child same id ≠ duplicate; clean tick rc=0" test "$rc" -eq 0
+# 10 relink rows + 1 kaggle row; 7 + 1 of them identity-stamped; 5 cancelled.
+check "summary counts what was scanned, not only what was reaped" \
+  grep -qxF "reconcile: scanned 2 workflow(s) / 11 live run(s) / 8 identity-stamped → 5 orphan(s) reaped" "$WORK/out.txt"
 
 # Fail-closed listing: EVERY status query fails → red tick, zero decisions.
 : > "$MOCK_LOG"
 rc=0
 ( export PATH="$WORK/bin:$PATH" RECONCILE_LINKER_REPO=LINKER RECONCILE_PARENT_REPO=PARENT MOCK_LIST_FAIL=1
   bash "$SCRIPT" ) > "$WORK/out.txt" 2>&1 || rc=$?
-check "listing failure → rc=1, zero cancels, no 'reconcile complete'" \
-  test "$rc" -eq 1 -a "$(grep -c CANCELLED "$MOCK_LOG")" -eq 0 -a "$(grep -c 'reconcile complete' "$WORK/out.txt")" -eq 0
+check "listing failure → rc=1, zero cancels, no summary line" \
+  test "$rc" -eq 1 -a "$(grep -c CANCELLED "$MOCK_LOG")" -eq 0 -a "$(grep -c '^reconcile:' "$WORK/out.txt")" -eq 0
 
 # Malformed / statusless / bad-attempt parent JSON → red, run left alone.
 row 120 "relink request=$RA parent=21:1" > "$MOCK_DIR/list_relink.tsv"
@@ -138,6 +144,13 @@ echo "101" > "$MOCK_DIR/cancel_fail"
 rc=$(run_reconcile)
 check "failed cancel → rc=1" test "$rc" -eq 1
 rm -f "$MOCK_DIR/cancel_fail"
+
+# Nothing live at all: the no-op both guards performed this cycle.
+: > "$MOCK_DIR/list_relink.tsv"
+: > "$MOCK_DIR/list_kaggle-relink.tsv"
+rc=$(run_reconcile)
+check "scanned zero is distinguishable from all clean" \
+  test "$rc" -eq 0 -a "$(grep -cxF "reconcile: scanned 2 workflow(s) / 0 live run(s) / 0 identity-stamped → 0 orphan(s) reaped" "$WORK/out.txt")" -eq 1
 
 echo "----"
 echo "reconcile: $PASS passed, $FAIL failed"
