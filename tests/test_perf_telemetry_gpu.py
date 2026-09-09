@@ -45,6 +45,27 @@ AMD_SMI_JSON = json.dumps([{
     },
 }])
 
+# Two cards, and the busy one is not the first: the shape the old whole-payload walk
+# got backwards.  amd-smi metric --json emits one object per GPU, in device order.
+AMD_SMI_TWO_GPU_JSON = json.dumps([
+    {
+        "gpu": 0,
+        "usage": {"gfx_activity": {"value": 0, "unit": "%"}},
+        "mem_usage": {
+            "total_vram": {"value": 16368, "unit": "MB"},
+            "used_vram": {"value": 16, "unit": "MB"},
+        },
+    },
+    {
+        "gpu": 1,
+        "usage": {"gfx_activity": {"value": 97, "unit": "%"}},
+        "mem_usage": {
+            "total_vram": {"value": 16368, "unit": "MB"},
+            "used_vram": {"value": 9001, "unit": "MB"},
+        },
+    },
+])
+
 NVIDIA_SMI_CSV = "3, 512, 16376\n71, 8192, 16376\n"
 
 # What rocm-smi really does on a ROCm-for-WSL userspace: exit 0, print nothing on
@@ -68,12 +89,47 @@ class GpuParsingTest(unittest.TestCase):
 
     def test_amd_smi_json_unwraps_value_unit_pairs(self):
         self.assertEqual(telemetry.parse_amd_smi(AMD_SMI_JSON), {
+            "source": "amd-smi", "device": "gpu0", "util_pct": 37,
+            "mem_used_mb": 2048, "mem_total_mb": 16368,
+        })
+
+    def test_amd_smi_reports_the_busiest_gpu_not_the_first(self):
+        # The regression: the probe walked the whole payload and answered for whichever
+        # device it reached first, so a relink saturating gpu1 next to an idle gpu0 was
+        # recorded as 0% util for its entire NER stage.  Its three sibling probes have
+        # always taken the max; this one now does too, and names the device it means.
+        reading = telemetry.parse_amd_smi(AMD_SMI_TWO_GPU_JSON)
+        self.assertEqual(reading, {
+            "source": "amd-smi", "device": "gpu1", "util_pct": 97,
+            "mem_used_mb": 9001, "mem_total_mb": 16368,
+        })
+        # The VRAM figures must come from the SAME card as the utilisation, not from
+        # whichever entry the walk happened to reach first (gpu0 holds 16 MB).
+        self.assertNotEqual(reading["mem_used_mb"], 16)
+
+    def test_amd_smi_reads_a_single_device_payload_that_is_not_a_list(self):
+        # An unrecognised (non-list) shape keeps working exactly as before, as one
+        # device — but claims no device name, because none was stated.
+        payload = json.loads(AMD_SMI_JSON)[0]
+        self.assertEqual(telemetry.parse_amd_smi(json.dumps(payload)), {
+            "source": "amd-smi", "device": "gpu0", "util_pct": 37,
+            "mem_used_mb": 2048, "mem_total_mb": 16368,
+        })
+        del payload["gpu"]
+        self.assertEqual(telemetry.parse_amd_smi(json.dumps(payload)), {
             "source": "amd-smi", "util_pct": 37,
             "mem_used_mb": 2048, "mem_total_mb": 16368,
         })
 
     def test_amd_smi_without_a_usage_metric_is_not_a_reading(self):
         self.assertIsNone(telemetry.parse_amd_smi(json.dumps([{"gpu": 0}])))
+        # One idle-but-silent card must not hide the card that did answer.
+        self.assertEqual(
+            telemetry.parse_amd_smi(json.dumps(
+                [{"gpu": 0}, json.loads(AMD_SMI_TWO_GPU_JSON)[1]]
+            ))["util_pct"],
+            97,
+        )
 
     def test_nvidia_smi_csv_reports_the_busiest_gpu(self):
         self.assertEqual(telemetry.parse_nvidia_smi(NVIDIA_SMI_CSV), {
@@ -117,7 +173,7 @@ class GpuSourceSelectionTest(unittest.TestCase):
     def test_the_first_working_source_wins_and_is_named(self):
         gpu = telemetry.GpuTelemetry(self._sources(
             {"amd-smi": (0, AMD_SMI_JSON, "")}, self.empty))
-        self.assertEqual(gpu.start(), "gpu telemetry: source=amd-smi util=37%")
+        self.assertEqual(gpu.start(), "gpu telemetry: source=amd-smi device=gpu0 util=37%")
         self.assertEqual(gpu.source, "amd-smi")
         for _ in range(3):
             self.assertEqual(gpu.sample()["util_pct"], 37)

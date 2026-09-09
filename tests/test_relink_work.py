@@ -39,6 +39,9 @@ def _load(name: str, relative: str):
 # so a producer bug cannot validate itself. Loading it by path is what binds the two.
 contract = _load("validate_relink_work", "ci/validate_relink_work.py")
 manifest_contract = _load("validate_relink_manifest", "ci/validate_relink_manifest.py")
+# The producer-side annotation: the ONE field the driver cannot know (see
+# PoolReplacementsTest). Loaded by path for the same reason the validator is.
+pool = _load("add_pool_replacements", "ci/add_pool_replacements.py")
 
 
 def full_run(**overrides) -> dict:
@@ -498,6 +501,286 @@ class ReleaseCarriesTheWorkObjectTest(unittest.TestCase):
         self.assertEqual(
             self.workflow.count(
                 "for provenance in relink_manifest.json relink_work.json; do"), 2)
+
+    def test_both_producers_derive_the_pool_count_before_validating(self):
+        self.assertEqual(
+            self.workflow.count(
+                "python3 ci/add_pool_replacements.py relink_work.json \\\n"
+                '            "$RUN_DIR/logs/pool-exit-codes.json"'),
+            2,
+        )
+        # ORDER matters: the annotator rewrites the file, so it must run BEFORE the
+        # validator. After it, the canonical-bytes guard would only ever be shown the
+        # annotator's own output and could never catch a reshaped producer file.
+        blocks = self.workflow.split("- name: Collect relink work provenance")[1:]
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            step = block.split("      - name:")[0]
+            self.assertLess(step.index("ci/add_pool_replacements.py"),
+                            step.index("ci/validate_relink_work.py"))
+
+    def test_the_publisher_demands_the_pool_annotation(self):
+        # A producer path that lost the annotation step must not ship a release asset
+        # that is silently missing the pool's own accounting.
+        self.assertIn(
+            'python3 ci/validate_relink_work.py handoff/relink_work.json \\\n'
+            '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n'
+            "            --require-pool-accounting",
+            self.workflow,
+        )
+        self.assertEqual(self.workflow.count("--require-pool-accounting"), 1)
+
+
+class PoolReplacementsTest(unittest.TestCase):
+    """The pool master's own child replacements — the number the driver cannot see.
+
+    `workers_replaced` counts the bounded replacements THIS DRIVER made, and on the
+    production --engine-pool path the driver supervises exactly one process: the pool
+    master. A child that crashes or is stall-killed is replaced by the master
+    (link_books.run_pool), whose `restarts` never leave that function — so the released
+    counter was structurally 0 for precisely the population it exists to surface. These
+    tests pin the derivation from the ledger run_pool already writes, the fail-open
+    behaviour when there is no ledger, and the strictness the annotator must not lose.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.work = self.root / "relink_work.json"
+        self.ledger = self.root / "pool-exit-codes.json"
+
+    def write_work(self, value=None) -> Path:
+        value = recovery() if value is None else value
+        self.work.write_bytes(
+            (json.dumps(value, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":")) + "\n").encode())
+        return self.work
+
+    def write_ledger(self, codes) -> Path:
+        self.ledger.write_text(json.dumps(codes, sort_keys=True), encoding="utf-8")
+        return self.ledger
+
+    def test_the_derivation_is_run_pools_restart_count_not_an_estimate(self):
+        # Each ledger below is one tests/test_worker_pool.py asserts run_pool really
+        # writes, beside the number of bounded replacements that run really made. The
+        # identity holds because a life appends exactly one code and a label has one
+        # life plus one per replacement; a RECYCLE re-forks without appending.
+        for codes, expected in (
+            ({"w01": [0], "w02": [0]}, 0),          # clean run, recycles included
+            ({"w01": [3, 3], "w02": [0]}, 1),       # crash + one bounded replacement
+            ({"w01": [-9, 0]}, 1),                  # stall kill + replacement
+            ({"w01": [-15], "w02": [-15]}, 0),      # SIGTERM forwarding, no replacement
+            ({"w01": [1, 1, 1], "w02": [0]}, 2),    # both bounded restarts spent
+            ({f"w{n:02d}": [3, 3, 3] if n <= 2 else [0] for n in range(1, 13)}, 4),
+            # A label with no accounted life contributes nothing to the SUM; whether
+            # such a ledger may be published as a number at all is decided one level
+            # up, in read_pool_replacements (see the two tests below).
+            ({"w01": []}, 0),
+        ):
+            with self.subTest(codes=codes):
+                self.assertEqual(pool.pool_replacements(codes), expected)
+
+    def test_no_ledger_reports_null_rather_than_a_zero_that_reads_as_healthy(self):
+        # Every non-pool path (--engine-workers 2/3, the resolver job), an empty delta
+        # run, and a master killed before its finally block. `0` would claim the pool
+        # replaced nobody; `null` says nobody counted.
+        self.write_work()
+        line = pool.annotate(self.work, self.ledger)  # never created
+        value = contract.load(self.work)
+        self.assertIn("pool_workers_replaced", value)
+        self.assertIsNone(value["pool_workers_replaced"])
+        self.assertIn("pool_workers_replaced=null", line)
+        self.assertIn("no ledger", line)
+        self.assertNotIn("::warning::", line)
+        contract.validate(value, require_pool_accounting=True)
+
+    def test_an_unusable_ledger_warns_and_never_fails_the_publish(self):
+        # run_pool writes the ledger best-effort (`except OSError: pass`) in a finally
+        # block a SIGKILL can cut in half. A telemetry annotation must never be the
+        # reason a successful relink does not publish.
+        for raw in ("", "not json", "null", "[]", "{}", '{"w01":2}',
+                    '{"w01":[true]}', '{"w01":["3"]}', '{"w01":[0],'):
+            with self.subTest(raw=raw):
+                self.write_work()
+                self.ledger.write_text(raw, encoding="utf-8")
+                line = pool.annotate(self.work, self.ledger)
+                self.assertTrue(line.startswith("::warning::"), line)
+                self.assertIn("pool_workers_replaced=null", line)
+                value = contract.load(self.work)
+                self.assertIsNone(value["pool_workers_replaced"])
+                contract.validate(value, require_pool_accounting=True)
+
+    def test_one_master_publishes_the_honest_number(self):
+        # workers_replaced == 0 is the ONLY state in which the ledger on disk is the
+        # only master's, so it is the only state in which its number may be published.
+        self.write_work(recovery(workers_replaced=0))
+        line = pool.annotate(self.work, self.write_ledger({"w01": [3, 3], "w02": [0]}))
+        value = contract.load(self.work)
+        self.assertEqual(value["pool_workers_replaced"], 1)
+        self.assertIn("pool_workers_replaced=1", line)
+        self.assertNotIn("::warning::", line)
+        contract.validate(value, require_pool_accounting=True)
+
+    def test_a_replaced_master_means_a_truncated_ledger_so_the_count_is_unknown(self):
+        # run_pool writes <run>/logs/pool-exit-codes.json with mode "w" at a fixed path,
+        # and the driver replaces the pool master up to --engine-restart-limit times
+        # (relink.yml passes 2) with the SAME --run-dir. The surviving ledger is the
+        # last master's; the children an earlier master replaced are gone. Publishing
+        # the survivor's number would report 0 for a run that really replaced workers.
+        for replaced in (1, 2):
+            with self.subTest(workers_replaced=replaced):
+                self.write_work(recovery(run_id=34021656701, run_attempt=1,
+                                         workers_replaced=replaced))
+                line = pool.annotate(self.work, self.write_ledger({"w01": [0], "w02": [0]}))
+                value = contract.load(self.work)
+                self.assertIsNone(value["pool_workers_replaced"])
+                self.assertTrue(line.startswith("::warning::"), line)
+                self.assertIn("pool_workers_replaced=null", line)
+                self.assertIn(f"{replaced + 1} pool masters ran", line)
+                self.assertIn("only covers the last one", line)
+                # The DRIVER's own number is untouched — it is the tell that says a
+                # second master existed at all.
+                self.assertEqual(value["workers_replaced"], replaced)
+                contract.validate(value, 34021656701, 1, True)
+
+    def test_a_work_object_without_a_usable_workers_replaced_is_unknown_not_zero(self):
+        # The annotator runs BEFORE the validator, so it can be handed an object whose
+        # workers_replaced is not an int. Then the number of masters is unknown, and
+        # unknown must not be published as a count. (The validator still kills the
+        # object one step later; this only decides what the annotation says meanwhile.)
+        # `False` is the discriminating case: it is the ONE bad value that `isinstance`
+        # would let through as a falsy "no master was replaced" and publish the ledger's
+        # number for. It pins driver_master_replacements to `type(...) is int`.
+        for bad in (None, "1", True, False, 1.0, -1):
+            with self.subTest(workers_replaced=bad):
+                self.write_work(dict(recovery(), workers_replaced=bad))
+                line = pool.annotate(self.work, self.write_ledger({"w01": [3, 3]}))
+                self.assertTrue(line.startswith("::warning::"), line)
+                self.assertIn("pool_workers_replaced=null", line)
+                self.assertIsNone(json.loads(self.work.read_text(encoding="utf-8"))
+                                  ["pool_workers_replaced"])
+
+    def test_a_ledger_that_accounted_no_worker_life_is_null_not_zero(self):
+        # `codes` is pre-seeded {label: []} and only the SUPERVISION LOOP appends; the
+        # finally drain reaps without appending. All-empty therefore means "no life was
+        # ever accounted", which is indistinguishable from a clean 12-child relink once
+        # it is published as 0 — and it is reachable with workers_replaced == 0, because
+        # the driver accepts a nonzero master without replacing it when every book
+        # already carries a done marker.
+        for codes in ({"w01": []}, {f"w{n:02d}": [] for n in range(1, 13)}):
+            with self.subTest(codes=codes):
+                self.write_work(recovery(workers_replaced=0))
+                line = pool.annotate(self.work, self.write_ledger(codes))
+                value = contract.load(self.work)
+                self.assertIsNone(value["pool_workers_replaced"])
+                self.assertTrue(line.startswith("::warning::"), line)
+                self.assertIn("recorded no worker life at all", line)
+                self.assertIn("w01", line)
+                contract.validate(value, require_pool_accounting=True)
+
+    def test_partly_empty_labels_keep_the_number_but_are_named_as_a_lower_bound(self):
+        # Some labels accounted for, some not: the sum over the accounted ones is a
+        # lower bound (an empty label hides at most one replacement, never adds one),
+        # so publish it — and name the labels, so an operator sees the undercount.
+        self.write_work(recovery(workers_replaced=0))
+        line = pool.annotate(self.work, self.write_ledger(
+            {"w01": [3, 3], "w02": [0], "w03": [], "w07": []}))
+        value = contract.load(self.work)
+        self.assertEqual(value["pool_workers_replaced"], 1)
+        self.assertIn("pool_workers_replaced=1", line)
+        self.assertIn("w03, w07 recorded no life", line)
+        self.assertIn("lower bound", line)
+        contract.validate(value, require_pool_accounting=True)
+
+    def test_the_annotation_leaves_every_other_number_alone_and_is_idempotent(self):
+        value = recovery(run_id=34021656701, run_attempt=1)
+        self.write_work(value)
+        self.write_ledger({"w01": [3, 3], "w02": [0]})
+        self.assertIn("pool_workers_replaced=1", pool.annotate(self.work, self.ledger))
+        annotated = contract.load(self.work)
+        self.assertEqual(annotated["pool_workers_replaced"], 1)
+        # workers_replaced stays the DRIVER's count. The two populations are disjoint
+        # (master replacements vs child replacements), and folding them would destroy
+        # the only number that says the whole twelve-child pool died.
+        self.assertEqual(annotated["workers_replaced"], value["workers_replaced"])
+        self.assertEqual(
+            {k: v for k, v in annotated.items() if k != "pool_workers_replaced"}, value)
+        contract.validate(annotated, 34021656701, 1, True)
+        raw = self.work.read_bytes()
+        self.assertNotIn(b"\r", raw)
+        self.assertTrue(raw.endswith(b"}\n"))
+        pool.annotate(self.work, self.ledger)
+        self.assertEqual(self.work.read_bytes(), raw)
+
+    def test_it_refuses_to_launder_a_producer_file_the_workflow_reshaped(self):
+        canonical = json.dumps(recovery(), ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"))
+        for raw in (canonical.encode(),                                    # no LF
+                    (canonical + "\r\n").encode(),                         # CRLF
+                    (canonical + "\n\n").encode(),                         # two LFs
+                    json.dumps(recovery(), sort_keys=True).encode() + b"\n",  # spaced
+                    (canonical[:-1] + ',"books_total":5127}\n').encode(),  # duplicate
+                    b'{"books_total":1}\n'):                               # not the object
+            with self.subTest(raw=raw[:48]):
+                self.work.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    pool.annotate(self.work, self.write_ledger({"w01": [0]}))
+
+    def test_the_validator_accepts_the_two_key_sets_and_nothing_else(self):
+        self.write_work()
+        contract.validate(contract.load(self.work))            # the driver's key set
+        pool.annotate(self.work, self.write_ledger({"w01": [0], "w02": [0]}))
+        annotated = contract.load(self.work)                   # plus the annotation
+        contract.validate(annotated)
+        self.assertEqual(annotated["pool_workers_replaced"], 0)
+        for bad in (-1, True, "0", 1.0):
+            with self.subTest(pool_workers_replaced=bad):
+                with self.assertRaises(ValueError) as caught:
+                    contract.validate(dict(annotated, pool_workers_replaced=bad))
+                self.assertIn("pool_workers_replaced", str(caught.exception))
+        # A THIRD key set is still refused: the strictness is narrowed, not dropped.
+        self.write_work(dict(annotated, pool_children_replaced=0))
+        with self.assertRaises(ValueError) as caught:
+            contract.load(self.work)
+        self.assertIn("exact key set", str(caught.exception))
+
+    def test_the_publisher_flag_refuses_an_object_the_annotator_never_touched(self):
+        self.write_work()
+        with self.assertRaises(ValueError) as caught:
+            contract.validate(contract.load(self.work), require_pool_accounting=True)
+        self.assertIn("add_pool_replacements", str(caught.exception))
+        pool.annotate(self.work, self.ledger)
+        contract.validate(contract.load(self.work), require_pool_accounting=True)
+
+    def test_the_command_lines_behave_as_the_workflow_uses_them(self):
+        def add(ledger):
+            return subprocess.run(
+                [sys.executable, str(ROOT / "ci/add_pool_replacements.py"),
+                 str(self.work), str(ledger)], capture_output=True, text=True)
+
+        def check():
+            return subprocess.run(
+                [sys.executable, str(ROOT / "ci/validate_relink_work.py"), str(self.work),
+                 "--run-id", "34021656701", "--run-attempt", "1",
+                 "--require-pool-accounting"], capture_output=True, text=True)
+
+        self.write_work(recovery(run_id=34021656701, run_attempt=1))
+        self.assertNotEqual(check().returncode, 0)  # not annotated yet
+        added = add(self.write_ledger({"w01": [3, 3], "w02": [0]}))
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertIn("pool_workers_replaced=1", added.stdout)
+        self.assertEqual(check().returncode, 0)
+        # The non-pool paths: no ledger, still exit 0, still publishable.
+        self.write_work(recovery(run_id=34021656701, run_attempt=1))
+        missing = add(self.root / "absent.json")
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertIn("pool_workers_replaced=null", missing.stdout)
+        self.assertEqual(check().returncode, 0)
+        # A malformed work object IS fatal — that one means the schema is not what it
+        # says, which the release must never carry.
+        self.work.write_bytes(b"{}\n")
+        self.assertNotEqual(add(self.ledger).returncode, 0)
 
 
 class PublisherHandoffUnpackerTest(unittest.TestCase):

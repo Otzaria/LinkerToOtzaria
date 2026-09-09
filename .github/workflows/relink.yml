@@ -1103,6 +1103,13 @@ jobs:
           set -euo pipefail
           rm -f relink_work.json
           cp "$RUN_DIR/relink_work.json" relink_work.json
+          # The pool master replaces its own crashed and stall-killed children,
+          # and that count never reaches the driver's workers_replaced (the driver
+          # supervises one process here, the master).  Derive it from the master's
+          # own exit ledger BEFORE the validator, so the canonical-bytes guard
+          # still fires on the bytes that ship.
+          python3 ci/add_pool_replacements.py relink_work.json \
+            "$RUN_DIR/logs/pool-exit-codes.json"
           python3 ci/validate_relink_work.py relink_work.json \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
 
@@ -1520,6 +1527,13 @@ jobs:
           set -euo pipefail
           rm -f relink_work.json
           cp "$RUN_DIR/relink_work.json" relink_work.json
+          # The pool master replaces its own crashed and stall-killed children,
+          # and that count never reaches the driver's workers_replaced (the driver
+          # supervises one process here, the master).  Derive it from the master's
+          # own exit ledger BEFORE the validator, so the canonical-bytes guard
+          # still fires on the bytes that ship.
+          python3 ci/add_pool_replacements.py relink_work.json \
+            "$RUN_DIR/logs/pool-exit-codes.json"
           python3 ci/validate_relink_work.py relink_work.json \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
 
@@ -1634,7 +1648,8 @@ jobs:
             --request-id "$EXPECTED_REQUEST_ID" --parent-run-id "$EXPECTED_PARENT_RUN_ID" \
             --parent-run-attempt "$EXPECTED_PARENT_RUN_ATTEMPT"
           python3 ci/validate_relink_work.py handoff/relink_work.json \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --require-pool-accounting
       - name: Publish content-addressed release without clobber
         id: release
         shell: bash

@@ -141,8 +141,10 @@ def _pick(fields, keys):
 
 
 def _walk_number(payload, names):
-    """First numeric value stored under any of ``names``, at any depth.  amd-smi nests
-    its metrics per GPU and wraps each one in {"value": …, "unit": …}."""
+    """First numeric value stored under any of ``names``, at any depth.  amd-smi wraps
+    each metric in {"value": …, "unit": …} and nests it a few levels deep, so this is
+    fed ONE device's entry at a time — over a whole multi-GPU payload it would answer
+    for whichever device came first."""
     queue = [payload]
     while queue:
         node = queue.pop(0)
@@ -217,23 +219,58 @@ def parse_rocm_smi(stdout):
     return best
 
 
-def parse_amd_smi(stdout):
-    """amd-smi metric --json → a per-GPU list; VRAM figures are already in MB."""
-    try:
-        payload = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    util = _walk_number(payload, {"gfx_activity", "gfx_usage", "gpu_activity"})
+def _amd_smi_device(entry, index, indexed):
+    """The device name amd-smi states, else its position — never a guess."""
+    if isinstance(entry, dict):
+        gpu = entry.get("gpu")
+        if type(gpu) is int:
+            return f"gpu{gpu}"
+        if isinstance(gpu, str) and gpu.strip():
+            return gpu.strip()[:64]
+    return f"gpu{index}" if indexed else None
+
+
+def _amd_smi_entry(entry, index, indexed):
+    util = _walk_number(entry, {"gfx_activity", "gfx_usage", "gpu_activity"})
     if util is None:
         return None
     reading = {"source": "amd-smi", "util_pct": _number(util)}
-    used = _walk_number(payload, {"used_vram", "vram_used"})
-    total = _walk_number(payload, {"total_vram", "vram_total"})
+    device = _amd_smi_device(entry, index, indexed)
+    if device is not None:
+        reading["device"] = device
+    used = _walk_number(entry, {"used_vram", "vram_used"})
+    total = _walk_number(entry, {"total_vram", "vram_total"})
     if used is not None:
         reading["mem_used_mb"] = _number(used)
     if total is not None:
         reading["mem_total_mb"] = _number(total)
     return reading
+
+
+def parse_amd_smi(stdout):
+    """amd-smi metric --json → a per-GPU list; VRAM figures are already in MB.
+
+    Per device, busiest wins — the same rule parse_rocm_smi, read_sysfs_gpu and
+    parse_nvidia_smi apply.  Reading the whole payload at once answered for whichever
+    device the walk reached first, so a run saturating gpu1 beside an idle gpu0 was
+    recorded as 0% for its whole NER stage.  A payload that is not a list is treated
+    as one device, which is what the walk already did for it.
+    """
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    indexed = isinstance(payload, list)
+    best = None
+    for index, entry in enumerate(payload if indexed else [payload]):
+        if not isinstance(entry, (dict, list)):
+            continue
+        reading = _amd_smi_entry(entry, index, indexed)
+        if reading is None:
+            continue
+        if best is None or reading["util_pct"] > best["util_pct"]:
+            best = reading
+    return best
 
 
 def _sysfs_number(path):

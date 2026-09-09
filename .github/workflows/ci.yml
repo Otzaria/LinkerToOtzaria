@@ -1,0 +1,63 @@
+# The repo's only automatic check — the suite README.md documents
+# (`python3 -m unittest discover -s tests`). Until this existed nothing ran it: every
+# other workflow here is `workflow_dispatch`-only, so a PR reported no checks at all
+# and tests/test_workflow_contract.py's fingerprint-lineage guard — the one that
+# catches an engine-source change whose output-neutral migration was never
+# registered, i.e. a surprise 7,300-book relink — was enforced only by whoever
+# remembered to run it locally.
+#
+# Hosted runner ON PURPOSE, never a self-hosted label: the self-hosted host is the
+# relink machine (one GPU, a durable cross-repo lease), and a PR-triggered job there
+# would contend with a live relink. Nothing here needs it — the suite has zero
+# third-party imports (no `pip install` step at all), and the heavy-sounding modules
+# drive stubs: a fake mongod daemon, recorded rocm-smi/amd-smi output, tiny forked
+# children. Measured: ~31 s, green with GPU tools masked and PATH stripped to
+# /usr/bin:/bin.
+name: CI · Python test suite (not a build stage)
+run-name: "ci ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || github.ref_name }}"
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Its own group — NEVER the `linker-relink` one: a cancel here must not be able to
+# reach an hours-long relink. A superseded push/PR update is worth cancelling; only
+# the tip of a branch is interesting for a check.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # A real git checkout: the lineage guard reads HEAD's blobs with `git show`
+      # and skips itself when there is no `.git`. Default LF checkout — do not set
+      # core.autocrlf, the fingerprint recipe hashes the LF blobs.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Pin the interpreter setup_stack.sh demands on the runner (python3.12); the
+      # suite must not silently drift onto whatever a future ubuntu-latest ships.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run the Python test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Log outside the workspace: the checkout is what several tests read.
+          LOG="$RUNNER_TEMP/unittest.log"
+          status=0
+          python3 -m unittest discover -s tests -v 2>&1 | tee "$LOG" || status=$?
+          # unittest's own verdict, promoted out of the ~300-line transcript — on a
+          # red run too, which is exactly when the job summary is worth reading.
+          grep -E '^(Ran [0-9]+ test|OK|FAILED)' "$LOG" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit "$status"

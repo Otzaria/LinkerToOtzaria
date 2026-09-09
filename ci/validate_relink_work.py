@@ -19,6 +19,13 @@ the manifest also holds, and therefore one that must not be able to drift.  It c
 every CI call site passes --run-id/--run-attempt, which requires these fields to be
 present and EQUAL to the same two coordinates ci/validate_relink_manifest.py checks the
 manifest against, in the same publisher step, over the same handoff bytes.
+
+WHAT THE ci/ LAYER ADDS.  Schema 1 has exactly two accepted key sets: the driver's, and
+the driver's plus pool_workers_replaced, which ci/add_pool_replacements.py derives at
+the producer from the pool master's own exit ledger (see POOL_KEY).  The schema version
+is NOT bumped for it: src/incremental.py owns WORK_SCHEMA_VERSION, and a ci/ script
+rewriting that field would make two producers the authority on one number.  The
+publisher passes --require-pool-accounting instead, which pins the released form.
 """
 
 from __future__ import annotations
@@ -38,6 +45,15 @@ KEYS = set(COUNTERS) | {
     "schema_version", "checkpoint_source", "checkpoint_source_run_id",
     "checkpoint_source_attempt", "generated_at", "relink_run_id", "relink_run_attempt",
 }
+# The one key the driver does not write.  workers_replaced counts the DRIVER's bounded
+# replacements, and on the --engine-pool path the driver supervises one process (the
+# master); the master's own replacement of a crashed or stall-killed child never
+# reaches it.  ci/add_pool_replacements.py derives that count at the producer from
+# <run_dir>/logs/pool-exit-codes.json and adds it here, so schema 1 has exactly TWO
+# accepted key sets: the driver's, and the driver's plus this one.  Null means the
+# pool's own exit ledger was not available (every non-pool path, and an unusable
+# file); it is never silently 0, which would read as "the pool replaced nobody".
+POOL_KEY = "pool_workers_replaced"
 # ci/local_checkpoint_cache.py's own name for a restored checkpoint. Bounded and
 # printable for the same reason engine_fingerprint is in the manifest validator: this
 # string reaches a workflow log and an operator's terminal.
@@ -62,13 +78,14 @@ def load(path: Path) -> dict:
     canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     if raw != canonical:
         raise ValueError("relink_work is not canonical JSON with one trailing LF")
-    if not isinstance(value, dict) or set(value) != KEYS:
+    if not isinstance(value, dict) or set(value) not in (KEYS, KEYS | {POOL_KEY}):
         raise ValueError("relink_work does not match schema-v1 exact key set")
     return value
 
 
 def validate(value: dict, expect_run_id: int | None = None,
-             expect_run_attempt: int | None = None) -> None:
+             expect_run_attempt: int | None = None,
+             require_pool_accounting: bool = False) -> None:
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise ValueError("unsupported relink_work schema")
     # `type(...) is not int` rather than isinstance: True is an int and would sail
@@ -111,6 +128,14 @@ def validate(value: dict, expect_run_id: int | None = None,
                                     ("relink_run_attempt", relink_run_attempt, expect_run_attempt)):
         if expected is not None and actual != expected:
             raise ValueError(f"{field} is {actual!r}, expected {expected!r}")
+    pool = value.get(POOL_KEY)
+    if pool is not None and (type(pool) is not int or pool < 0):
+        raise ValueError(f"invalid {POOL_KEY}")
+    # Demanded wherever a RELEASE is being made: the annotation is added at the
+    # producer, so a producer path that lost the step must not publish an asset that
+    # is silently missing the pool's own accounting.
+    if require_pool_accounting and POOL_KEY not in value:
+        raise ValueError(f"{POOL_KEY} is absent; ci/add_pool_replacements.py did not run")
 
 
 def main() -> int:
@@ -120,8 +145,11 @@ def main() -> int:
     # CI call site, where they are exactly the coordinates the manifest is held to.
     parser.add_argument("--run-id", type=int, default=None)
     parser.add_argument("--run-attempt", type=int, default=None)
+    parser.add_argument("--require-pool-accounting", action="store_true",
+                        help="the object must carry pool_workers_replaced (null allowed)")
     args = parser.parse_args()
-    validate(load(args.work), args.run_id, args.run_attempt)
+    validate(load(args.work), args.run_id, args.run_attempt,
+             args.require_pool_accounting)
     return 0
 
 

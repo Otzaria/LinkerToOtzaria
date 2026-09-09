@@ -4,5 +4,21 @@
 *.json  text eol=lf
 *.py    text eol=lf
 
+# Everything else the runner hashes or executes must check out with the SAME bytes
+# on Windows. Uncovered, core.autocrlf=true made these CRLF in the worktree: that
+# broke ci/runtime-lock/sefaria.txt against its committed sha256 and made every
+# `.sh` unrunnable under bash (`set: pipefail\r: invalid option name`) — five
+# phantom local failures against blobs that were correct all along. The blobs are
+# already LF (`git ls-files --eol` reports i/lf for every file matched here), so
+# this renormalises nothing and moves no fingerprint component; it fixes only what
+# a Windows checkout writes.
+*.sh    text eol=lf
+*.txt   text eol=lf
+*.patch text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.conf  text eol=lf
+
 # The packed release artifact is binary (produced by the driver / CI, not committed raw).
 *.zst   binary
