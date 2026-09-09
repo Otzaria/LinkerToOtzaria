@@ -53,6 +53,28 @@ tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
   | zstd "${ZSTD_TUNING[@]}" -T"$WORKERS" -o "$OUT" -f
 
 SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
-echo "packed $OUT ($(du -h "$OUT" | cut -f1)) sha256=$SHA"
-
 printf '%s\n' "$SHA" > linker_links.zst.sha256
+
+# Copy the finished payload OUT of the run-scoped workspace before announcing it. Run
+# 33994031370 was cancelled 0.006 s after this script printed its sha256: every publish
+# step was skipped and relink.yml's always() cleanup deleted the payload one second
+# later, discarding eight verified hours. Preserving here rather than in that cleanup
+# also survives a runner that never reaches its always() steps.
+# Content-addressed, and NOTHING reads this directory automatically — adoption still
+# goes through the fingerprint-checked NER/completed-book checkpoints — so a payload
+# left here can never be picked up by a run with a different engine fingerprint. The
+# cleanup step drops the copy again once the publisher handoff really shipped these bytes.
+# Same durable root the rest of the stack caches under (ci/setup_stack.sh), never the
+# run-scoped workspace: the next checkout would git-clean an untracked dir there.
+# Costs ~123 MB per run that packs without publishing and is NOT auto-reaped -- an
+# automatic reaper is precisely the mechanism that lost 33994031370. Two runs packing
+# identical bytes share one directory; reap by hand after a recovery cycle.
+PRESERVED="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/unpublished-payloads/$SHA"
+PRESERVED_TMP="$PRESERVED/$OUT.tmp-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}"
+mkdir -p "$PRESERVED"
+cp "$OUT" "$PRESERVED_TMP"
+[ "$(sha256sum "$PRESERVED_TMP" | cut -d' ' -f1)" = "$SHA" ]
+mv -f "$PRESERVED_TMP" "$PRESERVED/$OUT"
+printf '%s\n' "$SHA" > "$PRESERVED/linker_links.zst.sha256"
+
+echo "payload packed: $PRESERVED/$OUT sha256=$SHA (preserved for recovery)"

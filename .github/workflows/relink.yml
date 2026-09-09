@@ -249,14 +249,19 @@ jobs:
     # itself stops at 60 minutes so packaging + release upload retain real headroom.
     # Its per-book checkpoints are published on that bounded failure and an exact rerun
     # of this databaseId resumes them instead of spending the next session from zero.
-    # An explicitly authorized local full baseline can exceed the ordinary
-    # eight-hour serial-child ceiling even on the GPU runner. Give that one
-    # narrowly gated migration path 24 hours; ordinary weekly deltas retain
-    # the shorter ceiling so a wedged run still fails closed promptly.
-    # Server-only legacy/manual runs keep their existing serial/full ceilings.
+    # target=local gets 24 hours UNCONDITIONALLY, not only under allow_full_relink.
+    # 480 is the CPU-RESOLVE budget of the split topology (90m Kaggle NER + 480m Oracle
+    # resolve, see the `resolve` job); on local ONE job does both, and how much work it
+    # faces is decided by the snapshot, not by allow_full_relink — that input only
+    # authorizes a baseline migration in recovery_mode. Run 33994031370 was an ordinary
+    # parented local run that legitimately needed 6h16m GPU NER + 1h38m resolve for
+    # 5,127 changed books; it was cancelled at 480.35 min, 12 s after packing a complete
+    # payload. 1440 cannot outlive the parent either: the SeforimLibrary build's own
+    # ceiling is 1440 and its wait loop has no shorter cap, so the parent still fails
+    # closed first. Server-only legacy/manual runs keep their existing serial/full ceilings.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
     # this timeout remains the coarse backstop for failures outside the engine loop.
-    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.target == 'local' && inputs.allow_full_relink && 1440 || (inputs.library_run_id != '' && 480 || 7200)) }}
+    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.target == 'local' && 1440 || (inputs.library_run_id != '' && 480 || 7200)) }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
@@ -517,15 +522,18 @@ jobs:
             }
             source_json="$RUNNER_TEMP/local-checkpoint-source.json"
             gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$LOCAL_CHECKPOINT_SOURCE_RUN_ID/attempts/$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" > "$source_json"
-            expected_title="relink-recovery request=$RELINK_REQUEST_ID parent=$LIBRARY_RUN_ID:$PARENT_RUN_ATTEMPT"
-            jq -e --argjson attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" \
-              --arg title "$expected_title" --arg head_sha "$GITHUB_SHA" '
-              .status == "completed" and (.conclusion == "cancelled" or .conclusion == "failure") and
-              .event == "workflow_dispatch" and .path == ".github/workflows/relink.yml" and
-              .run_attempt == $attempt and .display_title == $title and .head_sha == $head_sha
-            ' "$source_json" >/dev/null || {
-              echo "::error::local checkpoint source is not the exact terminal recovery attempt at this Linker commit"; exit 1;
-            }
+            # The FIRST recovery of a cycle can only chain from the original
+            # "relink request=…" attempt; later ones chain from the previous
+            # "relink-recovery request=…" attempt. Either way the source must be the
+            # same request, the same parent attempt, terminal, and at THIS Linker
+            # commit — the validator names every condition it rejects on.
+            python3 ci/validate_local_checkpoint_source.py "$source_json" \
+              --run-id "$LOCAL_CHECKPOINT_SOURCE_RUN_ID" \
+              --run-attempt "$LOCAL_CHECKPOINT_SOURCE_RUN_ATTEMPT" \
+              --request-id "$RELINK_REQUEST_ID" \
+              --parent-run-id "$LIBRARY_RUN_ID" \
+              --parent-run-attempt "$PARENT_RUN_ATTEMPT" \
+              --head-sha "$GITHUB_SHA"
           fi
           # A serial relink MUST pin the Sefaria vintage: the changelog (target_ref
           # rewrites) and recorded lineage have to match the exact export the build was
@@ -1083,6 +1091,7 @@ jobs:
       # Transfer compute output and baseline delta to a short ubuntu publisher without
       # consuming Actions artifact quota. The PAT publishes an immutable pre-release.
       - name: Publish verified publisher handoff release
+        id: publish_handoff
         if: ${{ !inputs.dry_run && inputs.target != 'kaggle' && steps.compute.outcome == 'success' }}
         run: |
           set -euo pipefail
@@ -1177,9 +1186,36 @@ jobs:
           --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT"
           --request-id "${{ inputs.relink_request_id }}"
 
+      # The workspace copies still go — the next run's pack would clobber them anyway.
+      # What must NOT go is ci/pack_and_publish.sh's content-addressed copy outside the
+      # workspace: this step is always(), so on a cancel it runs while every publish step
+      # is skipped, which is exactly how run 33994031370 lost a complete payload one
+      # second after packing it. Drop that copy only when the handoff really shipped the
+      # bytes; otherwise keep it, add the manifest that identifies it, and say where it is.
       - name: Clean run-scoped inputs and payload (workspace persists on self-hosted)
         if: always()
-        run: rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
+        env:
+          HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          preserved=""
+          if [ -f linker_links.zst.sha256 ]; then
+            sha="$(tr -d '\r\n' < linker_links.zst.sha256)"
+            if printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              preserved="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/unpublished-payloads/$sha"
+            fi
+          fi
+          if [ -d "$preserved" ]; then
+            if [ "$HANDOFF_PUBLISHED" = true ]; then
+              rm -rf "$preserved"
+            else
+              if [ -f relink_manifest.json ]; then
+                cp -f relink_manifest.json "$preserved/relink_manifest.json"
+              fi
+              echo "unpublished payload retained for recovery: $preserved"
+            fi
+          fi
+          rm -rf inputs artifacts line-baseline linker_links.zst linker_links.zst.sha256 relink_manifest.json raw_ner_handoff.tar.zst raw_ner_handoff.tar.zst.sha256 raw_ner_checkpoint.tar.zst raw_ner_checkpoint.tar.zst.sha256 "$RUN_DIR/ner-handoff" "$RUN_DIR/ner-plan.json"
 
   resolve:
     name: Resolve raw NER on the durable CPU host
@@ -1433,6 +1469,7 @@ jobs:
           PY
 
       - name: Publish verified publisher handoff release
+        id: publish_handoff
         if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -1443,9 +1480,33 @@ jobs:
             "Immutable Linker publisher handoff ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             "$GITHUB_SHA" publisher_handoff.tar publisher_handoff.tar.sha256
 
+      # Same rule as the compute job: the payload copy ci/pack_and_publish.sh preserved
+      # outside the workspace survives a cancel that skipped the publish, and is dropped
+      # only once the handoff really shipped those bytes.
       - name: Clean resolver workspace
         if: always()
-        run: rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
+        env:
+          HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          preserved=""
+          if [ -f linker_links.zst.sha256 ]; then
+            sha="$(tr -d '\r\n' < linker_links.zst.sha256)"
+            if printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              preserved="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}/unpublished-payloads/$sha"
+            fi
+          fi
+          if [ -d "$preserved" ]; then
+            if [ "$HANDOFF_PUBLISHED" = true ]; then
+              rm -rf "$preserved"
+            else
+              if [ -f relink_manifest.json ]; then
+                cp -f relink_manifest.json "$preserved/relink_manifest.json"
+              fi
+              echo "unpublished payload retained for recovery: $preserved"
+            fi
+          fi
+          rm -rf inputs artifacts line-baseline raw-ner-download linker_links.zst linker_links.zst.sha256 relink_manifest.json "$RUN_DIR" "$RUNNER_TEMP/ner"
 
   publish:
     name: Verify and publish immutable linker payload

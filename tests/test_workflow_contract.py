@@ -252,7 +252,19 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         # target=local adopts its durable raw-NER bundle under an attested fingerprint.
         self.assertIn("adopting the durable local raw-NER bundle under attested engine fingerprint", workflow)
         self.assertIn('if [ -n "${NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT:-}" ]; then', workflow)
-        self.assertIn(".head_sha == $head_sha", workflow)
+        # The checkpoint-source guard lives in ci/ so every one of its conditions is
+        # unit-tested (tests/test_local_checkpoint_source.py). The workflow must still
+        # hand it the exact coordinates — above all THIS Linker commit.
+        self.assertIn('python3 ci/validate_local_checkpoint_source.py "$source_json"', workflow)
+        self.assertIn('--request-id "$RELINK_REQUEST_ID"', workflow)
+        self.assertIn('--parent-run-attempt "$PARENT_RUN_ATTEMPT"', workflow)
+        self.assertIn('--head-sha "$GITHUB_SHA"', workflow)
+        guard = (
+            Path(__file__).parents[1] / "ci/validate_local_checkpoint_source.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('TERMINAL_CONCLUSIONS = ("cancelled", "failure")', guard)
+        self.assertIn('TITLE_PREFIXES = ("relink", "relink-recovery")', guard)
+        self.assertIn('source.get("head_sha") != args.head_sha', guard)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
         self.assertIn("--engine-workers 12", workflow)
@@ -269,10 +281,9 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("export OMP_NUM_THREADS=1", workflow)
         self.assertIn("export OPENBLAS_NUM_THREADS=1", workflow)
         self.assertIn("ARGS+=(--engine-restart-limit 2)", workflow)
-        self.assertIn(
-            "inputs.target == 'local' && inputs.allow_full_relink && 1440",
-            workflow,
-        )
+        # allow_full_relink authorizes a baseline MIGRATION; it no longer decides the
+        # job ceiling — see test_parented_local_run_keeps_the_full_ceiling.
+        self.assertNotIn("inputs.allow_full_relink && 1440", workflow)
         self.assertIn("LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)
         self.assertIn("LINKER_NER_MICROBATCH_TEXTS", workflow)
@@ -305,6 +316,70 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("Pack resumable NER checkpoint after bounded failure", workflow)
         self.assertIn("Restore exact prior-attempt NER checkpoint", workflow)
         self.assertIn("Kaggle now performs NER only", workflow)
+
+    def test_parented_local_run_keeps_the_full_ceiling(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        # A serial (parented) local run must NOT inherit the 480-minute CPU-resolve
+        # ceiling of the split topology: on local one job pays GPU NER *and* resolve.
+        # Run 33994031370 packed a complete payload 12 s after being cancelled at 480 min.
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || "
+            "(inputs.target == 'local' && 1440 || "
+            "(inputs.library_run_id != '' && 480 || 7200)) }}",
+            workflow,
+        )
+        # The CPU-resolve job never carries the GPU stage, so it keeps 480/7200.
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}",
+            workflow,
+        )
+
+    def test_unpublished_payload_survives_the_always_cleanup(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        packer = (root / "ci/pack_and_publish.sh").read_text(encoding="utf-8")
+
+        # The payload leaves the run-scoped workspace BEFORE it is announced, so a
+        # cancel between packing and publishing cannot take it with it.
+        self.assertIn(
+            'PRESERVED="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}'
+            "/unpublished-payloads/$SHA\"",
+            packer,
+        )
+        self.assertIn('mv -f "$PRESERVED_TMP" "$PRESERVED/$OUT"', packer)
+        # A workspace fallback would be git-cleaned by the next run's checkout.
+        self.assertNotIn("{LINKER_CACHE_DIR:-$PWD}", packer)
+        self.assertNotIn("{LINKER_CACHE_DIR:-$PWD}", workflow)
+        # Exactly one line about the packed payload -- not a firehose.
+        self.assertEqual(
+            packer.count('echo "payload packed: $PRESERVED/$OUT sha256=$SHA (preserved for recovery)"'),
+            1,
+        )
+        self.assertEqual(packer.count("payload packed:"), 1)
+
+        # Both always() cleanups drop that copy only once the handoff really shipped
+        # the bytes; otherwise they keep it and say where it is.
+        self.assertEqual(workflow.count("id: publish_handoff"), 2)
+        self.assertEqual(
+            workflow.count("HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}"),
+            2,
+        )
+        self.assertEqual(workflow.count('if [ "$HANDOFF_PUBLISHED" = true ]; then'), 2)
+        self.assertEqual(workflow.count('rm -rf "$preserved"'), 2)
+        self.assertEqual(workflow.count("unpublished payload retained for recovery:"), 2)
+
+        # Nothing adopts the preserved directory automatically: the artifact store is
+        # still restored from a PUBLISHED release, so a payload kept here can never be
+        # picked up by a run with a different engine fingerprint.
+        self.assertEqual(workflow.count("unpublished-payloads"), 2)
+        for relative in ("ci/restore_artifact_store.sh", "src/incremental.py"):
+            with self.subTest(consumer=relative):
+                self.assertNotIn(
+                    "unpublished-payloads",
+                    (root / relative).read_text(encoding="utf-8"),
+                )
 
     def test_line_baseline_seed_never_starts_the_linker(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
