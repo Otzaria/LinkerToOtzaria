@@ -248,21 +248,28 @@ def _amd_smi_entry(entry, index, indexed):
 
 
 def parse_amd_smi(stdout):
-    """amd-smi metric --json → a per-GPU list; VRAM figures are already in MB.
+    """amd-smi metric --json → a per-GPU list or ``{"gpu_data": [...]}`` object.
 
     Per device, busiest wins — the same rule parse_rocm_smi, read_sysfs_gpu and
     parse_nvidia_smi apply.  Reading the whole payload at once answered for whichever
     device the walk reached first, so a run saturating gpu1 beside an idle gpu0 was
     recorded as 0% for its whole NER stage.  A payload that is not a list is treated
-    as one device, which is what the walk already did for it.
+    as one device, which is what the walk already did for it.  Recent amd-smi
+    releases wrap the same entries in ``gpu_data``; unwrap that list before choosing
+    the busiest entry rather than walking the enclosing object as one fake device.
     """
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
         return None
-    indexed = isinstance(payload, list)
+    if isinstance(payload, dict) and isinstance(payload.get("gpu_data"), list):
+        entries = payload["gpu_data"]
+        indexed = True
+    else:
+        entries = payload if isinstance(payload, list) else [payload]
+        indexed = isinstance(payload, list)
     best = None
-    for index, entry in enumerate(payload if indexed else [payload]):
+    for index, entry in enumerate(entries):
         if not isinstance(entry, (dict, list)):
             continue
         reading = _amd_smi_entry(entry, index, indexed)

@@ -35,8 +35,12 @@ script refuses to dress either of them up as one:
   tell is co-published: `workers_replaced` IS the driver's count of master
   replacements, so `workers_replaced != 0` means exactly "a later master overwrote an
   earlier ledger".  In that case the honest answer is `null`, not the last master's
-  number.  The real fix — one ledger file per master — lives in src/link_books.py,
-  which is fingerprinted; this is the annotation-side half of it.
+  number.  We deliberately retain that ``null`` rather than add an incomplete
+  per-master ledger here: a master can be SIGKILLed before its ``finally`` writes any
+  file, so filenames alone cannot prove a complete total.  Exact multi-master
+  accounting needs a separately-versioned launch manifest plus atomic per-life
+  journal writes; until that protocol exists, this producer must not overstate a
+  partial sum.
 * NO WORKER LIFE WAS EVER ACCOUNTED.  `codes` is pre-seeded `{label: []}` and a code is
   appended only where the SUPERVISION LOOP reaps a life (or a fork fails); the
   `finally` drain reaps WITHOUT appending.  So an empty list means "no life of this

@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 import unittest
 
+import yaml
+
 
 # The two fingerprint components that a source change in THIS repo can move.
 # Everything else in the fingerprint (dump, he_ref_ner, he_subref_ner, sefaria,
@@ -55,6 +57,68 @@ def substitute_component(fingerprint: str, key: str, value: str) -> str:
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_relink_timeout_expressions_match_the_shared_contract(self):
+        """Parse GitHub YAML and bind every shared timeout to the contract bytes.
+
+        The 7,200-minute standalone ceiling is intentionally outside the
+        cross-repository wait contract: no SeforimLibrary build waits for it.
+        """
+        root = Path(__file__).parents[1]
+        contract_path = root / ".github/contracts/linker_relink_timeouts_v1.json"
+        contract_bytes = contract_path.read_bytes()
+        contract = json.loads(contract_bytes)
+        self.assertEqual(
+            hashlib.sha256(contract_bytes).hexdigest(),
+            "a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f",
+        )
+        self.assertEqual(contract["contractVersion"], 1)
+        self.assertEqual(contract["workflow"], "relink.yml")
+
+        # BaseLoader keeps GitHub's unquoted `on` key as a string instead of
+        # applying YAML 1.1's legacy boolean coercion.
+        workflow = yaml.load(
+            (root / ".github/workflows/relink.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        dispatch = workflow["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(dispatch["wait_contract_sha256"]["type"], "string")
+        self.assertEqual(
+            dispatch["wait_contract_sha256"]["default"],
+            hashlib.sha256(contract_bytes).hexdigest(),
+        )
+
+        timeouts = contract["timeouts"]
+        self.assertEqual(
+            workflow["jobs"]["relink"]["timeout-minutes"],
+            "${{ inputs.target == 'kaggle' && "
+            f"{timeouts['relink']['kaggle']} || "
+            "(inputs.target == 'local' && "
+            f"{timeouts['relink']['local']} || "
+            "(inputs.library_run_id != '' && "
+            f"{timeouts['relink']['server']} || 7200)) }}}}",
+        )
+        self.assertEqual(
+            workflow["jobs"]["resolve"]["timeout-minutes"],
+            "${{ inputs.library_run_id != '' && "
+            f"{timeouts['resolve']} || 7200 }}}}",
+        )
+        self.assertEqual(
+            workflow["jobs"]["publish"]["timeout-minutes"],
+            str(timeouts["publish"]),
+        )
+
+        intake = yaml.load(
+            (root / ".github/workflows/kaggle-relink.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        intake_input = intake["on"]["workflow_dispatch"]["inputs"][
+            "wait_contract_sha256"
+        ]
+        self.assertEqual(intake_input["type"], "string")
+        self.assertEqual(
+            intake_input["default"], hashlib.sha256(contract_bytes).hexdigest()
+        )
+
     def test_local_rocm_target_uses_dedicated_runner_and_persistent_venv(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")

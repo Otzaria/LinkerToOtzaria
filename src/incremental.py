@@ -1235,7 +1235,8 @@ def install_terminate_handler():
     signal.signal(signal.SIGINT, _raise)
 
 
-def _alive_worker_count(heartbeat_dir: str, exclude: set, stall: float, now: float) -> int:
+def _alive_worker_count(heartbeat_dir: str, exclude: set, stall: float, now: float,
+                        labels: set | None = None) -> int:
     """Resolvers whose heartbeat is fresh, judged on the SAME files the supervisor uses.
 
     In pool mode this driver spawns one master but the forked children each keep their
@@ -1249,7 +1250,7 @@ def _alive_worker_count(heartbeat_dir: str, exclude: set, stall: float, now: flo
         return 0
     alive = 0
     for name in names:
-        if name in exclude:
+        if name in exclude or (labels is not None and name not in labels):
             continue
         try:
             if now - os.path.getmtime(os.path.join(heartbeat_dir, name)) <= stall:
@@ -1257,6 +1258,154 @@ def _alive_worker_count(heartbeat_dir: str, exclude: set, stall: float, now: flo
         except OSError:
             continue
     return alive
+
+
+def _heartbeat_namespace() -> str:
+    """A run-private heartbeat directory name, safe to pass to the engine.
+
+    A durable ``--run-dir`` can retain fresh-looking heartbeat files from an earlier
+    invocation.  Giving each driver invocation its own unguessable subdirectory means
+    a progress line can only count the workers this invocation started.
+    """
+    import secrets
+    return secrets.token_hex(16)
+
+
+def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int], list[int]]:
+    """Return live token-bearing and unverified members of this session/group.
+
+    ``start_new_session`` makes the Popen leader both PGID and SID.  If that leader is
+    SIGKILLed, its forked pool children keep both numbers even though ``Popen.poll()``
+    says the leader is gone.  The inherited random environment marker binds those
+    survivors to this exact spawn.  A same-number group without the marker is never
+    signalled: that is the PID/PGID-reuse safety boundary.
+    """
+    owned, unverified = [], []
+    marker = f"LINKER_ENGINE_SESSION_TOKEN={token}".encode()
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        # On a host without /proc, a non-existent group is harmless, but an existing
+        # leaderless group cannot be attributed safely.  The one safe fallback is an
+        # unreaped Popen leader we just created: its PID cannot yet be reused and
+        # start_new_session made it the sole session/group leader.  Do not turn the
+        # leaderless case into a test-only no-op: callers refuse replacement for it.
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return owned, unverified
+        except PermissionError:
+            return owned, [pgid]
+        # Do not call poll() here: while our child is unreaped its PID cannot be
+        # reused, so ``returncode is None`` is the safe identity binding.  Calling
+        # poll would reap a just-killed leader and erase that binding before its
+        # descendants had been drained.
+        if leader is not None and leader.returncode is None:
+            return [pgid], unverified
+        return owned, [pgid]
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(os.path.join(entry.path, "stat"), encoding="utf-8") as stream:
+                    tail = stream.read().rsplit(")", 1)[1].strip().split()
+                # tail starts at proc field 3: state, ppid, pgrp, session, ...
+                if tail[0] == "Z" or int(tail[2]) != pgid or int(tail[3]) != pgid:
+                    continue
+                if os.stat(entry.path).st_uid != os.geteuid():
+                    unverified.append(int(entry.name))
+                    continue
+                with open(os.path.join(entry.path, "environ"), "rb") as stream:
+                    environment = stream.read().split(b"\0")
+                if marker in environment:
+                    owned.append(int(entry.name))
+                else:
+                    unverified.append(int(entry.name))
+            except (FileNotFoundError, ProcessLookupError):
+                # A member that vanished during inspection needs no signal.
+                continue
+            except (PermissionError, OSError, IndexError, ValueError):
+                # We already selected this entry's session/group; if it is still
+                # visible but cannot be authenticated, signalling the whole PGID
+                # would make a PID/PGID reuse mistake possible.
+                unverified.append(int(entry.name))
+    return owned, unverified
+
+
+def _terminate_owned_group(group: dict, grace: float, log) -> bool:
+    """Stop and wait for one registered process group without trusting Popen.poll().
+
+    The return value is true only after every live process in the recorded group has
+    disappeared.  Refusing an unverified group is intentional: replacement must not
+    start beside workers whose ownership cannot be proved.
+    """
+    import signal
+    import subprocess
+    import time
+
+    pgid, token = group["pgid"], group["token"]
+
+    def members():
+        owned, unverified = _process_group_members(pgid, token, group.get("proc"))
+        if unverified:
+            raise RuntimeError(
+                f"refusing to signal process group {pgid}: its session contains "
+                f"unverified member(s) {unverified}"
+            )
+        return owned
+
+    live = members()
+    if not live:
+        return True
+    if not os.path.isdir("/proc"):
+        # The authenticated leader has not been reaped yet, so its PGID cannot be
+        # reused while TERM/KILL is sent.  Once wait() reaps it, only a missing group
+        # is success; an extant leaderless group is deliberately reported unsafe.
+        leader = group.get("proc")
+        if leader is None:
+            raise RuntimeError(f"cannot authenticate process group {pgid} without /proc")
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        try:
+            leader.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                return True
+            try:
+                leader.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return False
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return not members()
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not members():
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return not members()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not members():
+            return True
+        time.sleep(0.1)
+    live = members()
+    log(f"process group {pgid} survived SIGKILL: members {live}")
+    return False
 
 
 def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
@@ -1323,8 +1472,29 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         worker_labels = ["pool"]
     else:
         worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
-    heartbeat_dir = os.path.join(os.path.abspath(args.run_dir), "worker-heartbeats")
+    # Heartbeats are advisory liveness, but their count is operator-facing.  A durable
+    # run directory may still hold fresh mtimes from an interrupted older invocation;
+    # this private namespace makes those files invisible to this invocation.
+    heartbeat_namespace = _heartbeat_namespace()
+    env["LINKER_HEARTBEAT_NAMESPACE"] = heartbeat_namespace
+    heartbeat_dir = os.path.join(
+        os.path.abspath(args.run_dir), "worker-heartbeats", heartbeat_namespace
+    )
     os.makedirs(heartbeat_dir, exist_ok=True)
+    # Remove the legacy flat names for the labels we are about to supervise.  The
+    # private namespace is the correctness boundary; this keeps an interrupted older
+    # invocation from misleading people inspecting the directory by hand as well.
+    legacy_heartbeat_dir = os.path.dirname(heartbeat_dir)
+    legacy_heartbeat_labels = set(worker_labels)
+    if pool:
+        legacy_heartbeat_labels.update(
+            f"w{number:02d}" for number in range(1, workers + 1)
+        )
+    for label in legacy_heartbeat_labels:
+        try:
+            os.remove(os.path.join(legacy_heartbeat_dir, label))
+        except FileNotFoundError:
+            pass
 
     # The exact done ledger lets the supervisor avoid a pointless replacement if a
     # worker happens to die after peers already completed the requested plan.  Keep
@@ -1356,6 +1526,8 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         )
 
     procs = []
+    owned_groups = []
+    groups_by_proc = {}
     scope_paths = []
     active = {}
     spawned_at = {}
@@ -1365,22 +1537,28 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "ci", "process_scope.py",
     )
+    term_grace = float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
 
     def spawn_worker(label):
-        try:
-            os.remove(os.path.join(heartbeat_dir, label))
-        except FileNotFoundError:
-            pass
+        import secrets
+
+        session_token = secrets.token_hex(32)
+        proc_env = dict(env, LINKER_ENGINE_SESSION_TOKEN=session_token)
         proc = subprocess.Popen(
             base_cmd + ["--label", label],
             cwd=args.sef_project,
-            env=env,
+            env=proc_env,
             start_new_session=True,
             pass_fds=lease_fds,
         )
         # Record ownership immediately.  Every historical process remains in procs
         # so the final cleanup also reaps a replacement's predecessor.
         procs.append(proc)
+        group = {
+            "pgid": proc.pid, "token": session_token, "label": label, "proc": proc,
+        }
+        owned_groups.append(group)
+        groups_by_proc[id(proc)] = group
         active[label] = proc
         spawned_at[proc.pid] = time.time()
         if scope_dir:
@@ -1397,8 +1575,13 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
 
     done_dir = os.path.join(os.path.abspath(args.run_dir), "done")
     # Pool children write their own w01… heartbeats beside the master's; counting the
-    # master would report "1 alive" while twelve resolvers work.
+    # master would report "1 alive" while twelve resolvers work.  The namespace above
+    # already excludes prior invocations; this label allow-list also ignores unrelated
+    # files somebody places beside a current worker.
     master_labels = set(worker_labels) if pool else set()
+    heartbeat_labels = (
+        {f"w{number:02d}" for number in range(1, workers + 1)} if pool else set(worker_labels)
+    )
 
     def ledger_done():
         if expected_done is None:
@@ -1426,7 +1609,9 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
             lines_done=sum(planned_lines.get(cid, 0) for cid in done),
             lines_total=sum(planned_lines.values()),
             elapsed=now - started_at,
-            workers_alive=_alive_worker_count(heartbeat_dir, master_labels, stall, now),
+            workers_alive=_alive_worker_count(
+                heartbeat_dir, master_labels, stall, now, heartbeat_labels
+            ),
             # Pool-child recycles are the master's business and it logs each one
             # (`pool: wNN recycled`); this counts only the replacements THIS driver made.
             workers_replaced=sum(restart_counts.values()),
@@ -1465,6 +1650,7 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         if line is not None:
             _log(line)
 
+    run_error = None
     try:
         # Append immediately after every successful spawn.  A list comprehension
         # loses all already-created children if a later Popen raises before the
@@ -1495,25 +1681,27 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
                         continue
                     _log(
                         f"worker {label} pid={proc.pid} has no heartbeat for "
-                        f"{now-last:.0f}s; terminating its group"
+                        f"{now-last:.0f}s; terminating its owned group"
                     )
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        code = proc.wait()
+                    group = groups_by_proc[id(proc)]
+                    if not _terminate_owned_group(group, term_grace, _log):
+                        raise RuntimeError(
+                            f"owned engine group {proc.pid} survived the stall cleanup"
+                        )
+                    code = proc.wait()
 
                 if code is None:
                     continue
                 codes.append(code)
                 del active[label]
+                # A SIGKILLed pool master can leave forked resolvers in its old PGID.
+                # Drain that *registered, token-bound* group before even considering a
+                # replacement, so no old generation can overlap the next one.
+                group = groups_by_proc[id(proc)]
+                if not _terminate_owned_group(group, term_grace, _log):
+                    raise RuntimeError(
+                        f"owned engine group {proc.pid} survived after leader exit {code}"
+                    )
                 if code == 0 or ledger_complete():
                     continue
                 if restart_counts[label] >= restart_limit:
@@ -1533,46 +1721,55 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         report_progress(time.time(), stage_started_at)
         report_claims()
         report_memory()
+    except BaseException as error:
+        # Cleanup must run on every exception, but a cleanup diagnostic is never more
+        # useful than the engine failure that triggered it.  Preserve that original
+        # exception below and log any secondary cleanup failure beside it.
+        run_error = error
+        raise
     finally:
-        live = [p for p in procs if p.poll() is None]
-        for p in live:
+        # Deliberately visit *every registered group*, not just Popen objects whose
+        # leader is still alive.  A pool child remains in the old session after its
+        # master is killed, exactly the state Popen.poll() cannot represent.
+        cleanup_failures = []
+        for group in owned_groups:
             try:
-                os.killpg(p.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        deadline = time.time() + float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
-        for p in live:
-            while p.poll() is None and time.time() < deadline:
-                time.sleep(0.5)
-            if p.poll() is None:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        # Reap every child we created.  killpg() ending the process is not enough:
-        # without wait(), the leader can remain a zombie and make ownership checks
-        # report a false live group.
-        for p in live:
+                if not _terminate_owned_group(group, term_grace, _log):
+                    cleanup_failures.append(f"process group {group['pgid']} survived SIGKILL")
+            except Exception as error:
+                cleanup_failures.append(str(error))
+        # Reap every leader we created.  Group cleanup above is deliberately
+        # independent of this wait: a dead leader may already have been reaped while
+        # descendants were still live.
+        for p in procs:
             try:
                 p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+            except (subprocess.TimeoutExpired, ChildProcessError, OSError):
+                cleanup_failures.append(f"engine leader {p.pid} did not exit after group cleanup")
         for state, proc in scope_paths:
             try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                try:
-                    os.remove(state)
-                except FileNotFoundError:
-                    pass
-            except PermissionError:
-                _log(f"retaining process scope {state}: group {proc.pid} still exists but is not signalable")
-            else:
-                _log(f"retaining process scope {state}: group {proc.pid} still has live members")
-        if live:
-            _log(f"terminated {len(live)} live engine worker group(s) on exit")
+                owned, unverified = _process_group_members(
+                    groups_by_proc[id(proc)]["pgid"], groups_by_proc[id(proc)]["token"], proc
+                )
+                if not owned and not unverified:
+                    try:
+                        os.remove(state)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    _log(
+                        f"retaining process scope {state}: group {proc.pid} still has "
+                        f"owned members {owned} or unverified members {unverified}"
+                    )
+            except Exception as error:
+                cleanup_failures.append(f"could not inspect process scope {state}: {error}")
         if stats is not None:
             stats["workers_replaced"] = sum(restart_counts.values())
+        if cleanup_failures:
+            message = "engine process-group cleanup failed: " + "; ".join(cleanup_failures)
+            if run_error is None:
+                raise RuntimeError(message)
+            _log(message + f" (preserving original {type(run_error).__name__})")
     if any(codes):
         _log(f"engine worker exit codes: {codes} — deferring judgment to the ledger")
     return codes

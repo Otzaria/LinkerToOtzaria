@@ -358,6 +358,29 @@ class DriverPoolWiringTest(unittest.TestCase):
         self._run(run_dir=run_dir, engine_pool=True)
         self.assertFalse(os.path.exists(stale))
 
+    def test_pool_progress_uses_a_private_heartbeat_namespace(self):
+        # An interrupted 12-worker pool can leave all of these mtimes fresh.  A later
+        # 3-worker invocation must not print "workers 12 alive" before its own master
+        # has even forked a child.
+        import incremental
+        run_dir = os.path.join(tempfile.mkdtemp(), "run")
+        legacy = os.path.join(run_dir, "worker-heartbeats")
+        os.makedirs(legacy)
+        for number in range(1, 13):
+            _touch(os.path.join(legacy, f"w{number:02d}"))
+
+        _codes, spawned = self._run(run_dir=run_dir, engine_pool=True)
+        namespace = spawned[0].kwargs["env"]["LINKER_HEARTBEAT_NAMESPACE"]
+        current = os.path.join(legacy, namespace)
+        self.assertTrue(os.path.isdir(current))
+        _touch(os.path.join(current, "w01"))
+        self.assertEqual(
+            incremental._alive_worker_count(
+                current, {"pool"}, 60, time.time(), {"w01", "w02", "w03"}
+            ),
+            1,
+        )
+
     def test_default_mode_still_spawns_independent_workers(self):
         codes, spawned = self._run()
         self.assertEqual(codes, [0, 0, 0])

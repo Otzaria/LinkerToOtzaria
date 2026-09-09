@@ -116,6 +116,8 @@ RECYCLE_EXIT_CODE = 75
 # True inside a run_pool child: switches the recycle cap to private memory and the
 # recycle action from execv to a pool exit.
 _POOL_CHILD = False
+HEARTBEAT_NAMESPACE_ENV = "LINKER_HEARTBEAT_NAMESPACE"
+_HEARTBEAT_NAMESPACE_RE = re.compile(r"[0-9a-f]{32}")
 
 _HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
@@ -310,6 +312,22 @@ def worker_memory_bytes() -> int:
     return rss_bytes()
 
 
+def heartbeat_directory(run_dir: str) -> str:
+    """The current driver's private heartbeat directory, or the legacy default.
+
+    The incremental driver creates a 128-bit namespace per invocation.  Pool children
+    inherit it from their master, so an old durable-run heartbeat can never inflate the
+    next run's ``workers_alive`` progress number.  Standalone use keeps the historical
+    flat directory for compatibility.
+    """
+    namespace = os.environ.get(HEARTBEAT_NAMESPACE_ENV)
+    if namespace is None:
+        return os.path.join(run_dir, "worker-heartbeats")
+    if not _HEARTBEAT_NAMESPACE_RE.fullmatch(namespace):
+        raise RuntimeError(f"invalid {HEARTBEAT_NAMESPACE_ENV} value")
+    return os.path.join(run_dir, "worker-heartbeats", namespace)
+
+
 def prepare_pool_child(snapshot: str, run_dir: str, label: str):
     """Per-child state after fork: Django handles closed, own SQLite handle, own
     heartbeat path, and proof that the private-memory cap can be judged here.
@@ -333,7 +351,7 @@ def prepare_pool_child(snapshot: str, run_dir: str, label: str):
             f"memory cap: {error}"
         ) from error
     connection = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
-    return connection, os.path.join(run_dir, "worker-heartbeats", label)
+    return connection, os.path.join(heartbeat_directory(run_dir), label)
 
 
 def _recycle_process() -> None:
@@ -408,7 +426,7 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
     import signal
     import traceback
 
-    heartbeat_dir = os.path.join(run_dir, "worker-heartbeats")
+    heartbeat_dir = heartbeat_directory(run_dir)
     os.makedirs(heartbeat_dir, exist_ok=True)
     master_hb = os.path.join(heartbeat_dir, master_label)
     labels = [f"w{n:02d}" for n in range(1, int(worker_count) + 1)]
@@ -1710,7 +1728,8 @@ def main():
     for d in ("done", "claim", "logs", "failed", "worker-heartbeats", "checkpoints",
               CLAIM_EVENT_DIR, os.path.join(MEMORY_DIR, REQUEUE_MARKER_DIR)):
         os.makedirs(os.path.join(run, d), exist_ok=True)
-    heartbeat_path = os.path.join(run, "worker-heartbeats", args.label)
+    heartbeat_path = os.path.join(heartbeat_directory(run), args.label)
+    os.makedirs(os.path.dirname(heartbeat_path), exist_ok=True)
 
     def worker_heartbeat():
         # A watchdog monitors this worker-specific heartbeat, not book completion.

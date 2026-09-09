@@ -66,6 +66,10 @@ AMD_SMI_TWO_GPU_JSON = json.dumps([
     },
 ])
 
+# amd-smi also emits this object envelope (rather than a root list).  Keep a separate
+# fixture because walking the envelope itself used to select gpu0 and hide gpu1.
+AMD_SMI_GPU_DATA_JSON = json.dumps({"gpu_data": json.loads(AMD_SMI_TWO_GPU_JSON)})
+
 NVIDIA_SMI_CSV = "3, 512, 16376\n71, 8192, 16376\n"
 
 # What rocm-smi really does on a ROCm-for-WSL userspace: exit 0, print nothing on
@@ -106,6 +110,12 @@ class GpuParsingTest(unittest.TestCase):
         # The VRAM figures must come from the SAME card as the utilisation, not from
         # whichever entry the walk happened to reach first (gpu0 holds 16 MB).
         self.assertNotEqual(reading["mem_used_mb"], 16)
+
+    def test_amd_smi_gpu_data_envelope_reports_the_busiest_gpu(self):
+        self.assertEqual(telemetry.parse_amd_smi(AMD_SMI_GPU_DATA_JSON), {
+            "source": "amd-smi", "device": "gpu1", "util_pct": 97,
+            "mem_used_mb": 9001, "mem_total_mb": 16368,
+        })
 
     def test_amd_smi_reads_a_single_device_payload_that_is_not_a_list(self):
         # An unrecognised (non-list) shape keeps working exactly as before, as one

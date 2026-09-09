@@ -91,6 +91,14 @@ on:
         required: false
         default: ''
         type: string
+      wait_contract_sha256:
+        description: >
+          SHA-256 of .github/contracts/linker_relink_timeouts_v1.json from the
+          dispatching SeforimLibrary revision. The checked-in default supports
+          standalone dispatches; serial callers must forward their exact contract hash.
+        required: false
+        default: 'a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f'
+        type: string
       target:
         description: >
           Compute topology. 'local' = complete GPU NER + CPU resolution on the durable
@@ -292,6 +300,22 @@ jobs:
     steps:
       - name: Checkout linker repo
         uses: actions/checkout@v4
+
+      - name: Preflight — wait-timeout contract
+        env:
+          WAIT_CONTRACT_SHA256: ${{ inputs.wait_contract_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::wait_contract_sha256 must be a 64-character lowercase SHA-256" >&2
+            exit 1
+          }
+          actual="$(sha256sum .github/contracts/linker_relink_timeouts_v1.json | cut -d' ' -f1)"
+          [ "$actual" = "$WAIT_CONTRACT_SHA256" ] || {
+            echo "::error::wait-timeout contract mismatch: caller=$WAIT_CONTRACT_SHA256 local=$actual" >&2
+            exit 1
+          }
+          echo "wait-timeout contract verified: $actual"
 
       - name: Bootstrap durable cross-repo host lease
         if: inputs.target != 'kaggle'
@@ -1297,6 +1321,24 @@ jobs:
     steps:
       - name: Checkout exact linker source
         uses: actions/checkout@v4
+
+      # Resolver-only recovery skips the NER job, so it independently checks the
+      # same contract before it takes the durable host lock or restores handoffs.
+      - name: Preflight — wait-timeout contract
+        env:
+          WAIT_CONTRACT_SHA256: ${{ inputs.wait_contract_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::wait_contract_sha256 must be a 64-character lowercase SHA-256" >&2
+            exit 1
+          }
+          actual="$(sha256sum .github/contracts/linker_relink_timeouts_v1.json | cut -d' ' -f1)"
+          [ "$actual" = "$WAIT_CONTRACT_SHA256" ] || {
+            echo "::error::wait-timeout contract mismatch: caller=$WAIT_CONTRACT_SHA256 local=$actual" >&2
+            exit 1
+          }
+          echo "wait-timeout contract verified: $actual"
 
       - name: Bootstrap durable cross-repo host lease
         run: bash ci/bootstrap_host_lock.sh ci/otzaria-pipeline.tmpfiles.conf
