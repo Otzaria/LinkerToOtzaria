@@ -77,7 +77,30 @@ def _running(pid):
         return False
 
 
+def _orphan_drain_worker_code():
+    """Source exec'd by the Linux orphan-drain acceptance fixture."""
+    return textwrap.dedent("""\
+        import os, signal, sys, time
+        from pathlib import Path
+        ready, terminated = map(Path, sys.argv[1:3])
+        token = sys.argv[3]
+        def stop(*_):
+            terminated.write_text(str(time.monotonic()))
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, stop)
+        ready.write_text("\\n".join((
+            token, str(os.getpid()), str(os.getppid()), str(os.getpgrp()),
+            str(os.getsid(0)), str(time.monotonic()),
+        )))
+        while True:
+            time.sleep(0.05)
+    """)
+
+
 class ProcessHygieneTest(unittest.TestCase):
+    def test_orphan_drain_fixture_worker_source_compiles(self):
+        compile(_orphan_drain_worker_code(), "<orphan-drain-fixture-worker>", "exec")
+
     def test_linux_exit_observation_keeps_the_leader_waitable(self):
         """WNOWAIT must preserve the PID that pins an engine's PGID/SID."""
         import types
@@ -179,6 +202,8 @@ class ProcessHygieneTest(unittest.TestCase):
         still running.  This is intentionally subprocess-level: a mocked Popen cannot
         model the leaderless PGID that caused the production double generation.
         """
+        worker_code = _orphan_drain_worker_code()
+        compile(worker_code, "<orphan-drain-fixture-worker>", "exec")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = os.path.join(tmp, "run")
             os.makedirs(os.path.join(run_dir, "done"))
@@ -212,21 +237,8 @@ class ProcessHygieneTest(unittest.TestCase):
                         except FileNotFoundError:
                             return False
 
-                    worker_code = (
-                        "import os, signal, sys, time\\n"
-                        "from pathlib import Path\\n"
-                        "ready, terminated = map(Path, sys.argv[1:3])\\n"
-                        "token = sys.argv[3]\\n"
-                        "def stop(*_):\\n"
-                        "    terminated.write_text(str(time.monotonic()))\\n"
-                        "    raise SystemExit(0)\\n"
-                        "signal.signal(signal.SIGTERM, stop)\\n"
-                        "ready.write_text('\\n'.join((token, "
-                        "str(os.getpid()), str(os.getppid()), str(os.getpgrp()), str(os.getsid(0)), "
-                        "str(time.monotonic()))))\\n"
-                        "while True:\\n"
-                        "    time.sleep(0.05)\\n"
-                    )
+                    worker_code = {worker_code!r}
+                    compile(worker_code, "<orphan-drain-fixture-worker>", "exec")
                     if not first.exists():
                         first.touch()
                         tokens.write_text(os.environ["LINKER_ENGINE_SESSION_TOKEN"] + "\\n")
