@@ -15,6 +15,11 @@
       "from": "dump=44e55916743983b8;engine_src=ed518d1bde7b54ef;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9ffdfa90517b284a;policy=drop;bavli=0",
       "to": "dump=44e55916743983b8;engine_src=881392317b648e7e;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=798d27b90645b03d;policy=drop;bavli=0",
       "review": "fix(pool): process ownership, cleanup and heartbeat accounting only. Pool workers retain the same work assignment and link algorithm; the change drains an old token-bound worker generation before replacement, namespaces advisory heartbeat files and extends GPU telemetry parsing. It does not change source normalization, reference resolution, ambiguity policy, link records or artifact bytes."
+    },
+    {
+      "from": "dump=44e55916743983b8;engine_src=ed518d1bde7b54ef;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9ffdfa90517b284a;policy=drop;bavli=0",
+      "to": "dump=44e55916743983b8;engine_src=3e8ef0b395adff07;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=798d27b90645b03d;policy=drop;bavli=0",
+      "review": "fix(pool): process lifecycle and cleanup attribution only. Linux observes a dead pool leader with waitid(WNOWAIT), preserving the original PID/PGID/SID identity until all same-session descendants are drained and the leader is reaped; environments, work assignment and link computation are unchanged. This cannot change normalization, resolution, ambiguity policy, link records or artifact bytes."
     }
   ]
 }

@@ -78,6 +78,28 @@ def _running(pid):
 
 
 class ProcessHygieneTest(unittest.TestCase):
+    def test_linux_exit_observation_keeps_the_leader_waitable(self):
+        """WNOWAIT must preserve the PID that pins an engine's PGID/SID."""
+        import types
+
+        sys.path.insert(0, SRC)
+        import incremental
+
+        proc = types.SimpleNamespace(
+            pid=12345,
+            returncode=None,
+            _waitpid_lock=object(),
+            poll=mock.Mock(side_effect=AssertionError("poll would reap the leader")),
+        )
+        status = types.SimpleNamespace(si_code=os.CLD_EXITED, si_status=7)
+        with mock.patch.object(incremental.sys, "platform", "linux"), \
+                mock.patch.object(incremental.os, "waitid", return_value=status) as waitid:
+            self.assertEqual(incremental._poll_engine_without_reaping(proc), 7)
+        waitid.assert_called_once_with(
+            os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        )
+        proc.poll.assert_not_called()
+
     def test_nonzero_worker_is_replaced_and_completes_exact_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = os.path.join(tmp, "run")
@@ -193,13 +215,14 @@ class ProcessHygieneTest(unittest.TestCase):
                     worker_code = (
                         "import os, signal, sys, time\\n"
                         "from pathlib import Path\\n"
-                        "ready, terminated = map(Path, sys.argv[1:])\\n"
+                        "ready, terminated = map(Path, sys.argv[1:3])\\n"
+                        "token = sys.argv[3]\\n"
                         "def stop(*_):\\n"
                         "    terminated.write_text(str(time.monotonic()))\\n"
                         "    raise SystemExit(0)\\n"
                         "signal.signal(signal.SIGTERM, stop)\\n"
-                        "ready.write_text('\\n'.join((os.environ['LINKER_ENGINE_SESSION_TOKEN'], "
-                        "str(os.getppid()), str(os.getpgrp()), str(os.getsid(0)), "
+                        "ready.write_text('\\n'.join((token, "
+                        "str(os.getpid()), str(os.getppid()), str(os.getpgrp()), str(os.getsid(0)), "
                         "str(time.monotonic()))))\\n"
                         "while True:\\n"
                         "    time.sleep(0.05)\\n"
@@ -207,8 +230,11 @@ class ProcessHygieneTest(unittest.TestCase):
                     if not first.exists():
                         first.touch()
                         tokens.write_text(os.environ["LINKER_ENGINE_SESSION_TOKEN"] + "\\n")
+                        child_env = dict(os.environ)
+                        token = child_env.pop("LINKER_ENGINE_SESSION_TOKEN")
                         child = subprocess.Popen([sys.executable, "-c", worker_code,
-                                                  str(worker_ready), str(terminated)])
+                                                  str(worker_ready), str(terminated), token],
+                                                 env=child_env)
                         worker_pid.write_text(str(child.pid))
                         deadline = time.monotonic() + 5
                         while not worker_ready.exists() and time.monotonic() < deadline:
@@ -235,18 +261,21 @@ class ProcessHygieneTest(unittest.TestCase):
                 stdout, stderr = driver.communicate(timeout=30)
                 self.assertEqual(driver.returncode, 0, stdout + stderr)
                 old_pid = int(Path(tmp, "old-worker.pid").read_text())
-                self.assertTrue(Path(tmp, "old-worker.terminated").exists())
                 self.assertTrue(Path(tmp, "replacement.started").exists())
                 self.assertFalse(Path(tmp, "overlap").exists(), stdout + stderr)
+                self.assertTrue(
+                    Path(tmp, "old-worker.terminated").exists(), stdout + stderr
+                )
                 tokens = Path(tmp, "session-tokens").read_text().splitlines()
                 self.assertEqual(len(tokens), 2)
                 self.assertNotEqual(tokens[0], tokens[1])
                 self.assertTrue(all(len(token) == 64 for token in tokens))
                 ready = Path(tmp, "old-worker.ready").read_text().splitlines()
-                self.assertEqual(len(ready), 5)
+                self.assertEqual(len(ready), 6)
                 self.assertEqual(ready[0], tokens[0])
+                self.assertEqual(int(ready[1]), old_pid)
                 self.assertEqual(
-                    ready[1:4], [ready[1]] * 3,
+                    ready[2:5], [ready[2]] * 3,
                     "fixture child must share its original master's PGID and SID",
                 )
                 self.assertLess(

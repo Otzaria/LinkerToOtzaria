@@ -1275,9 +1275,10 @@ def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int
     """Return live token-bearing and unverified members of this session/group.
 
     ``start_new_session`` makes the Popen leader both PGID and SID.  If that leader is
-    SIGKILLed, its forked pool children keep both numbers even though ``Popen.poll()``
-    says the leader is gone.  The inherited random environment marker binds those
-    survivors to this exact spawn.  A same-number group without the marker is never
+    still waitable (alive or a zombie observed with ``waitid(WNOWAIT)``), its PID cannot
+    be reused; that pins the numeric PGID/SID and safely binds every same-UID member.
+    After a leader has been reaped, the inherited random environment marker remains the
+    fail-closed ownership proof.  A same-number group without either proof is never
     signalled: that is the PID/PGID-reuse safety boundary.
     """
     owned, unverified = [], []
@@ -1303,6 +1304,12 @@ def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int
         if leader is not None and leader.returncode is None:
             return [pgid], unverified
         return owned, [pgid]
+    leader_bound = (
+        leader is not None
+        and hasattr(leader, "_waitpid_lock")
+        and getattr(leader, "pid", None) == pgid
+        and getattr(leader, "returncode", None) is None
+    )
     with entries:
         for entry in entries:
             if not entry.name.isdigit():
@@ -1315,6 +1322,14 @@ def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int
                     continue
                 if os.stat(entry.path).st_uid != os.geteuid():
                     unverified.append(int(entry.name))
+                    continue
+                # A live or unreaped-zombie child created by this Popen still owns its
+                # PID in the kernel.  Because start_new_session made that same number
+                # the PGID and SID, no unrelated group can reuse it while the leader is
+                # waitable.  This path also covers hardened procfs mounts that deny
+                # access to environ for a same-UID child.
+                if leader_bound:
+                    owned.append(int(entry.name))
                     continue
                 with open(os.path.join(entry.path, "environ"), "rb") as stream:
                     environment = stream.read().split(b"\0")
@@ -1331,6 +1346,39 @@ def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int
                 # would make a PID/PGID reuse mistake possible.
                 unverified.append(int(entry.name))
     return owned, unverified
+
+
+def _poll_engine_without_reaping(proc):
+    """Return a Linux child status while retaining its PID as the group identity.
+
+    ``Popen.poll()`` reaps a dead leader.  A pool master's forked children can remain
+    in its PGID after that death, so reaping first discards the strongest race-free
+    proof that the numeric PGID is still ours.  Linux ``waitid(..., WNOWAIT)`` observes
+    the status but deliberately leaves the child waitable until group cleanup ends.
+    Synthetic Popen objects and non-Linux hosts keep the ordinary polling path.
+    """
+    if (
+        sys.platform.startswith("linux")
+        and hasattr(os, "waitid")
+        and hasattr(os, "WNOWAIT")
+        and hasattr(proc, "_waitpid_lock")
+    ):
+        try:
+            status = os.waitid(
+                os.P_PID,
+                proc.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+        except (ChildProcessError, OSError):
+            # If some external code already consumed the child, fall back to Popen's
+            # state.  The token-based scanner remains fail-closed after a reap.
+            return proc.poll()
+        if status is None:
+            return None
+        if status.si_code == os.CLD_EXITED:
+            return status.si_status
+        return -status.si_status
+    return proc.poll()
 
 
 def _terminate_owned_group(group: dict, grace: float, log) -> bool:
@@ -1670,7 +1718,7 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
                 next_progress = now + progress_seconds
                 report_progress(now, stage_started_at)
             for label, proc in list(active.items()):
-                code = proc.poll()
+                code = _poll_engine_without_reaping(proc)
                 if code is None:
                     path = os.path.join(heartbeat_dir, label)
                     try:
@@ -1702,6 +1750,11 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
                     raise RuntimeError(
                         f"owned engine group {proc.pid} survived after leader exit {code}"
                     )
+                # On Linux the status above was observed with WNOWAIT so the leader's
+                # PID could pin its PGID/SID throughout cleanup.  Reap only now, before
+                # considering a replacement.
+                if getattr(proc, "returncode", None) is None:
+                    code = proc.wait()
                 if code == 0 or ledger_complete():
                     continue
                 if restart_counts[label] >= restart_limit:
