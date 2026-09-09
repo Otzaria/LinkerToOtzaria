@@ -1,7 +1,57 @@
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 import unittest
+
+
+# The two fingerprint components that a source change in THIS repo can move.
+# Everything else in the fingerprint (dump, he_ref_ner, he_subref_ner, sefaria,
+# gpu-server, python_runtime) comes from a pin or a fixed release asset and
+# cannot move without a deliberate bump -- which must force a full relink, not
+# be registered as an output-neutral migration.
+ENGINE_SRC_FILES = (
+    "src/link_books.py",
+    "src/linker_artifact.py",
+    "src/line_baseline.py",
+    "src/incremental.py",
+    "src/ner_handoff.py",
+    "src/precompute_ner.py",
+    "ci/gpu_server_microbatch.py",
+    "ci/gpu_server_microbatch.patch",
+)
+SEFARIA_PATCH_FILE = "ci/sefaria_resolver.patch"
+
+
+def committed_blob(root: Path, relative_path: str) -> bytes:
+    """The committed bytes of one file, as the runner hashes them.
+
+    ci/setup_stack.sh runs on a Linux checkout and hashes LF bytes.  Reading the
+    worktree instead is wrong on Windows, where .patch files are CRLF: it yields
+    a fingerprint that no run can ever produce, and the guard below then compares
+    two strings that are both fiction.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"HEAD:{relative_path}"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cannot read committed blob {relative_path!r}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return result.stdout
+
+
+def substitute_component(fingerprint: str, key: str, value: str) -> str:
+    """Replace exactly one ``key=...`` component, anchored on the key."""
+    parts = fingerprint.split(";")
+    hits = [index for index, part in enumerate(parts) if part.startswith(f"{key}=")]
+    if len(hits) != 1:
+        raise KeyError(f"{key!r} appears {len(hits)} times in the fingerprint")
+    parts[hits[0]] = f"{key}={value}"
+    return ";".join(parts)
 
 
 class RelinkWorkflowContractTest(unittest.TestCase):
@@ -449,21 +499,64 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("django.setup", producer)
         self.assertIn("from sefaria.helper.normalization import NormalizerComposer", producer)
 
+    def resolve_migration(self, root: Path, actual: str) -> str:
+        """Run the real resolver the workflow runs, against the real registry."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "ci/resolve_output_neutral_fingerprint_migration.py"),
+                "--baseline",
+                str(root / "baseline/snapshot_hashes.json"),
+                "--actual",
+                actual,
+                "--migrations",
+                str(root / "baseline/output_neutral_fingerprint_migrations.json"),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
     def test_committed_fingerprint_is_accepted_lineage_not_dirty_source(self):
+        """HEAD's engine must be adoptable from the committed lineage.
+
+        What this proves, exactly: ``engine_src`` and ``sefaria_patch`` recomputed
+        from HEAD's blobs -- the only two fingerprint components a source change in
+        this repo can move -- substituted into the committed lineage fingerprint,
+        are resolved by ci/resolve_output_neutral_fingerprint_migration.py into the
+        exact ``OLD::NEW`` adoption contract, using the same baseline file and the
+        same registry the workflow passes it.  So the next relink at this commit
+        adopts instead of relinking all ~7,300 books.  Running the resolver rather
+        than re-implementing the lookup also re-asserts the registry's schema and
+        its per-entry ``review`` requirement, and that no two entries are ambiguous.
+
+        And that the guard is EXACT: a one-character drift in either component is
+        not resolved, so an engine that is not the reviewed one still forces a full
+        relink.
+
+        What this does NOT prove: that the change is output-neutral.  Only the
+        review text carries that claim; this asserts a reviewed entry exists and
+        matches byte-for-byte.  It also assumes the pinned components (dump,
+        models, sefaria, gpu-server, python_runtime) are unchanged -- a pin bump
+        must force a full relink and must never be registered here.
+
+        This assertion was inverted by 1877071 for a semantic change and never
+        restored; it is a POSITIVE guard, and the empty-substitution branch below
+        is the only case in which it asserts nothing.
+        """
         root = Path(__file__).parents[1]
+        if not (root / ".git").exists():
+            self.skipTest("not a git checkout: committed blobs are unavailable")
+
         digest = hashlib.sha256()
-        for relative_path in (
-            "src/link_books.py",
-            "src/linker_artifact.py",
-            "src/line_baseline.py",
-            "src/incremental.py",
-            "src/ner_handoff.py",
-            "src/precompute_ner.py",
-            "ci/gpu_server_microbatch.py",
-            "ci/gpu_server_microbatch.patch",
-        ):
-            digest.update((root / relative_path).read_bytes())
-        engine_component = f"engine_src={digest.hexdigest()[:16]}"
+        for relative_path in ENGINE_SRC_FILES:
+            digest.update(committed_blob(root, relative_path))
+        engine_src = digest.hexdigest()[:16]
+        sefaria_patch = hashlib.sha256(
+            committed_blob(root, SEFARIA_PATCH_FILE)
+        ).hexdigest()[:16]
 
         baseline = json.loads((root / "baseline/snapshot_hashes.json").read_text())
         metadata = json.loads((root / "meta.json").read_text())
@@ -471,23 +564,38 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         metadata_fingerprint = metadata["engine"]["fingerprint"]
 
         self.assertEqual(baseline_fingerprint, metadata_fingerprint)
-        if engine_component not in baseline_fingerprint:
-            migrations = json.loads(
-                (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
-            )
-            current_fingerprint = baseline_fingerprint.replace(
-                baseline_fingerprint.split("engine_src=")[1].split(";", 1)[0],
-                engine_component.split("=", 1)[1],
-            )
-            self.assertEqual(migrations.get("schema_version"), 1)
-            self.assertFalse(
-                any(
-                    entry.get("from") == baseline_fingerprint
-                    and entry.get("to") == current_fingerprint
-                    for entry in migrations.get("migrations", [])
-                ),
-                "this semantic change must force a full relink, never fingerprint adoption",
-            )
+
+        current_fingerprint = substitute_component(
+            substitute_component(baseline_fingerprint, "engine_src", engine_src),
+            "sefaria_patch",
+            sefaria_patch,
+        )
+        if current_fingerprint == baseline_fingerprint:
+            # The committed engine IS the published lineage; nothing to migrate.
+            self.assertEqual(self.resolve_migration(root, current_fingerprint), "")
+            return
+
+        migrations = json.loads(
+            (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
+        )
+        self.assertEqual(migrations.get("schema_version"), 1)
+        self.assertEqual(
+            self.resolve_migration(root, current_fingerprint),
+            f"{baseline_fingerprint}::{current_fingerprint}",
+            "the engine committed here has drifted from the published lineage without "
+            "a reviewed output-neutral migration entry: the next relink would rebuild "
+            "every book",
+        )
+
+        for key, value in (("engine_src", engine_src), ("sefaria_patch", sefaria_patch)):
+            mutated_value = value[:-1] + ("0" if value[-1] != "0" else "1")
+            mutated = substitute_component(current_fingerprint, key, mutated_value)
+            with self.subTest(mutated=key):
+                self.assertEqual(
+                    self.resolve_migration(root, mutated),
+                    "",
+                    f"a one-character drift in {key} must NOT be adopted",
+                )
 
     def test_pack_steps_saturate_the_runner_without_losing_determinism(self):
         root = Path(__file__).parents[1]
