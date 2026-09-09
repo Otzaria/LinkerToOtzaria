@@ -40,6 +40,20 @@ def _driver_code(tmp, fake_python, open_lease_fd=False):
     """)
 
 
+def _pool_driver_code(tmp, fake_python, only_books, run_dir):
+    """A real outer driver for the leader-dies/children-live regression fixture."""
+    return textwrap.dedent(f"""\
+        import sys, types
+        sys.path.insert(0, {SRC!r})
+        import incremental
+        args = types.SimpleNamespace(
+            python={fake_python!r}, snapshot="s", repo="r", run_dir={run_dir!r},
+            sef_project={tmp!r}, bavli_convention=False, engine_workers=1,
+            engine_pool=True, engine_restart_limit=1, worker_stall_seconds=60)
+        incremental._run_engine(args, {only_books!r})
+    """)
+
+
 def _read_pids(path):
     if not os.path.exists(path):
         return []
@@ -54,7 +68,61 @@ def _alive(pid):
         return False
 
 
+def _running(pid):
+    """Unlike kill(pid, 0), do not call an already-exited unreaped zombie alive."""
+    try:
+        tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return tail[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def _orphan_drain_worker_code():
+    """Source exec'd by the Linux orphan-drain acceptance fixture."""
+    return textwrap.dedent("""\
+        import os, signal, sys, time
+        from pathlib import Path
+        ready, terminated = map(Path, sys.argv[1:3])
+        token = sys.argv[3]
+        def stop(*_):
+            terminated.write_text(str(time.monotonic()))
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, stop)
+        ready.write_text("\\n".join((
+            token, str(os.getpid()), str(os.getppid()), str(os.getpgrp()),
+            str(os.getsid(0)), str(time.monotonic()),
+        )))
+        while True:
+            time.sleep(0.05)
+    """)
+
+
 class ProcessHygieneTest(unittest.TestCase):
+    def test_orphan_drain_fixture_worker_source_compiles(self):
+        compile(_orphan_drain_worker_code(), "<orphan-drain-fixture-worker>", "exec")
+
+    def test_linux_exit_observation_keeps_the_leader_waitable(self):
+        """WNOWAIT must preserve the PID that pins an engine's PGID/SID."""
+        import types
+
+        sys.path.insert(0, SRC)
+        import incremental
+
+        proc = types.SimpleNamespace(
+            pid=12345,
+            returncode=None,
+            _waitpid_lock=object(),
+            poll=mock.Mock(side_effect=AssertionError("poll would reap the leader")),
+        )
+        status = types.SimpleNamespace(si_code=os.CLD_EXITED, si_status=7)
+        with mock.patch.object(incremental.sys, "platform", "linux"), \
+                mock.patch.object(incremental.os, "waitid", return_value=status) as waitid:
+            self.assertEqual(incremental._poll_engine_without_reaping(proc), 7)
+        waitid.assert_called_once_with(
+            os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        )
+        proc.poll.assert_not_called()
+
     def test_nonzero_worker_is_replaced_and_completes_exact_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = os.path.join(tmp, "run")
@@ -124,6 +192,116 @@ class ProcessHygieneTest(unittest.TestCase):
             finally:
                 if driver.poll() is None:
                     driver.kill()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "token/session ownership is Linux /proc based")
+    def test_killed_pool_master_drains_old_children_before_replacement(self):
+        """A dead master is not evidence that its old forked generation is gone.
+
+        The first pool-master fixture forks a deliberately long-lived worker, then
+        SIGKILLs itself.  The replacement writes an overlap marker if that worker is
+        still running.  This is intentionally subprocess-level: a mocked Popen cannot
+        model the leaderless PGID that caused the production double generation.
+        """
+        worker_code = _orphan_drain_worker_code()
+        compile(worker_code, "<orphan-drain-fixture-worker>", "exec")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            os.makedirs(os.path.join(run_dir, "done"))
+            only = os.path.join(tmp, "only.json")
+            with open(only, "w", encoding="utf-8") as stream:
+                json.dump([{"source_name": "Source", "canonical_he_title": "Book"}], stream)
+            fake = os.path.join(tmp, "fake_pool_master.py")
+            with open(fake, "w", encoding="utf-8") as stream:
+                stream.write(textwrap.dedent(f"""\
+                    #!{sys.executable}
+                    import os
+                    from pathlib import Path
+                    import signal
+                    import subprocess
+                    import sys
+                    import time
+
+                    root = Path({tmp!r})
+                    first = root / "first-master"
+                    worker_pid = root / "old-worker.pid"
+                    worker_ready = root / "old-worker.ready"
+                    terminated = root / "old-worker.terminated"
+                    replacement = root / "replacement.started"
+                    overlap = root / "overlap"
+                    tokens = root / "session-tokens"
+
+                    def running(pid):
+                        try:
+                            tail = Path(f"/proc/{{pid}}/stat").read_text().rsplit(")", 1)[1].split()
+                            return tail[0] != "Z"
+                        except FileNotFoundError:
+                            return False
+
+                    worker_code = {worker_code!r}
+                    compile(worker_code, "<orphan-drain-fixture-worker>", "exec")
+                    if not first.exists():
+                        first.touch()
+                        tokens.write_text(os.environ["LINKER_ENGINE_SESSION_TOKEN"] + "\\n")
+                        child_env = dict(os.environ)
+                        token = child_env.pop("LINKER_ENGINE_SESSION_TOKEN")
+                        child = subprocess.Popen([sys.executable, "-c", worker_code,
+                                                  str(worker_ready), str(terminated), token],
+                                                 env=child_env)
+                        worker_pid.write_text(str(child.pid))
+                        deadline = time.monotonic() + 5
+                        while not worker_ready.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        if not worker_ready.exists():
+                            raise SystemExit("fixture worker did not become ready")
+                        os.kill(os.getpid(), signal.SIGKILL)
+
+                    old_pid = int(worker_pid.read_text())
+                    if running(old_pid):
+                        overlap.write_text("replacement started beside old worker")
+                    with tokens.open("a") as stream:
+                        stream.write(os.environ["LINKER_ENGINE_SESSION_TOKEN"] + "\\n")
+                    replacement.write_text(str(time.monotonic()))
+                """))
+            os.chmod(fake, 0o755)
+            driver = subprocess.Popen(
+                [sys.executable, "-c", _pool_driver_code(tmp, fake, only, run_dir)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=dict(os.environ, LINKER_PROCESS_TERM_GRACE="1"),
+            )
+            old_pid = None
+            try:
+                stdout, stderr = driver.communicate(timeout=30)
+                self.assertEqual(driver.returncode, 0, stdout + stderr)
+                old_pid = int(Path(tmp, "old-worker.pid").read_text())
+                self.assertTrue(Path(tmp, "replacement.started").exists())
+                self.assertFalse(Path(tmp, "overlap").exists(), stdout + stderr)
+                self.assertTrue(
+                    Path(tmp, "old-worker.terminated").exists(), stdout + stderr
+                )
+                tokens = Path(tmp, "session-tokens").read_text().splitlines()
+                self.assertEqual(len(tokens), 2)
+                self.assertNotEqual(tokens[0], tokens[1])
+                self.assertTrue(all(len(token) == 64 for token in tokens))
+                ready = Path(tmp, "old-worker.ready").read_text().splitlines()
+                self.assertEqual(len(ready), 6)
+                self.assertEqual(ready[0], tokens[0])
+                self.assertEqual(int(ready[1]), old_pid)
+                self.assertEqual(
+                    ready[2:5], [ready[2]] * 3,
+                    "fixture child must share its original master's PGID and SID",
+                )
+                self.assertLess(
+                    float(Path(tmp, "old-worker.terminated").read_text()),
+                    float(Path(tmp, "replacement.started").read_text()),
+                )
+                self.assertFalse(_running(old_pid), "old pool child survived the replacement")
+            finally:
+                if driver.poll() is None:
+                    driver.kill()
+                if old_pid is None and os.path.exists(os.path.join(tmp, "old-worker.pid")):
+                    old_pid = int(Path(tmp, "old-worker.pid").read_text())
+                if old_pid is not None and _running(old_pid):
+                    os.kill(old_pid, signal.SIGKILL)
 
     def test_workers_inherit_open_lease_fd(self):
         with tempfile.TemporaryDirectory() as tmp:

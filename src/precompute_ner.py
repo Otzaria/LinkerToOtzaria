@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import BookKey  # noqa: E402
+from incremental import format_progress  # noqa: E402
 from link_books import (  # noqa: E402
     BATCH_CHARS,
     BATCH_LINES,
@@ -354,7 +355,11 @@ def _prepare_root(args, books, hashes, ner_ranges) -> Path:
         failed = root / "failed" / cid
         done = root / "done" / cid
         if failed.exists():
-            failed.unlink()
+            # missing_ok on both: exists() and unlink() are two syscalls, and the same
+            # LBYL shape at link_books.py:1620 cost 36 workers on 2026-09-06.  This
+            # reconciliation runs before any worker starts, so nothing races it today —
+            # keep it EAFP anyway so a future concurrent caller cannot resurrect it.
+            failed.unlink(missing_ok=True)
             done.unlink(missing_ok=True)
             shutil.rmtree(root / "ner-data" / cid, ignore_errors=True)
             partial = root / "partial" / cid
@@ -590,8 +595,11 @@ def _produce_book(
         "batches": final_descriptors,
     })
     partial_manifest_path.unlink(missing_ok=True)
-    if book_root.exists():
-        shutil.rmtree(book_root)
+    # EAFP, and safe to ignore errors: the very next statement is the atomic rename
+    # that PUBLISHES the book, and it fails loudly if anything is still in the way.
+    # The producer's claim protocol (_try_claim) is heartbeat-based rather than
+    # kernel-locked, so a stale takeover can briefly overlap the old owner here.
+    shutil.rmtree(book_root, ignore_errors=True)
     os.replace(temporary, book_root)
     (root / "done" / cid).touch()
     shutil.rmtree(root / "claims" / cid, ignore_errors=True)
@@ -732,7 +740,7 @@ def finalize(args) -> int:
     return len(books)
 
 
-def driver(args) -> int:
+def driver(args, progress_seconds: float = 60.0) -> int:
     _, books, hashes, ner_ranges = _load_plan(args)
     root = _prepare_root(args, books, hashes, ner_ranges)
     processes = []
@@ -740,6 +748,34 @@ def driver(args) -> int:
         time.monotonic() + args.deadline_seconds
         if args.deadline_seconds is not None else None
     )
+    # The producer's only output is one `done` line per book, and a big book can take
+    # minutes: without this the stage looks dead for long stretches.  Counts come from
+    # the done ledger and the plan, never from a worker's log.
+    planned_lines = {
+        claim_id(book): sum(
+            end - start
+            for start, end in ner_ranges[(book.source_name, book.canonical_he_title)]
+        )
+        for book in books
+    }
+    # _prepare_root keeps the done markers of a resumed exact-attempt checkpoint, so a
+    # retry starts with books already complete.  They belong in N/M but not in the rate
+    # the ETA is built from (see format_progress).
+    adopted_at_start = sum((root / "done" / cid).exists() for cid in planned_lines)
+
+    def report_progress(now, started_at):
+        done = [cid for cid in planned_lines if (root / "done" / cid).exists()]
+        _log("driver", format_progress(
+            books_done=len(done),
+            books_total=len(books),
+            books_adopted=adopted_at_start,
+            lines_done=sum(planned_lines[cid] for cid in done),
+            lines_total=sum(planned_lines.values()),
+            elapsed=now - started_at,
+            workers_alive=sum(1 for process in processes if process.poll() is None),
+            workers_replaced=0,  # this driver never replaces a producer worker
+        ))
+
     try:
         for number in range(1, args.workers + 1):
             command = [sys.executable, os.path.abspath(__file__)] + [
@@ -752,6 +788,8 @@ def driver(args) -> int:
                 "--worker-label", f"w{number:02d}",
             ]
             processes.append(subprocess.Popen(command, start_new_session=True))
+        stage_started_at = time.monotonic()
+        next_progress = stage_started_at + progress_seconds
         while any(process.poll() is None for process in processes):
             if deadline is not None and time.monotonic() >= deadline:
                 completed = sum(
@@ -761,7 +799,11 @@ def driver(args) -> int:
                     f"NER producer deadline reached with {completed}/{len(books)} "
                     "book checkpoints complete; preserving them for an exact-attempt retry"
                 )
+            if time.monotonic() >= next_progress:
+                next_progress = time.monotonic() + progress_seconds
+                report_progress(time.monotonic(), stage_started_at)
             time.sleep(1)
+        report_progress(time.monotonic(), stage_started_at)
         codes = [process.returncode for process in processes]
     finally:
         live = [process for process in processes if process.poll() is None]

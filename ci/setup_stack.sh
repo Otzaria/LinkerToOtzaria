@@ -20,6 +20,7 @@ GPU="$STACK/gpu-server"
 NER_URL="http://127.0.0.1:5051/recognize-entities"
 STACK_ROLE="${LINKER_STACK_ROLE:-full}"
 RUNTIME_LOCK_DIR="${LINKER_REPO:-$PWD}/ci/runtime-lock"
+PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
 RUNTIME_LOCK_MANIFEST="$RUNTIME_LOCK_DIR/runtime-manifest.json"
 RUNTIME_LOCK_SEFARIA="$RUNTIME_LOCK_DIR/sefaria.txt"
 case "$STACK_ROLE" in
@@ -268,18 +269,49 @@ DUMP_ARCHIVE_SHA256="$(awk '$2 == "dump.tar.gz" {print $1}' "$CACHE/dump-sums/SH
   exit 1
 }
 if [ "$STACK_ROLE" != ner ]; then
-  # WiredTiger otherwise reserves ~50% of VM RAM for its cache; on the ~32GB WSL host
-  # that starved eight-plus resolver processes and got the job OOM-killed. The dump is
-  # read-mostly, so a small cache costs little. A mongod that is already running
-  # without the cap (started by an older setup) is restarted with it.
+  # WiredTiger otherwise reserves ~50% of VM RAM for its cache, which starved
+  # eight-plus resolver processes and got the job OOM-killed. That half is ~21 GB on
+  # the 42.1 GB VM relink 34016397157 measured (its perf/host.jsonl) -- that VM is the
+  # runner account's own WSL2 VM, sized outside this repo, and this script also runs on
+  # the ARM resolver host, so the cap is fixed rather than derived from the VM. The
+  # dump is read-mostly, so a small cache costs little. A mongod that is already
+  # running without the cap (started by an older setup) is restarted with it.
   MONGO_CACHE_GB="${LINKER_MONGO_CACHE_GB:-3}"
+  MONGO_SCOPE="${LINKER_MONGO_SCOPE:-$CACHE/mongod.scope.json}"
+  MONGO_PIDFILE="$CACHE/mongod.pid"
+  MONGO_OWNER_FILE="$CACHE/mongod.owner"
+  MONGO_OWNER="${LINKER_MONGO_OWNER:-${GITHUB_RUN_ID:-manual}:${GITHUB_RUN_ATTEMPT:-0}}"
   if pgrep -x mongod >/dev/null && ! pgrep -ax mongod | grep -qE -- "--wiredTigerCacheSizeGB $MONGO_CACHE_GB( |$)"; then
     echo "restarting mongod with --wiredTigerCacheSizeGB $MONGO_CACHE_GB"
     mongod --dbpath "$CACHE/mongo-data" --shutdown || pkill -x mongod || true
     for _ in $(seq 1 30); do pgrep -x mongod >/dev/null || break; sleep 1; done
     pgrep -x mongod >/dev/null && echo "::warning::mongod did not stop within 30s; continuing with the uncapped instance"
   fi
-  pgrep -x mongod >/dev/null || (mkdir -p "$CACHE/mongo-data" && mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log" --wiredTigerCacheSizeGB "$MONGO_CACHE_GB")
+  # --fork daemonizes mongod into its own session, so the runner only ever sees it at
+  # "Complete job", which printed `Terminate orphan process: pid (1413) (mongod)` on
+  # run 34015274945. That generic reaper runs only on a CLEAN exit; a runner death or a
+  # hard cancel leaves the daemon behind with nothing recording that it is ours. Bind it
+  # to an identity scope (pid + start time + uid + cmdline, because PIDs are reused) and
+  # to the owning run, so ci/stop_mongod.sh can stop exactly this daemon on every exit
+  # path and leave any other run's mongod strictly alone.
+  if ! pgrep -x mongod >/dev/null; then
+    mkdir -p "$CACHE/mongo-data"
+    rm -f "$MONGO_PIDFILE"
+    mongod --dbpath "$CACHE/mongo-data" --fork --logpath "$CACHE/mongod.log" \
+      --pidfilepath "$MONGO_PIDFILE" --wiredTigerCacheSizeGB "$MONGO_CACHE_GB"
+  fi
+  MONGO_PID="$(cat "$MONGO_PIDFILE" 2>/dev/null || true)"
+  if [[ "$MONGO_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$MONGO_PID" 2>/dev/null &&
+     python3 "$PROCESS_SCOPE" record --state "$MONGO_SCOPE" --pid "$MONGO_PID" \
+       --kind mongod --expect "--dbpath $CACHE/mongo-data" --mode 0600; then
+    printf '%s' "$MONGO_OWNER" > "$MONGO_OWNER_FILE"
+    echo "mongod: owned pid $MONGO_PID (run $MONGO_OWNER)"
+  else
+    # A daemon from before this contract (no pidfile) or a pid that no longer proves it
+    # is our mongod: never signal it heuristically, and say so rather than pretending
+    # the run owns what it will later refuse to stop.
+    echo "::warning::mongod could not be bound to an ownership scope; it will be left running"
+  fi
 fi
 if [ "$STACK_ROLE" != ner ] && [ ! -f "$DUMP_MARKER" ]; then
   mkdir -p "$DUMP_ARCHIVE_DIR"
@@ -461,7 +493,6 @@ NER_MARKER="$CACHE/.ner-identity"
 NER_PIDFILE="$CACHE/gunicorn.pid"
 NER_SCOPE="${LINKER_NER_SCOPE:-$CACHE/gunicorn.scope.json}"
 NER_SCOPE_MODE="${LINKER_NER_SCOPE_MODE:-0600}"
-PROCESS_SCOPE="$(dirname "$0")/process_scope.py"
 if [ "$STACK_ROLE" = resolver ]; then
   # The CPU resolver deliberately has no model server in memory.  This runs under
   # the shared host lease, so stopping the exact owned group cannot race another job.

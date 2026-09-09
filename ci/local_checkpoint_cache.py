@@ -275,6 +275,10 @@ def restore(args: argparse.Namespace) -> None:
             (destination / "completed_books.json").unlink()
         except FileNotFoundError:
             pass
+    # Name the source in the run dir so incremental.py's `done:` line can say what it
+    # ADOPTED rather than claiming it linked those books.  Diagnostics only: nothing
+    # gates on this file, and `save` copies an explicit member list, never this.
+    (destination / "checkpoint_source.txt").write_text(source.name + "\n", encoding="utf-8")
     shard_count = sum(SHARD_PATH.fullmatch(item["path"]) is not None for item in actual_files)
     completed_count = 0
     if schema_version == 2:

@@ -6,6 +6,7 @@ exhausted the WSL host. These tests drive run_pool with tiny in-process child
 bodies (no Sefaria) and pin the supervisor contract it must reproduce: per-label
 heartbeats, stall kill + bounded replacement, recycle re-fork, exit-code ledger.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -156,6 +157,34 @@ class RunPoolTest(unittest.TestCase):
             self.assertEqual(fh.read().strip(), "2")  # original + one bounded replacement
         self.assertEqual(self._codes(), {"w01": [3, 3], "w02": [0]})
         self.assertTrue(any("replacement limit 1 exhausted" in m for m in self.messages))
+
+    def test_the_release_derives_the_masters_replacement_count_from_the_ledger(self):
+        # run_pool keeps `restarts` in local state and returns only 0/1, so a crashed
+        # CHILD never reaches the driver's workers_replaced and the release published 0
+        # for exactly the population that counter exists to surface. The published
+        # pool_workers_replaced is derived from the ledger below instead; this binds
+        # ci/add_pool_replacements.py to a REAL pool run rather than to a fixture.
+        lb = self.link_books
+        state = {}
+
+        def setup(label):
+            state["label"] = label
+
+        def body():
+            self._lives(state["label"])
+            return 4 if state["label"] == "w01" else 0
+
+        code = lb.run_pool(3, self.run_dir, "pool", setup, body, restart_limit=2,
+                           log=self._log, poll_seconds=0.05)
+        self.assertEqual(code, 1)
+        self.assertEqual(self._codes(), {"w01": [4, 4, 4], "w02": [0], "w03": [0]})
+        replacements = sum(1 for m in self.messages if "starting bounded replacement" in m)
+        self.assertEqual(replacements, 2)  # the master's own log, read back
+        spec = importlib.util.spec_from_file_location(
+            "add_pool_replacements", os.path.join(ROOT, "ci", "add_pool_replacements.py"))
+        annotator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(annotator)
+        self.assertEqual(annotator.pool_replacements(self._codes()), replacements)
 
     def test_stalled_child_is_killed_and_replaced(self):
         lb = self.link_books
@@ -328,6 +357,29 @@ class DriverPoolWiringTest(unittest.TestCase):
         open(stale, "w").close()
         self._run(run_dir=run_dir, engine_pool=True)
         self.assertFalse(os.path.exists(stale))
+
+    def test_pool_progress_uses_a_private_heartbeat_namespace(self):
+        # An interrupted 12-worker pool can leave all of these mtimes fresh.  A later
+        # 3-worker invocation must not print "workers 12 alive" before its own master
+        # has even forked a child.
+        import incremental
+        run_dir = os.path.join(tempfile.mkdtemp(), "run")
+        legacy = os.path.join(run_dir, "worker-heartbeats")
+        os.makedirs(legacy)
+        for number in range(1, 13):
+            _touch(os.path.join(legacy, f"w{number:02d}"))
+
+        _codes, spawned = self._run(run_dir=run_dir, engine_pool=True)
+        namespace = spawned[0].kwargs["env"]["LINKER_HEARTBEAT_NAMESPACE"]
+        current = os.path.join(legacy, namespace)
+        self.assertTrue(os.path.isdir(current))
+        _touch(os.path.join(current, "w01"))
+        self.assertEqual(
+            incremental._alive_worker_count(
+                current, {"pool"}, 60, time.time(), {"w01", "w02", "w03"}
+            ),
+            1,
+        )
 
     def test_default_mode_still_spawns_independent_workers(self):
         codes, spawned = self._run()

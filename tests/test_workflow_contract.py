@@ -1,10 +1,144 @@
 import hashlib
 import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 import unittest
 
 
+# The two fingerprint components that a source change in THIS repo can move.
+# Everything else in the fingerprint (dump, he_ref_ner, he_subref_ner, sefaria,
+# gpu-server, python_runtime) comes from a pin or a fixed release asset and
+# cannot move without a deliberate bump -- which must force a full relink, not
+# be registered as an output-neutral migration.
+ENGINE_SRC_FILES = (
+    "src/link_books.py",
+    "src/linker_artifact.py",
+    "src/line_baseline.py",
+    "src/incremental.py",
+    "src/ner_handoff.py",
+    "src/precompute_ner.py",
+    "ci/gpu_server_microbatch.py",
+    "ci/gpu_server_microbatch.patch",
+)
+SEFARIA_PATCH_FILE = "ci/sefaria_resolver.patch"
+
+
+def yaml_mapping_scalar(text: str, *path: str) -> str:
+    """Read one plain mapping scalar without adding a YAML dependency to CI.
+
+    The workflow contract only needs a handful of single-line scalar values.  Keep
+    that check aligned with this repository's zero-third-party-import test suite
+    instead of making every PR install a YAML parser merely to inspect indentation.
+    """
+    stack = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^( *)([A-Za-z0-9_-]+):(?:[ \t]*(.*))?$", line)
+        if match is None:
+            continue
+        indent, key, value = len(match.group(1)), match.group(2), match.group(3)
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        current_path = tuple(item[1] for item in stack) + (key,)
+        if current_path == path:
+            if not value:
+                raise AssertionError(f"{'.'.join(path)} is not a scalar")
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value
+        if not value:
+            stack.append((indent, key))
+    raise KeyError(".".join(path))
+
+
+def committed_blob(root: Path, relative_path: str) -> bytes:
+    """The committed bytes of one file, as the runner hashes them.
+
+    ci/setup_stack.sh runs on a Linux checkout and hashes LF bytes.  Reading the
+    worktree instead is wrong on Windows, where .patch files are CRLF: it yields
+    a fingerprint that no run can ever produce, and the guard below then compares
+    two strings that are both fiction.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"HEAD:{relative_path}"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cannot read committed blob {relative_path!r}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return result.stdout
+
+
+def substitute_component(fingerprint: str, key: str, value: str) -> str:
+    """Replace exactly one ``key=...`` component, anchored on the key."""
+    parts = fingerprint.split(";")
+    hits = [index for index, part in enumerate(parts) if part.startswith(f"{key}=")]
+    if len(hits) != 1:
+        raise KeyError(f"{key!r} appears {len(hits)} times in the fingerprint")
+    parts[hits[0]] = f"{key}={value}"
+    return ";".join(parts)
+
+
 class RelinkWorkflowContractTest(unittest.TestCase):
+    def test_relink_timeout_expressions_match_the_shared_contract(self):
+        """Inspect required YAML scalars and bind shared timeouts to contract bytes.
+
+        The 7,200-minute standalone ceiling is intentionally outside the
+        cross-repository wait contract: no SeforimLibrary build waits for it.
+        """
+        root = Path(__file__).parents[1]
+        contract_path = root / ".github/contracts/linker_relink_timeouts_v1.json"
+        contract_bytes = contract_path.read_bytes()
+        contract = json.loads(contract_bytes)
+        self.assertEqual(
+            hashlib.sha256(contract_bytes).hexdigest(),
+            "a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f",
+        )
+        self.assertEqual(contract["contractVersion"], 1)
+        self.assertEqual(contract["workflow"], "relink.yml")
+
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        digest_path = ("on", "workflow_dispatch", "inputs", "wait_contract_sha256")
+        self.assertEqual(yaml_mapping_scalar(workflow, *digest_path, "type"), "string")
+        self.assertEqual(
+            yaml_mapping_scalar(workflow, *digest_path, "default"),
+            hashlib.sha256(contract_bytes).hexdigest(),
+        )
+
+        timeouts = contract["timeouts"]
+        self.assertEqual(
+            yaml_mapping_scalar(workflow, "jobs", "relink", "timeout-minutes"),
+            "${{ inputs.target == 'kaggle' && "
+            f"{timeouts['relink']['kaggle']} || "
+            "(inputs.target == 'local' && "
+            f"{timeouts['relink']['local']} || "
+            "(inputs.library_run_id != '' && "
+            f"{timeouts['relink']['server']} || 7200)) }}}}",
+        )
+        self.assertEqual(
+            yaml_mapping_scalar(workflow, "jobs", "resolve", "timeout-minutes"),
+            "${{ inputs.library_run_id != '' && "
+            f"{timeouts['resolve']} || 7200 }}}}",
+        )
+        self.assertEqual(
+            yaml_mapping_scalar(workflow, "jobs", "publish", "timeout-minutes"),
+            str(timeouts["publish"]),
+        )
+
+        intake = (root / ".github/workflows/kaggle-relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(yaml_mapping_scalar(intake, *digest_path, "type"), "string")
+        self.assertEqual(
+            yaml_mapping_scalar(intake, *digest_path, "default"),
+            hashlib.sha256(contract_bytes).hexdigest(),
+        )
+
     def test_local_rocm_target_uses_dedicated_runner_and_persistent_venv(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
@@ -252,7 +386,19 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         # target=local adopts its durable raw-NER bundle under an attested fingerprint.
         self.assertIn("adopting the durable local raw-NER bundle under attested engine fingerprint", workflow)
         self.assertIn('if [ -n "${NER_CHECKPOINT_SOURCE_ENGINE_FINGERPRINT:-}" ]; then', workflow)
-        self.assertIn(".head_sha == $head_sha", workflow)
+        # The checkpoint-source guard lives in ci/ so every one of its conditions is
+        # unit-tested (tests/test_local_checkpoint_source.py). The workflow must still
+        # hand it the exact coordinates — above all THIS Linker commit.
+        self.assertIn('python3 ci/validate_local_checkpoint_source.py "$source_json"', workflow)
+        self.assertIn('--request-id "$RELINK_REQUEST_ID"', workflow)
+        self.assertIn('--parent-run-attempt "$PARENT_RUN_ATTEMPT"', workflow)
+        self.assertIn('--head-sha "$GITHUB_SHA"', workflow)
+        guard = (
+            Path(__file__).parents[1] / "ci/validate_local_checkpoint_source.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('TERMINAL_CONCLUSIONS = ("cancelled", "failure")', guard)
+        self.assertIn('TITLE_PREFIXES = ("relink", "relink-recovery")', guard)
+        self.assertIn('source.get("head_sha") != args.head_sha', guard)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
         self.assertIn("--engine-workers 12", workflow)
@@ -269,10 +415,9 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("export OMP_NUM_THREADS=1", workflow)
         self.assertIn("export OPENBLAS_NUM_THREADS=1", workflow)
         self.assertIn("ARGS+=(--engine-restart-limit 2)", workflow)
-        self.assertIn(
-            "inputs.target == 'local' && inputs.allow_full_relink && 1440",
-            workflow,
-        )
+        # allow_full_relink authorizes a baseline MIGRATION; it no longer decides the
+        # job ceiling — see test_parented_local_run_keeps_the_full_ceiling.
+        self.assertNotIn("inputs.allow_full_relink && 1440", workflow)
         self.assertIn("LINKER_RESCAN_SECONDS: ${{ inputs.target == 'local' && '10' || '60' }}", workflow)
         self.assertIn("inputs.target == 'local' && '1'", workflow)
         self.assertIn("LINKER_NER_MICROBATCH_TEXTS", workflow)
@@ -305,6 +450,70 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("Pack resumable NER checkpoint after bounded failure", workflow)
         self.assertIn("Restore exact prior-attempt NER checkpoint", workflow)
         self.assertIn("Kaggle now performs NER only", workflow)
+
+    def test_parented_local_run_keeps_the_full_ceiling(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        # A serial (parented) local run must NOT inherit the 480-minute CPU-resolve
+        # ceiling of the split topology: on local one job pays GPU NER *and* resolve.
+        # Run 33994031370 packed a complete payload 12 s after being cancelled at 480 min.
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || "
+            "(inputs.target == 'local' && 1440 || "
+            "(inputs.library_run_id != '' && 480 || 7200)) }}",
+            workflow,
+        )
+        # The CPU-resolve job never carries the GPU stage, so it keeps 480/7200.
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.library_run_id != '' && 480 || 7200 }}",
+            workflow,
+        )
+
+    def test_unpublished_payload_survives_the_always_cleanup(self):
+        root = Path(__file__).parents[1]
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        packer = (root / "ci/pack_and_publish.sh").read_text(encoding="utf-8")
+
+        # The payload leaves the run-scoped workspace BEFORE it is announced, so a
+        # cancel between packing and publishing cannot take it with it.
+        self.assertIn(
+            'PRESERVED="${LINKER_CACHE_DIR:-$HOME/.cache/linker-stack}'
+            "/unpublished-payloads/$SHA\"",
+            packer,
+        )
+        self.assertIn('mv -f "$PRESERVED_TMP" "$PRESERVED/$OUT"', packer)
+        # A workspace fallback would be git-cleaned by the next run's checkout.
+        self.assertNotIn("{LINKER_CACHE_DIR:-$PWD}", packer)
+        self.assertNotIn("{LINKER_CACHE_DIR:-$PWD}", workflow)
+        # Exactly one line about the packed payload -- not a firehose.
+        self.assertEqual(
+            packer.count('echo "payload packed: $PRESERVED/$OUT sha256=$SHA (preserved for recovery)"'),
+            1,
+        )
+        self.assertEqual(packer.count("payload packed:"), 1)
+
+        # Both always() cleanups drop that copy only once the handoff really shipped
+        # the bytes; otherwise they keep it and say where it is.
+        self.assertEqual(workflow.count("id: publish_handoff"), 2)
+        self.assertEqual(
+            workflow.count("HANDOFF_PUBLISHED: ${{ steps.publish_handoff.outcome == 'success' }}"),
+            2,
+        )
+        self.assertEqual(workflow.count('if [ "$HANDOFF_PUBLISHED" = true ]; then'), 2)
+        self.assertEqual(workflow.count('rm -rf "$preserved"'), 2)
+        self.assertEqual(workflow.count("unpublished payload retained for recovery:"), 2)
+
+        # Nothing adopts the preserved directory automatically: the artifact store is
+        # still restored from a PUBLISHED release, so a payload kept here can never be
+        # picked up by a run with a different engine fingerprint.
+        self.assertEqual(workflow.count("unpublished-payloads"), 2)
+        for relative in ("ci/restore_artifact_store.sh", "src/incremental.py"):
+            with self.subTest(consumer=relative):
+                self.assertNotIn(
+                    "unpublished-payloads",
+                    (root / relative).read_text(encoding="utf-8"),
+                )
 
     def test_line_baseline_seed_never_starts_the_linker(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
@@ -374,21 +583,64 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("django.setup", producer)
         self.assertIn("from sefaria.helper.normalization import NormalizerComposer", producer)
 
+    def resolve_migration(self, root: Path, actual: str) -> str:
+        """Run the real resolver the workflow runs, against the real registry."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "ci/resolve_output_neutral_fingerprint_migration.py"),
+                "--baseline",
+                str(root / "baseline/snapshot_hashes.json"),
+                "--actual",
+                actual,
+                "--migrations",
+                str(root / "baseline/output_neutral_fingerprint_migrations.json"),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
     def test_committed_fingerprint_is_accepted_lineage_not_dirty_source(self):
+        """HEAD's engine must be adoptable from the committed lineage.
+
+        What this proves, exactly: ``engine_src`` and ``sefaria_patch`` recomputed
+        from HEAD's blobs -- the only two fingerprint components a source change in
+        this repo can move -- substituted into the committed lineage fingerprint,
+        are resolved by ci/resolve_output_neutral_fingerprint_migration.py into the
+        exact ``OLD::NEW`` adoption contract, using the same baseline file and the
+        same registry the workflow passes it.  So the next relink at this commit
+        adopts instead of relinking all ~7,300 books.  Running the resolver rather
+        than re-implementing the lookup also re-asserts the registry's schema and
+        its per-entry ``review`` requirement, and that no two entries are ambiguous.
+
+        And that the guard is EXACT: a one-character drift in either component is
+        not resolved, so an engine that is not the reviewed one still forces a full
+        relink.
+
+        What this does NOT prove: that the change is output-neutral.  Only the
+        review text carries that claim; this asserts a reviewed entry exists and
+        matches byte-for-byte.  It also assumes the pinned components (dump,
+        models, sefaria, gpu-server, python_runtime) are unchanged -- a pin bump
+        must force a full relink and must never be registered here.
+
+        This assertion was inverted by 1877071 for a semantic change and never
+        restored; it is a POSITIVE guard, and the empty-substitution branch below
+        is the only case in which it asserts nothing.
+        """
         root = Path(__file__).parents[1]
+        if not (root / ".git").exists():
+            self.skipTest("not a git checkout: committed blobs are unavailable")
+
         digest = hashlib.sha256()
-        for relative_path in (
-            "src/link_books.py",
-            "src/linker_artifact.py",
-            "src/line_baseline.py",
-            "src/incremental.py",
-            "src/ner_handoff.py",
-            "src/precompute_ner.py",
-            "ci/gpu_server_microbatch.py",
-            "ci/gpu_server_microbatch.patch",
-        ):
-            digest.update((root / relative_path).read_bytes())
-        engine_component = f"engine_src={digest.hexdigest()[:16]}"
+        for relative_path in ENGINE_SRC_FILES:
+            digest.update(committed_blob(root, relative_path))
+        engine_src = digest.hexdigest()[:16]
+        sefaria_patch = hashlib.sha256(
+            committed_blob(root, SEFARIA_PATCH_FILE)
+        ).hexdigest()[:16]
 
         baseline = json.loads((root / "baseline/snapshot_hashes.json").read_text())
         metadata = json.loads((root / "meta.json").read_text())
@@ -396,23 +648,38 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         metadata_fingerprint = metadata["engine"]["fingerprint"]
 
         self.assertEqual(baseline_fingerprint, metadata_fingerprint)
-        if engine_component not in baseline_fingerprint:
-            migrations = json.loads(
-                (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
-            )
-            current_fingerprint = baseline_fingerprint.replace(
-                baseline_fingerprint.split("engine_src=")[1].split(";", 1)[0],
-                engine_component.split("=", 1)[1],
-            )
-            self.assertEqual(migrations.get("schema_version"), 1)
-            self.assertFalse(
-                any(
-                    entry.get("from") == baseline_fingerprint
-                    and entry.get("to") == current_fingerprint
-                    for entry in migrations.get("migrations", [])
-                ),
-                "this semantic change must force a full relink, never fingerprint adoption",
-            )
+
+        current_fingerprint = substitute_component(
+            substitute_component(baseline_fingerprint, "engine_src", engine_src),
+            "sefaria_patch",
+            sefaria_patch,
+        )
+        if current_fingerprint == baseline_fingerprint:
+            # The committed engine IS the published lineage; nothing to migrate.
+            self.assertEqual(self.resolve_migration(root, current_fingerprint), "")
+            return
+
+        migrations = json.loads(
+            (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
+        )
+        self.assertEqual(migrations.get("schema_version"), 1)
+        self.assertEqual(
+            self.resolve_migration(root, current_fingerprint),
+            f"{baseline_fingerprint}::{current_fingerprint}",
+            "the engine committed here has drifted from the published lineage without "
+            "a reviewed output-neutral migration entry: the next relink would rebuild "
+            "every book",
+        )
+
+        for key, value in (("engine_src", engine_src), ("sefaria_patch", sefaria_patch)):
+            mutated_value = value[:-1] + ("0" if value[-1] != "0" else "1")
+            mutated = substitute_component(current_fingerprint, key, mutated_value)
+            with self.subTest(mutated=key):
+                self.assertEqual(
+                    self.resolve_migration(root, mutated),
+                    "",
+                    f"a one-character drift in {key} must NOT be adopted",
+                )
 
     def test_pack_steps_saturate_the_runner_without_losing_determinism(self):
         root = Path(__file__).parents[1]

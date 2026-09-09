@@ -11,6 +11,12 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, write_artifact  # noqa: E402
 import incremental as inc  # noqa: E402
 
+try:  # link_books needs resource/fcntl: this whole harness is POSIX-only in practice.
+    import link_books  # noqa: F401,E402
+    ENGINE_IMPORTABLE = True
+except ImportError:
+    ENGINE_IMPORTABLE = False
+
 
 def _snapshot(path, rows):
     """Rows are 4-tuples; context defaults to the canonical book title."""
@@ -53,7 +59,13 @@ class IncrementalE2ETest(unittest.TestCase):
     def tearDown(self):
         inc._run_engine = self._orig_engine
 
-    def _fake_engine(self, args, only_books_path):
+    def _fake_engine(self, args, only_books_path, progress_seconds=60.0, stats=None):
+        # `stats` mirrors the real _run_engine's out-parameter: the bounded worker
+        # replacements only that frame can see, which relink_work.json reports. A fake
+        # spawns no worker, so it honestly reports none — but it must still fill the
+        # dict, or the driver would be tested against a signature it does not have.
+        if stats is not None:
+            stats["workers_replaced"] = 0
         import json
         from link_books import claim_id
         from linker_artifact import BookKey
@@ -145,6 +157,75 @@ class IncrementalE2ETest(unittest.TestCase):
 
         # run4: same v2 snapshot -> baseline advanced only for what was linked -> 0.
         self.assertEqual(inc.run_incremental(self._args()), 0)
+
+    # The other tests in this class predate the flag and simply fail where link_books
+    # cannot be imported; that is a known, pre-existing platform gap and not this
+    # change's to fix. A test added today should declare its platform instead of
+    # joining that list.
+    @unittest.skipUnless(ENGINE_IMPORTABLE, "link_books (resource/fcntl) is POSIX-only")
+    def test_every_finished_run_leaves_a_work_provenance_object_for_the_release(self):
+        """`relink_work.json` exists exactly when a payload was published.
+
+        Recovery 34021656701 adopted 5126 of 5127 books and its release said nothing
+        about that. This is the driver end of the fix: the object is written after every
+        fail-closed gate, so it can only describe a payload that actually shipped, and a
+        previous run's file cannot survive into a run that fails (the run dir is durable
+        on the self-hosted host). ci/validate_relink_work.py is loaded by path on
+        purpose — it restates the schema, so it cannot rubber-stamp a producer bug.
+        """
+        import importlib.util
+        import json
+        from pathlib import Path
+        from unittest import mock
+
+        spec = importlib.util.spec_from_file_location(
+            "validate_relink_work", os.path.join(ROOT, "ci/validate_relink_work.py"))
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        work_path = os.path.join(self.run_dir, "relink_work.json")
+
+        _snapshot(self.snap, self._rows())
+        environment = {"GITHUB_RUN_ID": "34021656701", "GITHUB_RUN_ATTEMPT": "1"}
+        with mock.patch.dict(os.environ, environment):
+            self.assertEqual(inc.run_incremental(self._args()), 3)
+        work = contract.load(Path(work_path))
+        contract.validate(work, 34021656701, 1)
+        self.assertEqual(
+            (work["books_total"], work["books_adopted"], work["books_computed"],
+             work["books_failed"]), (3, 0, 3, 0))
+        self.assertIsNone(work["checkpoint_source"])
+        self.assertEqual(work["generated_at"], "2026-01-01T00:00:00Z")
+
+        # A run with an empty delta still says so, rather than leaving the last run's
+        # numbers standing as if they described this release. The engine journals are
+        # the same hazard one file over: they are wiped with the rest of the ledger
+        # only when there IS a delta, so on a durable run dir an empty-delta release
+        # would otherwise inherit the previous run's requeues, re-claims, duplicates
+        # and heavy recycles. No engine ran, so every engine counter is zero.
+        link_books.record_claim_event(self.run_dir, "recovered", "cid-1")
+        link_books.record_claim_event(self.run_dir, "duplicate", "cid-2")
+        link_books.journal_memory_event(
+            self.run_dir, {"event": "requeued-after-memoryerror", "claim_id": "cid-1"})
+        link_books.journal_memory_event(self.run_dir, {"event": "recycled-for-heavy"})
+        with mock.patch.dict(os.environ, environment):
+            self.assertEqual(inc.run_incremental(self._args()), 0)
+        empty = json.loads(open(work_path, encoding="utf-8").read())
+        self.assertEqual(empty["books_total"], 0)
+        self.assertEqual(
+            [empty[field] for field in (
+                "books_requeued_after_memoryerror", "books_reclaimed_after_worker_death",
+                "duplicates", "workers_recycled_for_heavy", "workers_replaced")],
+            [0, 0, 0, 0, 0])
+        contract.validate(contract.load(Path(work_path)), 34021656701, 1)
+
+        # A run that dies leaves NO provenance: the baseline did not advance, so there
+        # is nothing this file could truthfully describe.
+        self.fail_engine = True
+        os.remove(self.snap)
+        _snapshot(self.snap, self._rows(a="a2"))
+        with self.assertRaisesRegex(RuntimeError, "simulated engine failure"):
+            inc.run_incremental(self._args())
+        self.assertFalse(os.path.exists(work_path))
 
     def test_exact_plan_checkpoint_resume_preserves_shards_but_rebuilds_ledgers(self):
         _snapshot(self.snap, self._rows())

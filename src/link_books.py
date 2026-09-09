@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import uuid
+import warnings
 from contextlib import contextmanager
 
 # django/requests are imported lazily (main/ner_alive): the incremental driver imports
@@ -33,7 +34,9 @@ from contextlib import contextmanager
 
 # linker_artifact lives next to this file — import it as the single format authority.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from linker_artifact import BookKey, LinkRecord, book_key_to_relpath, content_hash, write_artifact  # noqa: E402
+from linker_artifact import (  # noqa: E402
+    BookKey, LinkRecord, book_key_to_relpath, content_hash, remove_artifact, write_artifact,
+)
 from line_baseline import indices_from_ranges  # noqa: E402
 
 # Lines per bulk NER call. Transport granularity only — per-line output is independent
@@ -62,9 +65,16 @@ RESCAN_WAIT_SEC = max(1, int(os.environ.get("LINKER_RESCAN_SECONDS", "60")))
 # it to the heavy phase, and the worker recycles.  0 disables deferral.
 HEAVY_BOOK_GROWTH_BYTES = float(os.environ.get("LINKER_HEAVY_BOOK_GROWTH_BYTES", 2.5e9))
 # The heavy phase starts only once every other book is done; then at most this many
-# deferred books resolve concurrently (kernel-locked slots).  Budget on the 32 GB VM:
-# slots x (HEAVY_RSS_CAP + one batch of growth, judged only between batches) + the
-# pool master + idle children + mongod's cache must stay below the VM.
+# deferred books resolve concurrently (kernel-locked slots).  Budget: slots x
+# (HEAVY_RSS_CAP + one batch of growth, judged only between batches) + the pool
+# master + idle children + mongod's cache must stay below the VM.  That VM is the
+# WSL2 VM of the RUNNER's own Windows account, sized by that account's .wslconfig -
+# outside this repo and not readable from any other account - so the only honest
+# figure for a given run is its OWN perf/host.jsonl: relink 34016397157 measured
+# MemTotal 41,072,256 KiB = 42.1 GB with 12 GiB of swap.  This comment used to assert
+# a flat "32 GB VM", which it was not.  The interactive WSL VM on the same machine
+# belongs to a DIFFERENT Windows account (26 GB with 32 GiB of swap) and is NOT this
+# one: the swap figures alone tell the two apart.  Never size the linker from it.
 HEAVY_BOOK_SLOTS = max(1, int(os.environ.get("LINKER_HEAVY_BOOK_SLOTS", "2")))
 # Recycle cap while resolving a deferred book under a slot: the ordinary cap would
 # recycle such a worker after nearly every batch.  Judged on the same figure as RSS_CAP.
@@ -72,10 +82,30 @@ HEAVY_RSS_CAP = float(os.environ.get("LINKER_HEAVY_RSS_CAP_BYTES", 5e9))
 # A worker idling in the heavy phase (no free slot) still holds the private memory it
 # accumulated; above this many bytes it recycles so the heavy books get that RAM.
 HEAVY_IDLE_RECYCLE_BYTES = float(os.environ.get("LINKER_HEAVY_IDLE_RECYCLE_BYTES", 3e8))
+# A deferred (heavy) book is taken ONLY by a worker whose current life is fresh.  In
+# relink 34016397157 the same book that a fresh worker linked in 2.3 s killed the run
+# on a worker that had already processed 75 books this life: one line asked for
+# 11.9 GB on top of that accumulated Ref cache and hit the 26 GB address-space ceiling
+# (`w06 ERROR ... line 43 failed to link: MemoryError`).  Heavy books are the ones
+# that need the whole budget, so they get a worker that owns none of it yet.  A worker
+# that is not fresh recycles BEFORE claiming the book (nothing is held yet, so nothing
+# leaks); the same book is then picked up by the fresh image.  0/false disables.
+HEAVY_FRESH_WORKER = os.environ.get("LINKER_HEAVY_FRESH_WORKER", "1").strip().lower() \
+    not in ("0", "false", "no", "off", "")
+# "Fresh" is `no book completed in this life` OR `private growth below this` - a
+# disjunction on purpose: a fresh image has processed 0, so it can never be sent
+# round again by this rule, whatever the memory reading says (no recycle loop).
+# Same figure as the idle-recycle threshold: below it a life is not worth shedding.
+HEAVY_FRESH_GROWTH_BYTES = float(os.environ.get("LINKER_HEAVY_FRESH_GROWTH_BYTES", 3e8))
 # Last-resort address-space ceilings (RLIMIT_AS soft limit, bytes; 0 = unlimited).  A
 # single line that balloons past the deferral check gets a MemoryError inside THIS
-# worker - which defers the book in the normal phase and fails it in the heavy phase -
-# instead of the kernel OOM killer taking down the runner.
+# worker - which defers the book in the normal phase, and in the heavy phase requeues
+# it once onto a fresh worker before failing the run - instead of the kernel OOM
+# killer taking down the runner.  RLIMIT_AS bounds VIRTUAL size per process and is a
+# ceiling, never a reservation: two heavy slots may map more than the VM holds, which
+# is precisely why the ceiling exists (a MemoryError inside one worker instead of an
+# OOM kill of the runner) and why the fresh-worker rule above removes the accumulated
+# growth that let one ordinary book reach it.
 WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_WORKER_ADDRESS_SPACE_BYTES", "0")))
 HEAVY_WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES", "0")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
@@ -86,6 +116,8 @@ RECYCLE_EXIT_CODE = 75
 # True inside a run_pool child: switches the recycle cap to private memory and the
 # recycle action from execv to a pool exit.
 _POOL_CHILD = False
+HEARTBEAT_NAMESPACE_ENV = "LINKER_HEARTBEAT_NAMESPACE"
+_HEARTBEAT_NAMESPACE_RE = re.compile(r"[0-9a-f]{32}")
 
 _HEADING_RE = re.compile(r"^[\s\ufeff]*<h[1-6](?:\s|>)", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
@@ -167,6 +199,44 @@ def periodic_heartbeat(callback, interval=HEARTBEAT_SECONDS):
         raise RuntimeError("periodic linker heartbeat failed") from errors[0]
 
 
+# Sefaria's linker package logs at INFO through the root handler Django installs, and
+# nothing in this repo ever set a level on it: one line per DH cache miss plus two per
+# bulk_link call made 441k lines / 121 MB of the 123 MB relink log of 2026-09-06 —
+# 98% of it — burying every real message and every worker's progress.  None of it is
+# progress (perf-<label>.jsonl already records per-batch timings, and the incremental
+# driver prints a `progress:` line per minute), so the whole package drops to WARNING.
+# The two emitters are named explicitly as well: a level configured on a CHILD logger
+# by Django's LOGGING dict would out-vote the package level and bring the flood back.
+QUIET_SEFARIA_LOGGERS = (
+    "sefaria.model.linker",
+    "sefaria.model.linker.linker",
+    "sefaria.model.linker.referenceable_book_node",
+)
+
+
+def quiet_sefaria_linker_logs() -> dict:
+    """Drop Sefaria's linker INFO firehose to WARNING.  WARNING+ is untouched.
+
+    Call AFTER django.setup(): that is what applies Django's LOGGING dict, which would
+    otherwise reset the levels set here.  Pool children inherit the levels across
+    fork (logging state is ordinary process memory), so the master setting them once
+    before forking covers every resolver.
+
+    Idempotent, and called a second time immediately before the workers start: the
+    whole Sefaria/linker/NER import chain runs in between, and anything in it that
+    re-applied a logging dictConfig would silently restore the 121 MB firehose.
+    Returns the resulting EFFECTIVE level per logger so the caller can state, in one
+    line, that the silencing actually took.
+    """
+    import logging
+    levels = {}
+    for name in QUIET_SEFARIA_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.WARNING)
+        levels[name] = logging.getLevelName(logger.getEffectiveLevel())
+    return levels
+
+
 def validate_snapshot_contract(con) -> None:
     """Require the context-aware snapshot produced by the current DB build."""
     try:
@@ -242,6 +312,22 @@ def worker_memory_bytes() -> int:
     return rss_bytes()
 
 
+def heartbeat_directory(run_dir: str) -> str:
+    """The current driver's private heartbeat directory, or the legacy default.
+
+    The incremental driver creates a 128-bit namespace per invocation.  Pool children
+    inherit it from their master, so an old durable-run heartbeat can never inflate the
+    next run's ``workers_alive`` progress number.  Standalone use keeps the historical
+    flat directory for compatibility.
+    """
+    namespace = os.environ.get(HEARTBEAT_NAMESPACE_ENV)
+    if namespace is None:
+        return os.path.join(run_dir, "worker-heartbeats")
+    if not _HEARTBEAT_NAMESPACE_RE.fullmatch(namespace):
+        raise RuntimeError(f"invalid {HEARTBEAT_NAMESPACE_ENV} value")
+    return os.path.join(run_dir, "worker-heartbeats", namespace)
+
+
 def prepare_pool_child(snapshot: str, run_dir: str, label: str):
     """Per-child state after fork: Django handles closed, own SQLite handle, own
     heartbeat path, and proof that the private-memory cap can be judged here.
@@ -265,7 +351,7 @@ def prepare_pool_child(snapshot: str, run_dir: str, label: str):
             f"memory cap: {error}"
         ) from error
     connection = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
-    return connection, os.path.join(run_dir, "worker-heartbeats", label)
+    return connection, os.path.join(heartbeat_directory(run_dir), label)
 
 
 def _recycle_process() -> None:
@@ -280,6 +366,38 @@ def _recycle_process() -> None:
         sys.stderr.flush()
         os._exit(RECYCLE_EXIT_CODE)
     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def _os_thread_count():
+    """Threads the KERNEL sees — the number CPython itself judges at fork(), which
+    counts threads started by native libraries that ``threading`` never hears about."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("Threads:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def fork_thread_inventory() -> str:
+    """One line naming everything alive at the moment the pool forks.
+
+    Every relink log carries two warnings about this instant — CPython's "This process
+    is multi-threaded, use of fork()" and pymongo's "MongoClient opened before fork" —
+    and neither names a single thread, so the 2026-09-06 post-mortem could not tell
+    whether the threads were ours to stop.  This states them: the Python threads by
+    name, and the kernel's own count next to it (a native runtime's threads exist for
+    fork() even though ``threading`` cannot see them).
+    """
+    names = sorted(thread.name for thread in threading.enumerate())
+    os_threads = _os_thread_count()
+    return (
+        f"fork-time threads: {len(names)} python "
+        f"({', '.join(names) or 'none'}), "
+        f"{'unknown' if os_threads is None else os_threads} OS"
+    )
 
 
 def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
@@ -308,7 +426,7 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
     import signal
     import traceback
 
-    heartbeat_dir = os.path.join(run_dir, "worker-heartbeats")
+    heartbeat_dir = heartbeat_directory(run_dir)
     os.makedirs(heartbeat_dir, exist_ok=True)
     master_hb = os.path.join(heartbeat_dir, master_label)
     labels = [f"w{n:02d}" for n in range(1, int(worker_count) + 1)]
@@ -329,7 +447,24 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
         sys.stdout.flush()
         sys.stderr.flush()
         try:
-            pid = os.fork()
+            with warnings.catch_warnings():
+                # CPython 3.12 deprecates fork() in a process that has more than one OS
+                # thread.  The threads here are not ours: they belong to the loaded
+                # library (pymongo's topology monitors) and to whatever native runtime
+                # the import chain started — the master itself runs nothing in parallel
+                # (its heartbeats are inline, and the driver's progress line lives in
+                # another process).  Forking before them is not available: sharing the
+                # ~2 GB loaded library copy-on-write is the entire point of the pool, so
+                # the fork must come after the load.  What IS available is naming them,
+                # which the inventory line above does on every run — so this filter
+                # hides one already-answered message and nothing else.  It is bound to
+                # that exact message text and category, and only around the fork call.
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"This process \(pid=\d+\) is multi-threaded, use of fork\(\)",
+                    category=DeprecationWarning,
+                )
+                pid = os.fork()
         except OSError as error:
             # EAGAIN/ENOMEM is exactly the host state this pool exists to survive: give
             # up on THIS label (the driver judges the ledger; peers keep working) rather
@@ -392,6 +527,11 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
         signal_children(signal.SIGTERM)
 
     previous = signal.signal(signal.SIGTERM, on_term)
+    # State, once, what else is alive at the moment of the fork.  Two warnings in every
+    # relink log are about exactly this and neither says which threads it means; the
+    # inventory is what makes the next post-mortem able to answer it (see
+    # fork_thread_inventory).
+    log(f"pool master: {fork_thread_inventory()}")
     # Drop the garbage the library load left behind before freezing: frozen objects
     # are inherited by every child and never collected again.
     gc.collect()
@@ -485,6 +625,53 @@ def claim_id(bk: BookKey) -> str:
     return h.hexdigest()
 
 
+CLAIM_EVENT_DIR = "claim-events"
+
+
+def record_claim_event(run_dir: str, kind: str, cid: str) -> None:
+    """Note one EXCEPTIONAL claim transition so the driver can summarise the run.
+
+    Only the rare paths write here: a claim taken over from an owner that died, and a
+    second completion of a book (which the exclusive claim makes impossible — the
+    marker exists so a regression shows up as a number in the summary line instead of
+    as a silently absent invariant).  Best effort: failing to journal must never fail
+    a book, and these markers are diagnostics, never a gate.
+    """
+    try:
+        directory = os.path.join(run_dir, CLAIM_EVENT_DIR)
+        os.makedirs(directory, exist_ok=True)
+        open(os.path.join(directory, f"{kind}-{cid}"), "w").close()
+    except OSError:
+        pass
+
+
+def count_claim_events(run_dir: str, kind: str) -> int:
+    """How many distinct books recorded ``kind`` (see record_claim_event)."""
+    try:
+        names = os.listdir(os.path.join(run_dir, CLAIM_EVENT_DIR))
+    except OSError:
+        return 0
+    return sum(1 for name in names if name.startswith(f"{kind}-"))
+
+
+def mark_done(run_dir: str, cid: str) -> bool:
+    """Publish the book's `done` marker; False if one already existed.
+
+    Exactly the file the checkpoint saver, the driver's completeness assertion and
+    BookClaim.acquire read — `<run>/done/<claim id>`, an empty regular file — with
+    only the CREATION made exclusive, so a second completion of the same book is
+    counted rather than silently overwriting the first.
+    """
+    path = os.path.join(run_dir, "done", cid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    except FileExistsError:
+        record_claim_event(run_dir, "duplicate", cid)
+        return False
+    return True
+
+
 class BookClaim:
     """Exclusive, crash-safe ownership of one book in an engine run.
 
@@ -534,18 +721,63 @@ class BookClaim:
             os.mkdir(claim_path)
         except FileExistsError:
             # Reaching this branch while holding the advisory lock proves that no
-            # live worker owns the claim.  Waiting for the old heartbeat to age out
-            # used to strand a crashed worker's book for up to 15 minutes even though
-            # the kernel had already released its ownership lock.  Retire only the
-            # mutable claim directory immediately; immutable batch checkpoints live
-            # elsewhere and are reused by the replacement worker.
+            # live worker owns the claim, and that the previous owner never reached
+            # release() — i.e. it died holding the book.  Waiting for the old
+            # heartbeat to age out used to strand a crashed worker's book for up to
+            # 15 minutes even though the kernel had already released its ownership
+            # lock.  Retire only the mutable claim directory immediately; immutable
+            # batch checkpoints live elsewhere and are reused by this worker.
             retired = f"{claim_path}.abandoned-{uuid.uuid4().hex}"
-            os.replace(claim_path, retired)
-            shutil.rmtree(retired, ignore_errors=True)
+            try:
+                os.replace(claim_path, retired)
+            except FileNotFoundError:
+                # EAFP: nothing left to retire.  Only the lock holder may remove the
+                # claim directory, so this is a torn release rather than a peer — but
+                # an exists()/replace() pair would be exactly the two-syscall window
+                # this task exists to close.
+                pass
+            else:
+                shutil.rmtree(retired, ignore_errors=True)
             os.mkdir(claim_path)
+            # Journalled only once the takeover actually succeeded, so the closing
+            # summary counts books recovered rather than takeovers attempted.
+            record_claim_event(run_dir, "recovered", cid)
 
         open(heartbeat_path, "w").close()
         return BookClaim(claim_path, lock_fd)
+
+    @staticmethod
+    def is_claimed(run_dir: str, cid: str) -> bool:
+        """True only while a LIVE worker owns ``cid``.
+
+        Probes the ownership lock with a SHARED, non-blocking flock.  Shared probes do
+        not exclude each other, so twelve rescanning workers cannot hide an available
+        book from one another, while a live owner's exclusive lock does refuse them.
+        The kernel drops a dead owner's lock, so a crashed worker's book reports
+        unclaimed and the next acquire() takes it over — the book is retried, never
+        stranded, which is the whole point of never dropping a heavy book.
+
+        Advisory only: acquire() remains the sole authority on ownership.  A false
+        "claimed" costs one rescan round; a false "free" costs one refused acquire.
+        """
+        import fcntl
+
+        lock_path = os.path.join(run_dir, "claim", f".{cid}.lock")
+        try:
+            # No O_CREAT: probing must not litter the claim root for books this run
+            # never reaches, and a missing lock file simply means "never claimed".
+            fd = os.open(lock_path, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
 
     def heartbeat(self) -> None:
         """Refresh liveness without ever recreating a claim we no longer own."""
@@ -695,6 +927,198 @@ def gate_heavy_book(run_dir: str, cid: str, heavy_phase: bool) -> str:
     return "heavy" if heavy_phase else "skip"
 
 
+# ── memory events: fresh workers for heavy books, one requeue after MemoryError ──
+# Everything under <run>/memory is THIS invocation's bookkeeping: the driver wipes it
+# with the other ledgers, and the checkpoint saver's allow-list has no member that
+# could match it, so a requeue can never be carried into another run - let alone
+# adopted there as a completed book.
+MEMORY_DIR = "memory"
+MEMORY_JOURNAL = "journal.jsonl"
+REQUEUE_MARKER_DIR = "requeued-after-memoryerror"
+
+
+def worker_is_fresh_for_heavy(processed: int, growth_bytes: int) -> bool:
+    """May this worker life take a deferred (heavy) book?
+
+    Fresh = it has completed no book yet, OR it owns less than
+    HEAVY_FRESH_GROWTH_BYTES of private memory above its life baseline.  The first
+    disjunct is what makes the rule terminate: a freshly forked/exec'd image has
+    ``processed == 0``, so it is fresh by definition and cannot be sent round again,
+    whatever a memory reading says.  The second spares a fork for a life that
+    happens to have linked a few tiny books without growing.
+    """
+    if processed <= 0:
+        return True
+    return growth_bytes <= HEAVY_FRESH_GROWTH_BYTES
+
+
+def format_bytes_gb(value) -> str:
+    """11888857088 -> '11.9 GB'.  Growth figures are read at a glance, never summed."""
+    return f"{float(value) / 1e9:.1f} GB"
+
+
+_MEMORY_LINE_RE = re.compile(r"\bline (\d+) failed to link\b")
+
+
+def memory_error_line_number(message: str):
+    """The snapshot line a wrapped per-line MemoryError names, or None.
+
+    process_batch reports `line 43 failed to link: MemoryError:`; naming that line in
+    the requeue/failure lines is the difference between "a book is heavy" and "one
+    row of this book is".
+    """
+    found = _MEMORY_LINE_RE.search(message or "")
+    return int(found.group(1)) if found else None
+
+
+def memory_journal_path(run_dir: str) -> str:
+    return os.path.join(run_dir, MEMORY_DIR, MEMORY_JOURNAL)
+
+
+def journal_memory_event(run_dir: str, event: dict) -> None:
+    """Append one memory event (best effort; a journal must never fail a book).
+
+    One short O_APPEND write per event is atomic against the other eleven workers,
+    so the file stays parseable without a lock.  Events, not state: the requeue
+    marker below is the authority on whether a book's single retry was spent.
+    """
+    import json as _json
+    try:
+        directory = os.path.join(run_dir, MEMORY_DIR)
+        os.makedirs(directory, exist_ok=True)
+        payload = _json.dumps(
+            {"unix": time.time(), **event}, ensure_ascii=False, sort_keys=True
+        ) + "\n"
+        fd = os.open(
+            os.path.join(directory, MEMORY_JOURNAL),
+            os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644,
+        )
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def read_memory_journal(run_dir: str) -> list:
+    """Every journalled memory event, oldest first; a torn final line is ignored."""
+    import json as _json
+    events = []
+    try:
+        with open(memory_journal_path(run_dir), encoding="utf-8") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    value = _json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    events.append(value)
+    except OSError:
+        return []
+    return events
+
+
+def count_memory_events(run_dir: str, event: str) -> int:
+    """How many events of one kind this run journalled (recycles are per event)."""
+    return sum(1 for item in read_memory_journal(run_dir) if item.get("event") == event)
+
+
+def requeue_marker_path(run_dir: str, cid: str) -> str:
+    return os.path.join(run_dir, MEMORY_DIR, REQUEUE_MARKER_DIR, cid)
+
+
+def claim_memory_requeue(run_dir: str, cid: str, record: dict):
+    """Spend this book's single requeue-after-MemoryError budget.
+
+    Returns ``(True, record)`` to the caller that won the budget - it releases the
+    book and recycles, and the book (still lacking a done marker) is retried on a
+    fresh worker - and ``(False, first_record)`` to every later caller, which must
+    fail the book so the run stops rather than looping on it.  O_EXCL creation is the
+    whole gate: two workers that MemoryError on the same book in the same second
+    cannot both requeue it.  A record torn by a crash between create and write reads
+    back empty, which fails the book (safe) instead of granting a second budget.
+    """
+    import json as _json
+    path = requeue_marker_path(run_dir, cid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                stored = _json.load(stream)
+        except (OSError, ValueError):
+            return False, {}
+        return False, stored if isinstance(stored, dict) else {}
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        _json.dump(record, stream, ensure_ascii=False, sort_keys=True)
+        stream.write("\n")
+    return True, dict(record)
+
+
+def current_memory_limits(heavy: bool) -> dict:
+    """The ceilings actually in force in THIS worker, for the failure message."""
+    address_space = 0
+    if hasattr(resource, "RLIMIT_AS"):
+        soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+        address_space = 0 if soft == resource.RLIM_INFINITY else int(soft)
+    return {
+        "address_space_bytes": address_space,
+        "recycle_cap_bytes": int(HEAVY_RSS_CAP if heavy else RSS_CAP),
+        "heavy_growth_bytes": int(HEAVY_BOOK_GROWTH_BYTES),
+    }
+
+
+def _memory_attempt_phrase(record: dict) -> str:
+    line_number = record.get("line")
+    where = "in one line" if line_number is None else f"in one line (line {line_number})"
+    worker = record.get("worker") or "an unknown worker"
+    processed = record.get("processed")
+    after = "" if processed is None else \
+        f" after {processed} book{'' if processed == 1 else 's'}"
+    if "growth_bytes" not in record:
+        return f"figures unavailable (journal record incomplete) on {worker}"
+    return f"grew {format_bytes_gb(record['growth_bytes'])} {where} on {worker}{after}"
+
+
+def format_memory_requeue_line(*, bk, growth_bytes, worker, processed, line_number=None) -> str:
+    """The one line an operator needs when a book is given its single retry."""
+    return "memory: requeued {}/{!r} once after MemoryError ({}; retrying on a fresh worker)".format(
+        bk.source_name, bk.canonical_he_title,
+        _memory_attempt_phrase({
+            "growth_bytes": growth_bytes, "worker": worker,
+            "processed": processed, "line": line_number,
+        }),
+    )
+
+
+def format_memory_failure(*, bk, first: dict, second: dict, limits: dict) -> str:
+    """Why the run is being failed: the book, BOTH attempts, and the live ceilings.
+
+    A run that stops on one book must say what it already tried.  Relink 34016397157
+    printed only `line 43 failed to link: MemoryError:` and the next run linked the
+    same book in 2.3 s - the growth figures and the worker's book count are what
+    separate "this book is impossible" from "that worker was full", so each attempt
+    reports how many books its worker had already completed (with the fresh-worker
+    rule on, the retry's count is 0).
+    """
+    return (
+        "{}/{!r}: MemoryError twice - the book had already spent its single requeue "
+        "(attempt 1 {}; attempt 2 {}); limits: address space {}, recycle cap {}, "
+        "heavy deferral threshold {}".format(
+            bk.source_name, bk.canonical_he_title,
+            _memory_attempt_phrase(first), _memory_attempt_phrase(second),
+            limits.get("address_space_bytes", 0) or "unlimited",
+            limits.get("recycle_cap_bytes", 0),
+            limits.get("heavy_growth_bytes", 0),
+        )
+    )
+
+
 def partition_pending(books, run_dir: str):
     """Split undone books into (normal, heavy) preserving order."""
     normal, heavy = [], []
@@ -704,6 +1128,25 @@ def partition_pending(books, run_dir: str):
             continue
         (heavy if os.path.exists(heavy_marker_path(run_dir, cid)) else normal).append(bk)
     return normal, heavy
+
+
+def unclaimed(books, run_dir: str):
+    """Of ``books``, those no live worker owns right now — the rescan's hand-out set.
+
+    Every worker used to walk the same ordered pending list and start anything that
+    merely lacked a `done` marker, so a book already being resolved was resolved again
+    by each worker that arrived.  In relink 34016397157 that produced 2,148 redundant
+    completions out of 7,274 (29.5%), 1,107 books completed 2-10 times each, and
+    268,047 book-lines re-read from the snapshot for nothing; the resulting pile-up on
+    the same artifact is also what raced `os.remove(out_path)`.
+
+    The filter is advisory and deliberately snapshot-in-time: BookClaim.acquire still
+    decides ownership, and a book whose owner dies reappears here on the next pass
+    because the kernel released that owner's lock.  Books are therefore skipped for a
+    round, never removed from the run — the caller's loop keeps going until every book
+    carries a `done` marker.
+    """
+    return [bk for bk in books if not BookClaim.is_claimed(run_dir, claim_id(bk))]
 
 
 class HeavySlot:
@@ -1282,9 +1725,11 @@ def main():
     _BAVLI_CONVENTION = args.bavli_convention
 
     run = args.run_dir
-    for d in ("done", "claim", "logs", "failed", "worker-heartbeats", "checkpoints"):
+    for d in ("done", "claim", "logs", "failed", "worker-heartbeats", "checkpoints",
+              CLAIM_EVENT_DIR, os.path.join(MEMORY_DIR, REQUEUE_MARKER_DIR)):
         os.makedirs(os.path.join(run, d), exist_ok=True)
-    heartbeat_path = os.path.join(run, "worker-heartbeats", args.label)
+    heartbeat_path = os.path.join(heartbeat_directory(run), args.label)
+    os.makedirs(os.path.dirname(heartbeat_path), exist_ok=True)
 
     def worker_heartbeat():
         # A watchdog monitors this worker-specific heartbeat, not book completion.
@@ -1326,6 +1771,7 @@ def main():
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
     import django
     django.setup()
+    quiet_sefaria_linker_logs()
     from sefaria.model import Ref, library
     linker = library.get_linker("he")
 
@@ -1438,8 +1884,12 @@ def main():
             remaining = books
             while remaining:
                 normal, heavy = partition_pending(remaining, run)
+                # Hand out only books no live peer owns.  The pending list itself is
+                # unchanged (partition_pending still answers "which books lack a done
+                # marker"), so the heavy phase still begins only once every ordinary
+                # book is DONE — not merely claimed.
                 if normal:
-                    for bk in normal:
+                    for bk in unclaimed(normal, run):
                         yield bk
                 elif heavy:
                     if not heavy_phase:
@@ -1451,17 +1901,44 @@ def main():
                             + (str(applied) if applied else
                                f"kept at {resource.getrlimit(resource.RLIMIT_AS)[0] if hasattr(resource, 'RLIMIT_AS') else 'none'}")
                         )
-                    for bk in heavy:
+                    for bk in unclaimed(heavy, run):
                         yield bk
                 remaining = [bk for bk in remaining
                              if not os.path.exists(os.path.join(run, "done", claim_id(bk)))]
                 if remaining:
                     worker_heartbeat()
+                    # The loop condition stays the `done` ledger, never the claim
+                    # state: a worker must outlive every claimed-but-unfinished book,
+                    # or a peer dying at the tail would leave nobody to retry it.
+                    owned = sum(1 for bk in remaining
+                                if BookClaim.is_claimed(run, claim_id(bk)))
                     log(
-                        f"rescan: {len(remaining)} book(s) still lack a done marker; "
-                        f"sleeping {RESCAN_WAIT_SEC}s"
+                        f"rescan: {len(remaining)} book(s) still lack a done marker "
+                        f"({owned} owned by a live peer); sleeping {RESCAN_WAIT_SEC}s"
                     )
                     time.sleep(RESCAN_WAIT_SEC)
+
+        def recycle_now(message, claim=None, slot=None):
+            """Shed this worker image, releasing everything it holds first.
+
+            Every recycle states the two numbers a memory post-mortem needs -- books
+            completed in this life and private bytes owned above the life baseline --
+            so `pool: wNN recycled` is never the only record of why an image went.
+            release() and HeavySlot.release() are idempotent, so the caller's
+            `finally` is free to release again on the paths that reach it (these do
+            not: exec/exit never returns).
+            """
+            log(
+                f"{message} [life: {processed} book(s), "
+                f"{worker_memory_bytes() - life_baseline} private bytes above baseline]"
+            )
+            if claim is not None:
+                claim.release()
+            if slot is not None:
+                slot.release()
+            worker_heartbeat()
+            con.close()
+            _recycle_process()
 
         def defer_book(bk, cid, growth_bytes, reason, claim=None):
             # Persist the decision BEFORE the claim goes (a peer walking a stale list
@@ -1469,15 +1946,11 @@ def main():
             # book resumes from its shards in the heavy phase, under a slot, in a fresh
             # worker.
             mark_heavy(run, cid, bk, growth_bytes, reason)
-            if claim is not None:
-                claim.release()
-            log(
+            recycle_now(
                 f"deferring {bk.source_name}/{bk.canonical_he_title!r} to the heavy phase "
-                f"({reason}; grew {growth_bytes} bytes); recycling"
+                f"({reason}; grew {growth_bytes} bytes); recycling",
+                claim,
             )
-            worker_heartbeat()
-            con.close()
-            _recycle_process()
 
         processed = 0
         for bk in pending_books():
@@ -1486,7 +1959,28 @@ def main():
             if gate == "skip":
                 continue
             heavy = gate == "heavy"
+            if heavy and HEAVY_FRESH_WORKER:
+                # A heavy book gets a worker that owns none of the budget yet.  This
+                # is decided BEFORE the slot and BEFORE the claim, so a recycle here
+                # holds nothing: the book keeps its heavy marker, stays unclaimed and
+                # undone, and the fresh image (or a fresh peer) takes it on the next
+                # pass.  A fresh image has processed == 0, so it never lands here
+                # twice in a row -- the rule cannot become a recycle loop.
+                growth = worker_memory_bytes() - life_baseline
+                if not worker_is_fresh_for_heavy(processed, growth):
+                    journal_memory_event(run, {
+                        "event": "recycled-for-heavy", "claim_id": cid,
+                        "source_name": bk.source_name,
+                        "canonical_he_title": bk.canonical_he_title,
+                        "worker": args.label, "processed": processed,
+                        "growth_bytes": int(growth),
+                    })
+                    recycle_now(
+                        f"heavy phase: {bk.source_name}/{bk.canonical_he_title!r} needs a "
+                        "fresh worker; recycling before claiming it"
+                    )
             slot = None
+            claim = None
             if heavy:
                 slot = HeavySlot.acquire(run, HEAVY_BOOK_SLOTS)
                 if slot is None:
@@ -1497,9 +1991,7 @@ def main():
                     worker_heartbeat()
                     time.sleep(15)
                     if worker_memory_bytes() - life_baseline > HEAVY_IDLE_RECYCLE_BYTES:
-                        log("heavy phase: no free slot; recycling to release memory")
-                        con.close()
-                        _recycle_process()
+                        recycle_now("heavy phase: no free slot; recycling to release memory")
                     continue
             # Retry loop: a NER outage mid-book must retry THE SAME book, not skip to the
             # next one — every other worker may already be past it, and a book with neither
@@ -1510,9 +2002,15 @@ def main():
                     if os.path.exists(os.path.join(run, "done", cid)):
                         break
                     cooperative = precomputed is not None
-                    claim = None if cooperative else BookClaim.acquire(run, cid)
-                    if not cooperative and claim is None:
-                        break  # another live worker owns it — it will mark done/failed
+                    # Exclusive, unconditionally.  The raw-NER (cooperative) path used
+                    # to skip the book claim entirely and rely on per-batch locks, so
+                    # every worker that reached a book re-read its lines, re-validated
+                    # its shards, re-assembled its artifact and wrote a second `done`
+                    # marker: 29.5% of the completions in relink 34016397157.  Claiming
+                    # BEFORE book_lines() is what makes a losing worker free.
+                    claim = BookClaim.acquire(run, cid)
+                    if claim is None:
+                        break  # done, or another live worker owns it (it marks done/failed)
                     lines = book_lines(con, bk)
                     item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
                     if "ner_ranges" in item:
@@ -1544,17 +2042,16 @@ def main():
                             wait_for_ner(log)
 
                         def recycle_worker(current_rss, batches):
-                            log(
+                            # The next exec (or a peer) must be able to claim the same book
+                            # immediately and resume its immutable batch shards.  The slot,
+                            # if this is a heavy book, goes with it: the fresh image
+                            # re-acquires one rather than holding it across a fork.
+                            recycle_now(
                                 f"recycling mid-book (current RSS {current_rss} over cap "
                                 f"{int(HEAVY_RSS_CAP if heavy else RSS_CAP)}) after {batches} "
-                                f"checkpointed batch(es) this life"
+                                f"checkpointed batch(es) this life",
+                                claim, slot,
                             )
-                            # The next exec (or a peer) must be able to claim the same book
-                            # immediately and resume its immutable batch shards.
-                            if claim is not None:
-                                claim.release()
-                            con.close()
-                            _recycle_process()
 
                         heartbeat = lambda: (
                             worker_heartbeat(),
@@ -1575,21 +2072,68 @@ def main():
                                 recycle_cap=HEAVY_RSS_CAP if heavy else None,
                             )
                     except BookWorkInProgress:
-                        # Helpers filled other batches in this and later books. A rescan will
-                        # assemble once every atomic shard exists; this is ordinary contention.
+                        # A batch lock is still held by a process this worker took the book
+                        # over from (a stale takeover can overlap a not-yet-reaped owner).
+                        # Assemble on a later rescan, once every atomic shard exists —
+                        # never write a book whose shards are incomplete.
                         break
                     except BookDeferred as deferred:
                         defer_book(bk, cid, deferred.growth_bytes,
                                    f"grew past the heavy threshold after {deferred.batches} batch(es)",
                                    claim)
                     except Exception as e:
-                        if not heavy and is_memory_error(e):
-                            # The address-space ceiling caught a runaway line. Nothing of this
-                            # image is trustworthy after MemoryError: defer the book and recycle
-                            # right away; the heavy phase retries it under a slot and ceiling.
-                            defer_book(bk, cid, worker_memory_bytes() - memory_before_book,
-                                       f"{type(e).__name__}: {e}", claim)
-                        if precomputed is None and ner_indices and not ner_alive():
+                        detail = f"{type(e).__name__}: {e}"
+                        fatal_memory = False
+                        if is_memory_error(e):
+                            # The address-space ceiling caught a runaway line. Nothing of
+                            # this image is trustworthy after MemoryError, so the worker
+                            # goes either way; the question is where the book goes.
+                            attempt = {
+                                "claim_id": cid,
+                                "source_name": bk.source_name,
+                                "canonical_he_title": bk.canonical_he_title,
+                                "worker": args.label,
+                                "processed": processed,
+                                "growth_bytes": int(worker_memory_bytes() - memory_before_book),
+                                "line": memory_error_line_number(str(e)),
+                                "phase": "heavy" if heavy else "normal",
+                                "error": detail,
+                                "limits": current_memory_limits(heavy),
+                            }
+                            if not heavy:
+                                # Normal phase: the designed lane is the heavy phase, which
+                                # retries the book under a slot, a raised ceiling and (since
+                                # the fresh-worker rule) an empty worker.  Deferral is not
+                                # the book's one requeue - that budget is for the lane where
+                                # a MemoryError is otherwise fatal.
+                                journal_memory_event(run, {"event": "deferred-after-memoryerror",
+                                                           **attempt})
+                                defer_book(bk, cid, attempt["growth_bytes"], detail, claim)
+                            won, first = claim_memory_requeue(run, cid, attempt)
+                            if won:
+                                # Exactly once per book: release it undone and unclaimed and
+                                # shed this image.  The heavy gate above then guarantees the
+                                # retry runs on a worker with nothing accumulated - the whole
+                                # difference between the 8-hour failure of 34016397157 and the
+                                # 2.3 s completion of the same book in 34021656701.
+                                journal_memory_event(run, {"event": "requeued-after-memoryerror",
+                                                           **attempt})
+                                recycle_now(
+                                    format_memory_requeue_line(
+                                        bk=bk, growth_bytes=attempt["growth_bytes"],
+                                        worker=args.label, processed=processed,
+                                        line_number=attempt["line"],
+                                    ),
+                                    claim, slot,
+                                )
+                            # The budget was already spent on this book: fail the run, and
+                            # say what both attempts cost and under which ceilings.
+                            journal_memory_event(run, {"event": "failed-after-requeue", **attempt})
+                            detail = format_memory_failure(
+                                bk=bk, first=first, second=attempt, limits=attempt["limits"],
+                            )
+                            fatal_memory = True
+                        if not fatal_memory and precomputed is None and ner_indices and not ner_alive():
                             # Infrastructure outage, not a book problem: release the claim, wait
                             # for NER, and retry this book (any worker may pick it up meanwhile).
                             # The heavy slot, if any, stays held across the retry.
@@ -1598,30 +2142,39 @@ def main():
                                 claim.release()
                             wait_for_ner(log)
                             continue
-                        log(f"ERROR {bk.canonical_he_title!r}: {type(e).__name__}: {e}")
+                        log(f"ERROR {bk.canonical_he_title!r}: {detail}")
                         with open(os.path.join(run, "logs", "errors.log"), "a", encoding="utf-8") as ef:
-                            ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{type(e).__name__}: {e}\n")
+                            ef.write(f"{bk.source_name}\t{bk.canonical_he_title}\t{detail}\n")
                         # Record the failure so the incremental driver FAILS the run loudly:
                         # a book-level crash must never be silently absorbed into a done+exit-0.
                         # The `done` marker still stops THIS run from retrying it (poison-book
-                        # loop guard). Content = the book_key (cid is not reversible).
+                        # loop guard). Content = the book_key (cid is not reversible) plus, for
+                        # a memory failure, the note the driver quotes in its own error: the
+                        # ##[error] a human reads is the driver's, not this line.
                         import json as _json
                         with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
-                            _json.dump(bk.to_dict(), ff, ensure_ascii=False)
-                        open(os.path.join(run, "done", cid), "w").close()
+                            _json.dump({**bk.to_dict(), **({"note": detail} if fatal_memory else {})},
+                                       ff, ensure_ascii=False)
+                        mark_done(run, cid)
                         if claim is not None:
                             claim.release()
                         break
 
                     # Atomic per-book output: write the artifact only when the whole book is linked.
                     # A book with zero links writes no file (kept clean); a previously-linked book
-                    # that now yields nothing has its stale artifact removed.
-                    if record_count == 0 and os.path.exists(out_path):
-                        os.remove(out_path)
-                    open(os.path.join(run, "done", cid), "w").close()
+                    # that now yields nothing has its stale artifact removed.  EAFP: the
+                    # exists()/remove() pair here raced peers into 36 worker deaths across the
+                    # two 2026-09-06 relinks (see linker_artifact.remove_artifact).
+                    if record_count == 0:
+                        remove_artifact(out_path)
+                    if not mark_done(run, cid):
+                        log(
+                            f"WARNING: {bk.source_name}/{bk.canonical_he_title!r} was already "
+                            "marked done — the exclusive book claim did not hold"
+                        )
                     import shutil
-                    # Cooperative helpers may still be validating/assembling the same stable
-                    # shards. Keep them for the run; the next invocation resets checkpoints.
+                    # Shards stay for the run in the raw-NER path: they are the local
+                    # checkpoint's resumable state, and the next invocation resets them.
                     if not cooperative:
                         shutil.rmtree(checkpoint_dir, ignore_errors=True)
                     if claim is not None:
@@ -1632,10 +2185,20 @@ def main():
                     break
             finally:
                 # Every exit of the retry loop - done, a lost claim, contention, failure,
-                # success - gives the slot back here.  flock is per open file description,
-                # so a leaked slot fd would block even THIS worker's next acquire and,
-                # once every slot leaked, leave the heavy phase spinning until the job
-                # timeout.  (Recycling execs: the fd is O_CLOEXEC, the kernel drops it.)
+                # success - gives the claim and the slot back here.  flock is per open
+                # file description, so a leaked fd would block even THIS worker's next
+                # acquire and, once every slot leaked, leave the heavy phase spinning
+                # until the job timeout.  (Recycling execs: the fd is O_CLOEXEC, the
+                # kernel drops it.)
+                #
+                # The claim matters most on the BookWorkInProgress path, which leaves the
+                # book UNFINISHED: holding its claim would hide the book from every peer's
+                # rescan while this worker never comes back to it, and the run would spin
+                # to the job timeout on a book nobody may touch.  release() is idempotent,
+                # so the paths that already released (success, failure, NER outage) are
+                # unaffected, and the ones that exec/exit never reach here.
+                if claim is not None:
+                    claim.release()
                 if slot is not None:
                     slot.release()
 
@@ -1655,12 +2218,33 @@ def main():
         # as stale from its original spawn time and killed with SIGTERM.
         worker_heartbeat()
 
+    # Last moment before any book is linked and before the pool forks: re-assert the
+    # quieting set right after django.setup(), because the whole Sefaria/linker/NER
+    # import chain has run since then.  One line states the effective levels, so a
+    # future post-mortem can tell "quieted" from "silently reconfigured back to INFO"
+    # without diffing a 123 MB log.
+    log("sefaria linker logs quieted: " + ", ".join(
+        f"{name}={level}" for name, level in quiet_sefaria_linker_logs().items()
+    ))
+
     if args.pool_workers:
         # Everything loaded above — Django, the library, the resolver tries, the
         # verified NER bundle — is shared copy-on-write by every forked child.  A child
         # only reopens its own SQLite handle and heartbeat; pymongo (4.x) resets its
         # own connections after fork (MongoClient._after_fork), and Django's DB
         # handles are closed so nothing inherited is used across the fork.
+        #
+        # That reset is what each child's first query reports as `UserWarning:
+        # MongoClient opened before fork` (13 of them in run 34016397157, one per child
+        # life).  The client is Sefaria's own module-level handle, created when the
+        # library is loaded — i.e. necessarily before this fork, because loading once
+        # and sharing the result IS the pool.  Creating a client per child would mean
+        # rebinding Sefaria's global `db` inside the child, which this repo does not
+        # own; closing the parent's client first is not obviously reversible in the
+        # pinned pymongo, and a client the children cannot reopen would break every
+        # relink.  So the warning stays visible and unfiltered: it names a real
+        # constraint of this design, and the fork-time inventory above says exactly
+        # which threads it is about.
         con.close()
 
         def _child_setup(label):

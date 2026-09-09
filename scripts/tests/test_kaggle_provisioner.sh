@@ -21,9 +21,9 @@ from pathlib import Path
 run=int(os.environ['RUN_ID']); request=('a' if run==101 else ('c' if run==103 else 'b'))*64
 recovery=bool(os.environ.get('RECOVERY_INTENT'))
 checkpoint=bool(os.environ.get('CHECKPOINT_INTENT'))
-v={'schema_version':(4 if checkpoint else (3 if recovery else (True if os.environ.get('MALFORMED_INTENT') else 1))),'request_id':request,'library_run_id':('777' if recovery else ''),'parent_run_attempt':('2' if recovery else ''),'sefaria_tag':('sefaria-pin' if recovery else ''),'snapshot_sha256':('d'*64 if recovery else ''),'sefaria_release_metadata_sha256':('e'*64 if recovery else ''),'dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
+v={'schema_version':(5 if checkpoint else (3 if recovery else (True if os.environ.get('MALFORMED_INTENT') else 1))),'request_id':request,'library_run_id':('777' if recovery else ''),'parent_run_attempt':('2' if recovery else ''),'sefaria_tag':('sefaria-pin' if recovery else ''),'snapshot_sha256':('d'*64 if recovery else ''),'sefaria_release_metadata_sha256':('e'*64 if recovery else ''),'dry_run':False,'intake_run_id':run,'intake_run_attempt':1}
 if recovery: v.update(recovery_mode=True,adopt_fingerprint='engine-old::engine-new')
-if checkpoint: v.update(ner_checkpoint_source_run_id='9002',ner_checkpoint_source_run_attempt='1',ner_checkpoint_source_engine_fingerprint='engine-old')
+if checkpoint: v.update(ner_checkpoint_source_run_id='9002',ner_checkpoint_source_run_attempt='1',ner_checkpoint_source_engine_fingerprint='engine-old',wait_contract_sha256='f'*64)
 raw=(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n').encode(); root=Path(os.environ['OUT'])
 (root/'kaggle-intent.json').write_bytes(raw); (root/'kaggle-intent.sha256').write_text(hashlib.sha256(raw).hexdigest()+'\n')
 PY
@@ -125,6 +125,7 @@ PATH="$TMP/bin:$PATH" MOCK_STATE="$TMP/state" DISPATCH_LOG="$TMP/dispatch" \
 grep -q -- "--ner-checkpoint-source-run-id 9002" "$TMP/dispatch"
 grep -q -- "--ner-checkpoint-source-run-attempt 1" "$TMP/dispatch"
 grep -q -- "--ner-checkpoint-source-engine-fingerprint engine-old" "$TMP/dispatch"
+grep -q -- "--wait-contract-sha256 $(printf '%064d' 0 | tr 0 f)" "$TMP/dispatch"
 echo "ok   exact producer checkpoint identity survives durable intake"
 
 rm -f "$TMP/dispatch"

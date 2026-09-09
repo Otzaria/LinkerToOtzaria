@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 
 sys_path = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +47,7 @@ from linker_artifact import (  # noqa: E402
     book_key_to_relpath,
     content_hash,
     read_artifact,
+    remove_artifact,
     write_artifact,
 )
 from line_baseline import (  # noqa: E402
@@ -129,16 +131,12 @@ def relocate_source_artifact(repo: str, old_key: BookKey, new_key: BookKey) -> b
     new_path = os.path.join(repo, book_key_to_relpath(new_key))
     write_artifact(new_path, recs)
     if os.path.abspath(new_path) != os.path.abspath(old_path):
-        os.remove(old_path)
+        remove_artifact(old_path)
     return True
 
 
 def delete_source_artifact(repo: str, key: BookKey) -> bool:
-    path = os.path.join(repo, book_key_to_relpath(key))
-    if os.path.exists(path):
-        os.remove(path)
-        return True
-    return False
+    return remove_artifact(os.path.join(repo, book_key_to_relpath(key)))
 
 
 def _with_book_key(rec, bk):
@@ -294,6 +292,379 @@ def write_meta(repo: str, *, sefaria_export_tag, snapshot_sha256, book_count,
 
 def _log(msg):
     print(f"[incremental] {msg}", flush=True)
+
+
+# ── progress reporting ───────────────────────────────────────────────────────
+# Until 2026-09-06 the resolve stage's ONLY liveness signal was Sefaria's INFO
+# firehose (98% of a 123 MB log, now silenced in link_books.quiet_sefaria_linker_logs).
+# Silence without a substitute is worse than the flood: these pure formatters give the
+# master one honest line per interval, derived from the done ledger and the plan — never
+# from parsing a worker's log.
+
+def _compact(count: int) -> str:
+    """1558785 -> '1.56M', 380000 -> '380k'.  Line counts are read at a glance."""
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.0f}k"
+    return f"{count / 1_000_000:.2f}M"
+
+
+def _hms(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+
+def _hm(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600}:{seconds // 60 % 60:02d}"
+
+
+def format_progress(
+    *,
+    books_done: int,
+    books_total: int,
+    books_adopted: int = 0,
+    lines_done: int = 0,
+    lines_total: int = 0,
+    elapsed: float,
+    workers_alive: int,
+    workers_replaced: int,
+    workers_recycled_for_heavy: int = 0,
+) -> str:
+    """One progress line: N of M books, how long it has run, how long is left.
+
+    ETA is a flat rate since the stage started — deliberately naive, because the only
+    question it answers is "hours or minutes?".  The first interval has completed no
+    book yet, so it reports `eta n/a` instead of dividing by zero or inventing a number.
+
+    ``books_adopted`` are books the ledger already held when the stage STARTED (a
+    --resume-checkpoints recovery adopts them, and a resumed NER attempt keeps its
+    prior done markers).  They are real completed work, so they stay inside N/M and
+    are named in the line rather than hidden — but this run did not compute them, and
+    letting them into the rate makes the ETA nonsense: 4,000 books "done" in the first
+    minute would predict the remaining 1,127 in seconds and keep under-predicting for
+    hours.  The rate therefore divides by the books computed SINCE the stage started.
+    """
+    percent = (100.0 * books_done / books_total) if books_total else 0.0
+    head = f"books {books_done}/{books_total} ({percent:.1f}%"
+    head += f", {books_adopted} adopted)" if books_adopted else ")"
+    parts = [head]
+    if lines_total:
+        parts.append(f"lines {_compact(lines_done)}/{_compact(lines_total)}")
+    parts.append(f"elapsed {_hms(elapsed)}")
+    computed = books_done - books_adopted
+    if computed > 0 and elapsed > 0:
+        remaining = (books_total - books_done) * (elapsed / computed)
+        parts.append(f"eta ~{_hm(remaining)}")
+    else:
+        parts.append("eta n/a")
+    workers = f"workers {workers_alive} alive, {workers_replaced} replaced"
+    # Only when it happened: on a run with no deferred book the clause would be a
+    # constant `0` on every line for hours.  When it is there it explains forks an
+    # operator would otherwise read as instability (see link_books.HEAVY_FRESH_WORKER).
+    if workers_recycled_for_heavy:
+        workers += f", {workers_recycled_for_heavy} recycled-for-heavy"
+    parts.append(workers)
+    return "progress: " + " · ".join(parts)
+
+
+def format_claim_summary(*, claimed: int, recovered: int, duplicates: int) -> str:
+    """The claim protocol's whole story, once, when the resolve stage ends.
+
+    `claimed` counts books this run's workers completed under an exclusive claim
+    (books adopted from a checkpoint are excluded — they were never claimed here).
+    `recovered` counts books taken over from a worker that died holding them: the
+    number an operator needs to distinguish "peers covered a death" from "a book was
+    dropped".  `duplicates` is 0 by construction now that a book is claimed by at most
+    one worker; it is printed rather than assumed so a regression appears as a number
+    instead of as an invariant nobody checks.  Relink 34016397157 would have printed
+    `duplicates 2148` here.
+    """
+    return (
+        f"claims: books claimed {claimed}, re-claimed after worker death {recovered}, "
+        f"duplicates {duplicates}"
+    )
+
+
+def format_memory_summary(*, requeued: int, succeeded: int, failed: int) -> str | None:
+    """One closing line for the MemoryError requeue policy, or None if it never fired.
+
+    A relink where no book ran out of address space must not print a line about
+    memory at all — a permanent `0 requeued` teaches an operator to skip the line
+    that matters on the day it is not zero.  Relink 34016397157 would have printed
+    `memory: 1 book requeued after MemoryError, 1 succeeded on retry, 0 failed`
+    instead of dying on its 5,127th book.
+    """
+    if requeued <= 0:
+        return None
+    return (
+        f"memory: {requeued} book{'' if requeued == 1 else 's'} requeued after "
+        f"MemoryError, {succeeded} succeeded on retry, {failed} failed"
+    )
+
+
+def read_memory_stats(run_dir: str) -> dict:
+    """Count the run's memory events from the engine's journal + the done/failed ledgers.
+
+    `requeued` counts distinct BOOKS that spent their single retry (a book can be
+    journalled twice: once when requeued, once when the retry also failed);
+    `succeeded`/`failed` split them by the marker the run actually ended with, so the
+    two always add up to `requeued` for a finished run.
+    """
+    # link_books is POSIX-only (resource/fcntl); the driver never runs where it is not
+    # importable, and a caller on such a platform gets an honest set of zeroes.
+    try:
+        from link_books import count_memory_events, read_memory_journal
+    except ImportError:
+        return {"requeued": 0, "succeeded": 0, "failed": 0, "recycled_for_heavy": 0}
+
+    requeued, seen = [], set()
+    for event in read_memory_journal(run_dir):
+        if event.get("event") != "requeued-after-memoryerror":
+            continue
+        cid = event.get("claim_id")
+        if cid and cid not in seen:
+            seen.add(cid)
+            requeued.append(cid)
+    failed_dir = os.path.join(run_dir, "failed")
+    done_dir = os.path.join(run_dir, "done")
+    failed = [cid for cid in requeued if os.path.exists(os.path.join(failed_dir, cid))]
+    succeeded = [
+        cid for cid in requeued
+        if cid not in failed and os.path.exists(os.path.join(done_dir, cid))
+    ]
+    return {
+        "requeued": len(requeued),
+        "succeeded": len(succeeded),
+        "failed": len(failed),
+        "recycled_for_heavy": count_memory_events(run_dir, "recycled-for-heavy"),
+    }
+
+
+def read_failed_notes(run_dir: str) -> dict[tuple[str, str], str]:
+    """Per-book explanations the engine attached to its `failed` markers.
+
+    Only the memory path writes one today.  The driver's RuntimeError is the
+    ##[error] a human reads; a bare book title there would hide the growth figures
+    and ceilings the engine already measured."""
+    notes: dict[tuple[str, str], str] = {}
+    failed_dir = os.path.join(run_dir, "failed")
+    if not os.path.isdir(failed_dir):
+        return notes
+    for name in os.listdir(failed_dir):
+        path = os.path.join(failed_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        note = payload.get("note")
+        if isinstance(note, str) and note:
+            notes[(payload["source_name"], payload["canonical_he_title"])] = note
+    return notes
+
+
+def format_done_line(
+    *, total: int, adopted: int, computed: int, failed: int, checkpoint_source: str | None = None
+) -> str:
+    """The final line must never claim work this run did not do.
+
+    Recovery 34021656701 adopted 5126 of 5127 books from a checkpoint, computed exactly
+    one, and still reported `done: 5127 books re-linked` — which reads as five thousand
+    books linked in ninety seconds.  Adopted and computed are now separate numbers.
+    """
+    breakdown = []
+    if adopted:
+        source = checkpoint_source or "local checkpoint"
+        breakdown.append(f"adopted {adopted} from checkpoint {source}")
+    breakdown.append(f"computed {computed}")
+    breakdown.append(f"failed {failed}")
+    return f"done: {total} books (" + ", ".join(breakdown) + ")"
+
+
+# ── machine-readable run provenance (relink_work.json) ───────────────────────
+# The `done:`/`claims:`/`memory:` lines above tell a HUMAN what the run did.  This
+# object tells a MACHINE, and it ships beside the payload it describes.
+#
+# Recovery 34021656701 adopted 5,126 of 5,127 books from run 34016397157 and computed
+# exactly one, in 7m12s -- and its published `relink_manifest.json` was indistinguishable
+# from a full relink's: identity, digests and engine fingerprint, and not one number
+# about the work.  Release linker-release-sha256-4632e6fb... therefore records no
+# provenance at all for the run 99.98% of its content actually came from.
+#
+# WHY A SEPARATE FILE, not a `work` object inside relink_manifest.json: that manifest's
+# key set is validated EXACTLY -- unknown keys are a hard failure -- in a DIFFERENT
+# repository (SeforimLibrary .github/workflows/manual-generate-release.yml, the Phase-2
+# "relink manifest key set mismatch" check) as well as in ci/validate_relink_manifest.py
+# here.  Adding a key there breaks every build until both repos land together, and the
+# recovery path must be able to run at the same head_sha as its checkpoint source.  This
+# file has its own schema_version and no consumer yet, so it can grow additively.
+WORK_SCHEMA_VERSION = 1
+
+# ci/local_checkpoint_cache.py names a restored checkpoint `source-<run id>-<attempt>`
+# and stamps it into <run dir>/checkpoint_source.txt.  Parsed, never trusted blindly:
+# an unrecognised name keeps the raw string and reports the two ids as null rather than
+# inventing a run number.
+_CHECKPOINT_SOURCE_RE = re.compile(r"source-([1-9][0-9]*)-([1-9][0-9]*)\Z")
+
+# GitHub's own coordinates for the run that is writing this file.  Bounded to 18
+# digits so a hostile or corrupted environment cannot put an unbounded number into a
+# published asset.
+_RUN_COORDINATE_RE = re.compile(r"[1-9][0-9]{0,17}\Z")
+
+
+def read_run_coordinates(environment=None) -> tuple[int | None, int | None]:
+    """This run's GitHub coordinates, or ``(None, None)`` off a runner.
+
+    Read from the environment rather than taken as a flag: there is then no second
+    copy to keep in sync, and an operator running the driver on a laptop simply gets
+    two nulls (which ci/validate_relink_work.py accepts).  Reported as a PAIR because
+    half a coordinate names nothing.
+
+    This is a SECOND self-report of an identity relink_manifest.json also carries, so
+    it is made impossible for the two to disagree rather than merely unlikely: every
+    CI call site of ci/validate_relink_work.py passes --run-id/--run-attempt, which
+    requires these fields to be present AND equal to the same two numbers
+    ci/validate_relink_manifest.py checks the manifest against, in the same publisher
+    step, over the same handoff bytes.  Two files, one authority.
+    """
+    source = os.environ if environment is None else environment
+    run = source.get("GITHUB_RUN_ID", "")
+    attempt = source.get("GITHUB_RUN_ATTEMPT", "")
+    if not _RUN_COORDINATE_RE.fullmatch(run) or not _RUN_COORDINATE_RE.fullmatch(attempt):
+        return None, None
+    return int(run), int(attempt)
+
+
+def build_work_provenance(
+    *,
+    total: int,
+    adopted: int,
+    computed: int,
+    failed: int,
+    links_total: int,
+    checkpoint_source: str | None = None,
+    requeued: int = 0,
+    reclaimed: int = 0,
+    duplicates: int = 0,
+    workers_replaced: int = 0,
+    recycled_for_heavy: int = 0,
+    generated_at: str | None = None,
+    run_id: int | None = None,
+    run_attempt: int | None = None,
+) -> dict:
+    """The whole shape of a relink as data.  Pure: every number is passed in.
+
+    ``links_total`` is every link record in the PUBLISHED artifact store (all books,
+    not only this run's plan) -- build_line_baseline counts it while it digests the
+    store it is about to publish.  ``books_*`` describe this run's plan only, and
+    ``adopted + computed + failed == total`` is checked by ci/validate_relink_work.py.
+
+    A full relink with no checkpoint reports ``books_adopted == 0`` and all three
+    ``checkpoint_source*`` fields null.  The converse is NOT an invariant: attempt
+    34015274945 left a checkpoint of 280 shard files and ZERO completed books, so a
+    named source with ``books_adopted == 0`` is a real, meaningful state.
+
+    ``generated_at`` is the caller's timestamp (relink.yml passes --generated-at, the
+    same one meta.json records); there is deliberately no clock in this module.
+    ``run_id``/``run_attempt`` come from read_run_coordinates and make the asset
+    answer "which run?" on its own, downloaded alone.
+    """
+    source_run_id = source_attempt = None
+    if checkpoint_source:
+        found = _CHECKPOINT_SOURCE_RE.fullmatch(checkpoint_source)
+        if found:
+            source_run_id = int(found.group(1))
+            source_attempt = int(found.group(2))
+    return {
+        "schema_version": WORK_SCHEMA_VERSION,
+        "generated_at": generated_at or None,
+        "relink_run_id": None if run_id is None else int(run_id),
+        "relink_run_attempt": None if run_attempt is None else int(run_attempt),
+        "books_total": int(total),
+        "books_adopted": int(adopted),
+        "books_computed": int(computed),
+        "books_failed": int(failed),
+        "links_total": int(links_total),
+        "checkpoint_source": checkpoint_source or None,
+        "checkpoint_source_run_id": source_run_id,
+        "checkpoint_source_attempt": source_attempt,
+        "books_requeued_after_memoryerror": int(requeued),
+        "books_reclaimed_after_worker_death": int(reclaimed),
+        "duplicates": int(duplicates),
+        "workers_replaced": int(workers_replaced),
+        "workers_recycled_for_heavy": int(recycled_for_heavy),
+    }
+
+
+def read_work_counters(run_dir: str) -> dict:
+    """The engine-side counters the closing `claims:`/`memory:` lines already report.
+
+    Exactly the same readers, so the file and the log can never disagree.  Both are
+    best-effort by construction (link_books is POSIX-only and the journals are
+    diagnostics, never gates), which is why a platform without them reports honest
+    zeroes instead of failing a finished relink.
+    """
+    memory = read_memory_stats(run_dir)
+    reclaimed = duplicates = 0
+    try:
+        from link_books import count_claim_events
+    except ImportError:
+        pass
+    else:
+        reclaimed = count_claim_events(run_dir, "recovered")
+        duplicates = count_claim_events(run_dir, "duplicate")
+    return {
+        "requeued": memory["requeued"],
+        "recycled_for_heavy": memory["recycled_for_heavy"],
+        "reclaimed": reclaimed,
+        "duplicates": duplicates,
+    }
+
+
+def write_work_provenance(run_dir: str, value: dict) -> str:
+    """Write ``<run dir>/relink_work.json`` atomically; return its path.
+
+    Canonical JSON with one trailing LF, byte-for-byte the convention
+    relink_manifest.json uses, so ci/validate_relink_work.py can reject anything the
+    workflow reshaped on the way to the release.  Fail-closed on purpose: this file
+    becomes a published release asset, and a swallowed write error would ship the
+    PREVIOUS run's provenance from the durable run dir (which survives between runs
+    on the self-hosted host) as if it described this one.
+    """
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "relink_work.json")
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    temporary = f"{path}.tmp-{os.getpid()}"
+    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    return path
+
+
+def format_work_provenance_line(path: str, value: dict) -> str:
+    """One line, the same numbers, so the log and the asset are checkable against
+    each other by eye.  `no checkpoint` is a fact about THIS run, not a permanent
+    zero: it is exactly what distinguishes a real relink from an adoption."""
+    if value.get("checkpoint_source_run_id"):
+        source = (
+            f"checkpoint from run {value['checkpoint_source_run_id']} "
+            f"attempt {value['checkpoint_source_attempt']}"
+        )
+    elif value.get("checkpoint_source"):
+        source = f"checkpoint from {value['checkpoint_source']}"
+    else:
+        source = "no checkpoint"
+    return (
+        f"provenance: wrote {path} (books {value['books_total']} = "
+        f"adopted {value['books_adopted']} + computed {value['books_computed']} + "
+        f"failed {value['books_failed']}, links {value['links_total']}, {source})"
+    )
 
 
 def compute_incremental_plan(args) -> dict:
@@ -533,13 +904,45 @@ def restore_completed_local_checkpoint(
     return restored
 
 
-def run_incremental(args) -> int:
-    """End-to-end incremental update. Returns the number of books re-linked."""
+def read_checkpoint_source(run_dir: str) -> str | None:
+    """Name of the checkpoint whose completed books this run may adopt, if any.
+
+    ci/local_checkpoint_cache.py stamps it (`source-<run id>-<attempt>`) when it
+    restores; absent for a run that starts from nothing.  Diagnostics only — the
+    adoption gates are the manifest identity and the exact-plan comparison.
+    """
+    try:
+        with open(os.path.join(run_dir, "checkpoint_source.txt"), encoding="utf-8") as stream:
+            value = stream.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def run_incremental(args, summary: dict | None = None) -> int:
+    """End-to-end incremental update. Returns the number of books in the plan.
+
+    ``summary`` (optional, mutated in place) receives the honest breakdown of that
+    number — ``total``/``adopted``/``computed``/``failed``/``checkpoint_source`` —
+    so the caller's final line can distinguish books THIS run linked from books it
+    adopted from a checkpoint.  The return value stays the plan size for callers
+    that only care how many books the release covers.
+
+    A successful run also writes ``<run dir>/relink_work.json`` — the same breakdown
+    as data, for the release (see build_work_provenance).
+    """
     repo = os.path.abspath(args.repo)
     baseline_dir = os.path.join(repo, "baseline")
     os.makedirs(baseline_dir, exist_ok=True)
     artifacts_dir = os.path.join(repo, "artifacts")
     os.makedirs(artifacts_dir, exist_ok=True)
+    # The run dir survives between runs on the durable self-hosted host (it IS the
+    # local checkpoint).  Drop any earlier run's provenance before this one starts, so
+    # a file present at the end can only have been written by this run.
+    try:
+        os.remove(os.path.join(args.run_dir, "relink_work.json"))
+    except OSError:
+        pass
     plan = compute_incremental_plan(args)
     current = plan["current"]
     changed = plan["changed"]
@@ -589,6 +992,10 @@ def run_incremental(args) -> int:
     # 4. Re-link only changed/new books, against the SAME snapshot we hashed.
     failed: set[tuple[str, str]] = set()
     codes: list[int] = []
+    # Counters _run_engine owns (bounded worker replacements) and only it can see.
+    engine_stats: dict = {}
+    adopted = 0
+    checkpoint_source = None
     if changed:
         os.makedirs(args.run_dir, exist_ok=True)
         changed_books_payload = [
@@ -623,7 +1030,14 @@ def run_incremental(args) -> int:
         # heavy/ and heavy-slots/ are this run's deferral decisions and slot locks; a
         # stale marker from another request would send a book straight to the heavy
         # phase, so they are recomputed from scratch like the rest of the ledger.
-        for d in ("done", "claim", "failed", "heavy", "heavy-slots"):
+        # claim-events/ is this invocation's tally of takeovers and duplicate
+        # completions; carrying one over would make the closing summary a lie.
+        # memory/ holds this invocation's MemoryError journal and its one-per-book
+        # requeue markers: a marker carried over would silently deny a book its retry
+        # in a run that has not yet tried it once.
+        from link_books import CLAIM_EVENT_DIR, MEMORY_DIR
+        for d in ("done", "claim", "failed", "heavy", "heavy-slots", CLAIM_EVENT_DIR,
+                  MEMORY_DIR):
             shutil.rmtree(os.path.join(args.run_dir, d), ignore_errors=True)
         only = os.path.join(args.run_dir, "changed_books.json")
         if resume_checkpoints:
@@ -641,14 +1055,20 @@ def run_incremental(args) -> int:
             if not os.path.isdir(os.path.join(args.run_dir, "checkpoints")):
                 raise RuntimeError("--resume-checkpoints requires a restored checkpoints directory")
             _log("accepted exact-plan local checkpoint; stale ledgers were discarded")
-            restored_completed = restore_completed_local_checkpoint(
+            checkpoint_source = read_checkpoint_source(args.run_dir)
+            adopted = restore_completed_local_checkpoint(
                 repo=args.repo,
                 snapshot=args.snapshot,
                 run_dir=args.run_dir,
                 changed_books_payload=changed_books_payload,
             )
-            if restored_completed:
-                _log(f"restored {restored_completed} completed book output(s) from exact local checkpoint")
+            # State the shape of the remaining work up front: an operator watching a
+            # recovery must be able to tell "5126 books already done, 1 left" from
+            # "5127 books to link" before the engine starts.
+            _log(
+                f"restored checkpoint {checkpoint_source or '(unnamed)'}: "
+                f"{adopted}/{len(changed)} books complete → {len(changed) - adopted} to compute"
+            )
         else:
             shutil.rmtree(os.path.join(args.run_dir, "checkpoints"), ignore_errors=True)
             shutil.rmtree(os.path.join(args.run_dir, "completed_artifacts"), ignore_errors=True)
@@ -670,7 +1090,7 @@ def run_incremental(args) -> int:
             f"updating {len(changed)} changed books: "
             f"{requested_ner_lines} line(s) require NER, {reused_lines} reused"
         )
-        codes = _run_engine(args, only)
+        codes = _run_engine(args, only, stats=engine_stats)
         failed = read_failed_books(args.run_dir)
 
         # Completeness assertion: every requested book must carry a `done` marker.
@@ -694,11 +1114,19 @@ def run_incremental(args) -> int:
     # ship a silently-incomplete link set (a NEW book leaves nothing for linkerStrict to
     # even hash-check). Baseline/meta are NOT advanced, so a rerun retries everything.
     if failed:
+        # Quote the engine's own note where it left one (today: the MemoryError path,
+        # which already measured both attempts' growth and the ceilings in force). The
+        # 2026-09-06 ##[error] named only the book, and the same book linked in 2.3 s
+        # in the next run — the numbers are what tell those two cases apart.
+        notes = read_failed_notes(args.run_dir)
         raise RuntimeError(
             f"{len(failed)} book(s) failed inside the engine — failing the run "
             "(baseline not advanced"
             + (f"; worker exit codes {codes}" if any(codes) else "") + "): "
-            + ", ".join(sorted(f"{s}/{t}" for s, t in failed)))
+            + ", ".join(
+                f"{s}/{t}" + (f" [{notes[(s, t)]}]" if (s, t) in notes else "")
+                for s, t in sorted(failed)
+            ))
 
     # The ledger is the sole authority on output state: write_artifact is atomic and a
     # done marker lands only after the book's artifact did. A worker that died (kernel
@@ -715,7 +1143,7 @@ def run_incremental(args) -> int:
     snapshot_sha256 = sha256_of_file(args.snapshot)
     # Build the next exact reuse baseline before advancing the committed book clock.
     # A failure here leaves both clocks on the previous accepted release.
-    build_line_baseline(
+    links_total = build_line_baseline(
         args.snapshot,
         os.path.join(repo, LINE_BASELINE_DIRECTORY),
         current_hashes=current,
@@ -740,6 +1168,50 @@ def run_incremental(args) -> int:
         # and metadata have advanced successfully.
         import shutil
         shutil.rmtree(os.path.join(args.run_dir, "checkpoints"), ignore_errors=True)
+    # 6. Record what this run actually DID, as data, next to what it produced. Written
+    #    last and only here: every fail-closed gate above is behind us, so the file
+    #    exists exactly when a payload was published, and describes that payload.
+    #    The engine journals describe THIS run's invocation of the engine.  They are
+    #    wiped with the rest of the ledger inside `if changed:` above, so a run with an
+    #    EMPTY delta never clears them — and on the durable run dir this function
+    #    already guards against (the unlink at entry) it would otherwise publish the
+    #    previous run's requeues, re-claims, duplicates and heavy recycles under
+    #    `books_total: 0`.  No engine ran, so the honest report is zero, exactly as
+    #    `engine_stats` already reports for workers_replaced.
+    counters = (
+        read_work_counters(os.path.abspath(args.run_dir)) if changed
+        else {"requeued": 0, "recycled_for_heavy": 0, "reclaimed": 0, "duplicates": 0}
+    )
+    provenance_run_id, provenance_run_attempt = read_run_coordinates()
+    work = build_work_provenance(
+        total=len(changed),
+        adopted=adopted,
+        computed=len(changed) - adopted,
+        failed=len(failed),
+        links_total=links_total,
+        checkpoint_source=checkpoint_source,
+        requeued=counters["requeued"],
+        reclaimed=counters["reclaimed"],
+        duplicates=counters["duplicates"],
+        workers_replaced=int(engine_stats.get("workers_replaced", 0)),
+        recycled_for_heavy=counters["recycled_for_heavy"],
+        # The same timestamp meta.json records, so the two agree by construction.
+        generated_at=getattr(args, "generated_at", None),
+        run_id=provenance_run_id,
+        run_attempt=provenance_run_attempt,
+    )
+    _log(format_work_provenance_line(write_work_provenance(args.run_dir, work), work))
+    if summary is not None:
+        # `failed` is empty here by construction (a non-empty ledger raised above);
+        # reporting the zero is the point — the operator sees it was checked.
+        summary.update(
+            total=len(changed),
+            adopted=adopted,
+            computed=len(changed) - adopted,
+            failed=len(failed),
+            checkpoint_source=checkpoint_source,
+            work=work,
+        )
     return len(changed)
 
 
@@ -763,13 +1235,239 @@ def install_terminate_handler():
     signal.signal(signal.SIGINT, _raise)
 
 
-def _run_engine(args, only_books_path):
+def _alive_worker_count(heartbeat_dir: str, exclude: set, stall: float, now: float,
+                        labels: set | None = None) -> int:
+    """Resolvers whose heartbeat is fresh, judged on the SAME files the supervisor uses.
+
+    In pool mode this driver spawns one master but the forked children each keep their
+    own `w01…` heartbeat, so counting files (minus the master's label) reports the real
+    resolver count in both modes.  A worker between heartbeats is not "dead" until the
+    supervisor would say so, hence the same stall window.
+    """
+    try:
+        names = os.listdir(heartbeat_dir)
+    except OSError:
+        return 0
+    alive = 0
+    for name in names:
+        if name in exclude or (labels is not None and name not in labels):
+            continue
+        try:
+            if now - os.path.getmtime(os.path.join(heartbeat_dir, name)) <= stall:
+                alive += 1
+        except OSError:
+            continue
+    return alive
+
+
+def _heartbeat_namespace() -> str:
+    """A run-private heartbeat directory name, safe to pass to the engine.
+
+    A durable ``--run-dir`` can retain fresh-looking heartbeat files from an earlier
+    invocation.  Giving each driver invocation its own unguessable subdirectory means
+    a progress line can only count the workers this invocation started.
+    """
+    import secrets
+    return secrets.token_hex(16)
+
+
+def _process_group_members(pgid: int, token: str, leader=None) -> tuple[list[int], list[int]]:
+    """Return live token-bearing and unverified members of this session/group.
+
+    ``start_new_session`` makes the Popen leader both PGID and SID.  If that leader is
+    still waitable (alive or a zombie observed with ``waitid(WNOWAIT)``), its PID cannot
+    be reused; that pins the numeric PGID/SID and safely binds every same-UID member.
+    After a leader has been reaped, the inherited random environment marker remains the
+    fail-closed ownership proof.  A same-number group without either proof is never
+    signalled: that is the PID/PGID-reuse safety boundary.
+    """
+    owned, unverified = [], []
+    marker = f"LINKER_ENGINE_SESSION_TOKEN={token}".encode()
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        # On a host without /proc, a non-existent group is harmless, but an existing
+        # leaderless group cannot be attributed safely.  The one safe fallback is an
+        # unreaped Popen leader we just created: its PID cannot yet be reused and
+        # start_new_session made it the sole session/group leader.  Do not turn the
+        # leaderless case into a test-only no-op: callers refuse replacement for it.
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return owned, unverified
+        except PermissionError:
+            return owned, [pgid]
+        # Do not call poll() here: while our child is unreaped its PID cannot be
+        # reused, so ``returncode is None`` is the safe identity binding.  Calling
+        # poll would reap a just-killed leader and erase that binding before its
+        # descendants had been drained.
+        if leader is not None and leader.returncode is None:
+            return [pgid], unverified
+        return owned, [pgid]
+    leader_bound = (
+        leader is not None
+        and hasattr(leader, "_waitpid_lock")
+        and getattr(leader, "pid", None) == pgid
+        and getattr(leader, "returncode", None) is None
+    )
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(os.path.join(entry.path, "stat"), encoding="utf-8") as stream:
+                    tail = stream.read().rsplit(")", 1)[1].strip().split()
+                # tail starts at proc field 3: state, ppid, pgrp, session, ...
+                if tail[0] == "Z" or int(tail[2]) != pgid or int(tail[3]) != pgid:
+                    continue
+                if os.stat(entry.path).st_uid != os.geteuid():
+                    unverified.append(int(entry.name))
+                    continue
+                # A live or unreaped-zombie child created by this Popen still owns its
+                # PID in the kernel.  Because start_new_session made that same number
+                # the PGID and SID, no unrelated group can reuse it while the leader is
+                # waitable.  This path also covers hardened procfs mounts that deny
+                # access to environ for a same-UID child.
+                if leader_bound:
+                    owned.append(int(entry.name))
+                    continue
+                with open(os.path.join(entry.path, "environ"), "rb") as stream:
+                    environment = stream.read().split(b"\0")
+                if marker in environment:
+                    owned.append(int(entry.name))
+                else:
+                    unverified.append(int(entry.name))
+            except (FileNotFoundError, ProcessLookupError):
+                # A member that vanished during inspection needs no signal.
+                continue
+            except (PermissionError, OSError, IndexError, ValueError):
+                # We already selected this entry's session/group; if it is still
+                # visible but cannot be authenticated, signalling the whole PGID
+                # would make a PID/PGID reuse mistake possible.
+                unverified.append(int(entry.name))
+    return owned, unverified
+
+
+def _poll_engine_without_reaping(proc):
+    """Return a Linux child status while retaining its PID as the group identity.
+
+    ``Popen.poll()`` reaps a dead leader.  A pool master's forked children can remain
+    in its PGID after that death, so reaping first discards the strongest race-free
+    proof that the numeric PGID is still ours.  Linux ``waitid(..., WNOWAIT)`` observes
+    the status but deliberately leaves the child waitable until group cleanup ends.
+    Synthetic Popen objects and non-Linux hosts keep the ordinary polling path.
+    """
+    if (
+        sys.platform.startswith("linux")
+        and hasattr(os, "waitid")
+        and hasattr(os, "WNOWAIT")
+        and hasattr(proc, "_waitpid_lock")
+    ):
+        try:
+            status = os.waitid(
+                os.P_PID,
+                proc.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+        except (ChildProcessError, OSError):
+            # If some external code already consumed the child, fall back to Popen's
+            # state.  The token-based scanner remains fail-closed after a reap.
+            return proc.poll()
+        if status is None:
+            return None
+        if status.si_code == os.CLD_EXITED:
+            return status.si_status
+        return -status.si_status
+    return proc.poll()
+
+
+def _terminate_owned_group(group: dict, grace: float, log) -> bool:
+    """Stop and wait for one registered process group without trusting Popen.poll().
+
+    The return value is true only after every live process in the recorded group has
+    disappeared.  Refusing an unverified group is intentional: replacement must not
+    start beside workers whose ownership cannot be proved.
+    """
+    import signal
+    import subprocess
+    import time
+
+    pgid, token = group["pgid"], group["token"]
+
+    def members():
+        owned, unverified = _process_group_members(pgid, token, group.get("proc"))
+        if unverified:
+            raise RuntimeError(
+                f"refusing to signal process group {pgid}: its session contains "
+                f"unverified member(s) {unverified}"
+            )
+        return owned
+
+    live = members()
+    if not live:
+        return True
+    if not os.path.isdir("/proc"):
+        # The authenticated leader has not been reaped yet, so its PGID cannot be
+        # reused while TERM/KILL is sent.  Once wait() reaps it, only a missing group
+        # is success; an extant leaderless group is deliberately reported unsafe.
+        leader = group.get("proc")
+        if leader is None:
+            raise RuntimeError(f"cannot authenticate process group {pgid} without /proc")
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        try:
+            leader.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                return True
+            try:
+                leader.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return False
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return not members()
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not members():
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return not members()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not members():
+            return True
+        time.sleep(0.1)
+    live = members()
+    log(f"process group {pgid} survived SIGKILL: members {live}")
+    return False
+
+
+def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
     """Invoke link_books.py on the changed subset, in the Sefaria-Project venv/cwd.
 
     --engine-workers N runs N engine processes in parallel — they coordinate through the
     run-dir claim ledger, so this is the same mechanism the bootstrap used. Returns the
     workers' exit codes; the caller judges them against the ledger (a dead worker whose
     books were finished by peers via stale-claim steal is not a failure).
+
+    ``stats`` (optional, mutated in place) receives ``workers_replaced`` — the bounded
+    replacements THIS driver made, which only this frame can see (a pool child's
+    recycles are the master's, and it logs each one).  Set on every exit path so a run
+    that dies here still reports what it had spent.
 
     Process ownership: every worker starts in its OWN session/process group
     (start_new_session), so on any exit path — including SIGTERM/SIGINT via
@@ -822,24 +1520,52 @@ def _run_engine(args, only_books_path):
         worker_labels = ["pool"]
     else:
         worker_labels = ["w1"] if workers == 1 else [f"w{n:02d}" for n in range(1, workers + 1)]
-    heartbeat_dir = os.path.join(os.path.abspath(args.run_dir), "worker-heartbeats")
+    # Heartbeats are advisory liveness, but their count is operator-facing.  A durable
+    # run directory may still hold fresh mtimes from an interrupted older invocation;
+    # this private namespace makes those files invisible to this invocation.
+    heartbeat_namespace = _heartbeat_namespace()
+    env["LINKER_HEARTBEAT_NAMESPACE"] = heartbeat_namespace
+    heartbeat_dir = os.path.join(
+        os.path.abspath(args.run_dir), "worker-heartbeats", heartbeat_namespace
+    )
     os.makedirs(heartbeat_dir, exist_ok=True)
+    # Remove the legacy flat names for the labels we are about to supervise.  The
+    # private namespace is the correctness boundary; this keeps an interrupted older
+    # invocation from misleading people inspecting the directory by hand as well.
+    legacy_heartbeat_dir = os.path.dirname(heartbeat_dir)
+    legacy_heartbeat_labels = set(worker_labels)
+    if pool:
+        legacy_heartbeat_labels.update(
+            f"w{number:02d}" for number in range(1, workers + 1)
+        )
+    for label in legacy_heartbeat_labels:
+        try:
+            os.remove(os.path.join(legacy_heartbeat_dir, label))
+        except FileNotFoundError:
+            pass
 
     # The exact done ledger lets the supervisor avoid a pointless replacement if a
     # worker happens to die after peers already completed the requested plan.  Keep
     # direct unit-test callers with synthetic paths compatible; production always
     # receives the JSON file written immediately above in run_incremental().
     expected_done = None
+    # Planned NER lines per claim id: the second axis of the progress line, so a run
+    # whose remaining books are the giant ones does not look stalled at 95% of books.
+    planned_lines = {}
     try:
         from link_books import claim_id
         with open(only_books_path, encoding="utf-8") as fh:
             requested = json.load(fh)
-        expected_done = {
-            claim_id(BookKey(item["source_name"], item["canonical_he_title"]))
-            for item in requested
-        }
+        expected_done = set()
+        for item in requested:
+            cid = claim_id(BookKey(item["source_name"], item["canonical_he_title"]))
+            expected_done.add(cid)
+            planned_lines[cid] = sum(
+                end - start for start, end in (item.get("ner_ranges") or ())
+            )
     except (OSError, ValueError, KeyError, TypeError):
-        pass
+        expected_done = None
+        planned_lines = {}
 
     def ledger_complete():
         done_dir = os.path.join(os.path.abspath(args.run_dir), "done")
@@ -848,6 +1574,8 @@ def _run_engine(args, only_books_path):
         )
 
     procs = []
+    owned_groups = []
+    groups_by_proc = {}
     scope_paths = []
     active = {}
     spawned_at = {}
@@ -857,22 +1585,28 @@ def _run_engine(args, only_books_path):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "ci", "process_scope.py",
     )
+    term_grace = float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
 
     def spawn_worker(label):
-        try:
-            os.remove(os.path.join(heartbeat_dir, label))
-        except FileNotFoundError:
-            pass
+        import secrets
+
+        session_token = secrets.token_hex(32)
+        proc_env = dict(env, LINKER_ENGINE_SESSION_TOKEN=session_token)
         proc = subprocess.Popen(
             base_cmd + ["--label", label],
             cwd=args.sef_project,
-            env=env,
+            env=proc_env,
             start_new_session=True,
             pass_fds=lease_fds,
         )
         # Record ownership immediately.  Every historical process remains in procs
         # so the final cleanup also reaps a replacement's predecessor.
         procs.append(proc)
+        group = {
+            "pgid": proc.pid, "token": session_token, "label": label, "proc": proc,
+        }
+        owned_groups.append(group)
+        groups_by_proc[id(proc)] = group
         active[label] = proc
         spawned_at[proc.pid] = time.time()
         if scope_dir:
@@ -887,6 +1621,84 @@ def _run_engine(args, only_books_path):
             scope_paths.append((state, proc))
         return proc
 
+    done_dir = os.path.join(os.path.abspath(args.run_dir), "done")
+    # Pool children write their own w01… heartbeats beside the master's; counting the
+    # master would report "1 alive" while twelve resolvers work.  The namespace above
+    # already excludes prior invocations; this label allow-list also ignores unrelated
+    # files somebody places beside a current worker.
+    master_labels = set(worker_labels) if pool else set()
+    heartbeat_labels = (
+        {f"w{number:02d}" for number in range(1, workers + 1)} if pool else set(worker_labels)
+    )
+
+    def ledger_done():
+        if expected_done is None:
+            return set()
+        try:
+            return expected_done & set(os.listdir(done_dir))
+        except OSError:
+            return set()
+
+    # Books already complete before a single worker was spawned.  run_incremental wipes
+    # done/ and then, on --resume-checkpoints, re-writes a marker per book adopted from
+    # the checkpoint, so this is exactly the adopted count.  Kept out of the ETA rate
+    # (see format_progress) and named in the line so "5126/5127" cannot read as work
+    # this run performed.
+    adopted_at_start = len(ledger_done())
+
+    def report_progress(now, started_at):
+        if expected_done is None:
+            return  # synthetic/unit-test invocation: no plan to measure against
+        done = ledger_done()
+        _log(format_progress(
+            books_done=len(done),
+            books_total=len(expected_done),
+            books_adopted=adopted_at_start,
+            lines_done=sum(planned_lines.get(cid, 0) for cid in done),
+            lines_total=sum(planned_lines.values()),
+            elapsed=now - started_at,
+            workers_alive=_alive_worker_count(
+                heartbeat_dir, master_labels, stall, now, heartbeat_labels
+            ),
+            # Pool-child recycles are the master's business and it logs each one
+            # (`pool: wNN recycled`); this counts only the replacements THIS driver made.
+            workers_replaced=sum(restart_counts.values()),
+            # One journal read per interval (a handful of lines): a heavy phase forks
+            # a fresh worker per deferred book, and that must not read as churn.
+            workers_recycled_for_heavy=read_memory_stats(
+                os.path.abspath(args.run_dir)
+            )["recycled_for_heavy"],
+        ))
+
+    def report_claims():
+        """One closing line for the claim protocol (see format_claim_summary)."""
+        if expected_done is None:
+            return  # synthetic/unit-test invocation: no plan, nothing was claimed
+        try:
+            from link_books import count_claim_events
+        except ImportError:
+            return
+        run = os.path.abspath(args.run_dir)
+        _log(format_claim_summary(
+            claimed=max(0, len(ledger_done()) - adopted_at_start),
+            recovered=count_claim_events(run, "recovered"),
+            duplicates=count_claim_events(run, "duplicate"),
+        ))
+
+    def report_memory():
+        """The MemoryError requeue tally, only when a book actually needed it."""
+        if expected_done is None:
+            return  # synthetic/unit-test invocation: no plan, nothing was linked
+        stats = read_memory_stats(os.path.abspath(args.run_dir))
+        line = format_memory_summary(
+            requeued=stats["requeued"],
+            succeeded=stats["succeeded"],
+            failed=stats["failed"],
+        )
+        if line is not None:
+            _log(line)
+
+    run_error = None
     try:
         # Append immediately after every successful spawn.  A list comprehension
         # loses all already-created children if a later Popen raises before the
@@ -895,11 +1707,18 @@ def _run_engine(args, only_books_path):
             spawn_worker(label)
 
         codes = []
+        # The resolve stage runs for hours with no other output now that Sefaria's
+        # INFO firehose is silenced.  One line per interval, from the done ledger.
+        stage_started_at = time.time()
+        next_progress = stage_started_at + progress_seconds
         while active:
             time.sleep(1)
             now = time.time()
+            if now >= next_progress:
+                next_progress = now + progress_seconds
+                report_progress(now, stage_started_at)
             for label, proc in list(active.items()):
-                code = proc.poll()
+                code = _poll_engine_without_reaping(proc)
                 if code is None:
                     path = os.path.join(heartbeat_dir, label)
                     try:
@@ -910,25 +1729,32 @@ def _run_engine(args, only_books_path):
                         continue
                     _log(
                         f"worker {label} pid={proc.pid} has no heartbeat for "
-                        f"{now-last:.0f}s; terminating its group"
+                        f"{now-last:.0f}s; terminating its owned group"
                     )
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        code = proc.wait()
+                    group = groups_by_proc[id(proc)]
+                    if not _terminate_owned_group(group, term_grace, _log):
+                        raise RuntimeError(
+                            f"owned engine group {proc.pid} survived the stall cleanup"
+                        )
+                    code = proc.wait()
 
                 if code is None:
                     continue
                 codes.append(code)
                 del active[label]
+                # A SIGKILLed pool master can leave forked resolvers in its old PGID.
+                # Drain that *registered, token-bound* group before even considering a
+                # replacement, so no old generation can overlap the next one.
+                group = groups_by_proc[id(proc)]
+                if not _terminate_owned_group(group, term_grace, _log):
+                    raise RuntimeError(
+                        f"owned engine group {proc.pid} survived after leader exit {code}"
+                    )
+                # On Linux the status above was observed with WNOWAIT so the leader's
+                # PID could pin its PGID/SID throughout cleanup.  Reap only now, before
+                # considering a replacement.
+                if getattr(proc, "returncode", None) is None:
+                    code = proc.wait()
                 if code == 0 or ledger_complete():
                     continue
                 if restart_counts[label] >= restart_limit:
@@ -943,44 +1769,60 @@ def _run_engine(args, only_books_path):
                     f"starting bounded replacement {restart_counts[label]}/{restart_limit}"
                 )
                 spawn_worker(label)
+        # Final tally: the last interval may be up to progress_seconds stale, and the
+        # completeness assertion that follows reads better after a stated N/M.
+        report_progress(time.time(), stage_started_at)
+        report_claims()
+        report_memory()
+    except BaseException as error:
+        # Cleanup must run on every exception, but a cleanup diagnostic is never more
+        # useful than the engine failure that triggered it.  Preserve that original
+        # exception below and log any secondary cleanup failure beside it.
+        run_error = error
+        raise
     finally:
-        live = [p for p in procs if p.poll() is None]
-        for p in live:
+        # Deliberately visit *every registered group*, not just Popen objects whose
+        # leader is still alive.  A pool child remains in the old session after its
+        # master is killed, exactly the state Popen.poll() cannot represent.
+        cleanup_failures = []
+        for group in owned_groups:
             try:
-                os.killpg(p.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        deadline = time.time() + float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
-        for p in live:
-            while p.poll() is None and time.time() < deadline:
-                time.sleep(0.5)
-            if p.poll() is None:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        # Reap every child we created.  killpg() ending the process is not enough:
-        # without wait(), the leader can remain a zombie and make ownership checks
-        # report a false live group.
-        for p in live:
+                if not _terminate_owned_group(group, term_grace, _log):
+                    cleanup_failures.append(f"process group {group['pgid']} survived SIGKILL")
+            except Exception as error:
+                cleanup_failures.append(str(error))
+        # Reap every leader we created.  Group cleanup above is deliberately
+        # independent of this wait: a dead leader may already have been reaped while
+        # descendants were still live.
+        for p in procs:
             try:
                 p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+            except (subprocess.TimeoutExpired, ChildProcessError, OSError):
+                cleanup_failures.append(f"engine leader {p.pid} did not exit after group cleanup")
         for state, proc in scope_paths:
             try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                try:
-                    os.remove(state)
-                except FileNotFoundError:
-                    pass
-            except PermissionError:
-                _log(f"retaining process scope {state}: group {proc.pid} still exists but is not signalable")
-            else:
-                _log(f"retaining process scope {state}: group {proc.pid} still has live members")
-        if live:
-            _log(f"terminated {len(live)} live engine worker group(s) on exit")
+                owned, unverified = _process_group_members(
+                    groups_by_proc[id(proc)]["pgid"], groups_by_proc[id(proc)]["token"], proc
+                )
+                if not owned and not unverified:
+                    try:
+                        os.remove(state)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    _log(
+                        f"retaining process scope {state}: group {proc.pid} still has "
+                        f"owned members {owned} or unverified members {unverified}"
+                    )
+            except Exception as error:
+                cleanup_failures.append(f"could not inspect process scope {state}: {error}")
+        if stats is not None:
+            stats["workers_replaced"] = sum(restart_counts.values())
+        if cleanup_failures:
+            message = "engine process-group cleanup failed: " + "; ".join(cleanup_failures)
+            if run_error is None:
+                raise RuntimeError(message)
+            _log(message + f" (preserving original {type(run_error).__name__})")
     if any(codes):
         _log(f"engine worker exit codes: {codes} — deferring judgment to the ledger")
     return codes
@@ -1033,8 +1875,15 @@ def main():
         return
     if args.relink_request_id and not args.ner_bundle_dir:
         ap.error("--relink-request-id without --plan-only requires --ner-bundle-dir")
-    n = run_incremental(args)
-    _log(f"done: {n} books re-linked")
+    summary = {}
+    n = run_incremental(args, summary)
+    _log(format_done_line(
+        total=summary.get("total", n),
+        adopted=summary.get("adopted", 0),
+        computed=summary.get("computed", n),
+        failed=summary.get("failed", 0),
+        checkpoint_source=summary.get("checkpoint_source"),
+    ))
 
 
 if __name__ == "__main__":

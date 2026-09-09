@@ -55,22 +55,29 @@ def pairs(items):
  return out
 v=json.loads(path.read_text(),object_pairs_hook=pairs)
 base_keys={'schema_version','request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256','dry_run','intake_run_id','intake_run_attempt'}
-if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2,3,4): raise SystemExit('invalid intent schema version')
+if type(v.get('schema_version')) is not int or v['schema_version'] not in (1,2,3,4,5): raise SystemExit('invalid intent schema version')
 expected_keys=(base_keys if v['schema_version']==1 else
                base_keys|{'recovery_mode'} if v['schema_version']==2 else
                base_keys|{'recovery_mode','adopt_fingerprint'} if v['schema_version']==3 else
                base_keys|{'recovery_mode','adopt_fingerprint',
                           'ner_checkpoint_source_run_id',
                           'ner_checkpoint_source_run_attempt',
-                          'ner_checkpoint_source_engine_fingerprint'})
+                          'ner_checkpoint_source_engine_fingerprint'} if v['schema_version']==4 else
+               base_keys|{'recovery_mode','adopt_fingerprint',
+                          'ner_checkpoint_source_run_id',
+                          'ner_checkpoint_source_run_attempt',
+                          'ner_checkpoint_source_engine_fingerprint',
+                          'wait_contract_sha256'})
 if set(v)!=expected_keys or type(v['intake_run_id']) is not int or v['intake_run_id']!=expected_run: raise SystemExit('invalid intent schema/identity')
 string_fields=('request_id','library_run_id','parent_run_attempt','sefaria_tag','snapshot_sha256','sefaria_release_metadata_sha256')
 if v['schema_version']>=3: string_fields += ('adopt_fingerprint',)
-if v['schema_version']==4:
+if v['schema_version']>=4:
  string_fields += ('ner_checkpoint_source_run_id','ner_checkpoint_source_run_attempt',
                    'ner_checkpoint_source_engine_fingerprint')
+if v['schema_version']>=5: string_fields += ('wait_contract_sha256',)
 if any(type(v[k]) is not str for k in string_fields): raise SystemExit('invalid intent string types')
 if not re.fullmatch(r'[0-9a-f]{64}',v['request_id']): raise SystemExit('invalid request id')
+if v['schema_version']>=5 and not re.fullmatch(r'[0-9a-f]{64}',v['wait_contract_sha256']): raise SystemExit('invalid wait timeout contract digest')
 if type(v['dry_run']) is not bool or type(v.get('recovery_mode',False)) is not bool or type(v['intake_run_attempt']) is not int or v['intake_run_attempt'] != expected_attempt: raise SystemExit('invalid intent types/attempt')
 if not re.fullmatch(r'[ -~]{0,8192}',v.get('adopt_fingerprint','')): raise SystemExit('invalid adoption attestation')
 checkpoint=(v.get('ner_checkpoint_source_run_id',''),
@@ -103,6 +110,7 @@ PY
   checkpoint_source_run_id=$(jq -r '.ner_checkpoint_source_run_id // ""' "$TMP/intent/kaggle-intent.json")
   checkpoint_source_run_attempt=$(jq -r '.ner_checkpoint_source_run_attempt // ""' "$TMP/intent/kaggle-intent.json")
   checkpoint_source_engine_fingerprint=$(jq -r '.ner_checkpoint_source_engine_fingerprint // ""' "$TMP/intent/kaggle-intent.json")
+  wait_contract_sha256=$(jq -r '.wait_contract_sha256 // ""' "$TMP/intent/kaggle-intent.json")
   if [ -n "$library_run_id" ]; then
     if ! gh api "repos/$PARENT_REPO/actions/runs/$library_run_id" > "$TMP/parent.json" 2> "$TMP/parent.err"; then
       if grep -q 'HTTP 404' "$TMP/parent.err"; then
@@ -251,6 +259,7 @@ PY
   [ "$(jq -r .dry_run "$TMP/intent/kaggle-intent.json")" = true ] && args+=(--dry-run)
   [ "$recovery_mode" = true ] && args+=(--recovery-mode)
   [ -z "$adopt_fingerprint" ] || args+=(--adopt-fingerprint "$adopt_fingerprint")
+  [ -z "$wait_contract_sha256" ] || args+=(--wait-contract-sha256 "$wait_contract_sha256")
   [ -z "$checkpoint_source_run_id" ] || \
     args+=(--ner-checkpoint-source-run-id "$checkpoint_source_run_id")
   [ -z "$checkpoint_source_run_attempt" ] || \

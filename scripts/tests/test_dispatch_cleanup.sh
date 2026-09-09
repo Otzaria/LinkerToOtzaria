@@ -109,7 +109,8 @@ check() {
 cancels() { grep -c CANCELLED "$MOCK_LOG" 2>/dev/null || true; }
 reset_state() { rm -f "$MOCK_DIR/dispatched.env"; : > "$MOCK_LOG"; }
 serial_args=(--library-run-id 555 --relink-request-id "$RID" --parent-run-attempt 2
-             --sefaria-tag T1 --snapshot-sha256 "$RID" --sefaria-release-metadata-sha256 "$RID")
+             --sefaria-tag T1 --snapshot-sha256 "$RID" --sefaria-release-metadata-sha256 "$RID"
+             --wait-contract-sha256 "$RID")
 
 export MOCK_LOG="$WORK/t1.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_BUSY=2; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?
@@ -134,6 +135,8 @@ rc=0; ( export PATH="$WORK/bin:$PATH"; bash "$SCRIPT" "${serial_args[@]}" ) >/de
 check "success → no cancel, rc=0" test "$rc" -eq 0 -a "$(cancels)" -eq 0
 check "request-specific JIT label → stale listener cannot steal child" \
   test "$(grep -c "labels\[\]=request-$RID" "$MOCK_LOG")" -eq 1
+check "wait-timeout contract digest → forwarded to relink" \
+  test "$(grep -c "wait_contract_sha256=$RID" "$MOCK_LOG")" -eq 1
 
 export MOCK_LOG="$WORK/t4-stale.log"; reset_state
 rc=0; ( export PATH="$WORK/bin:$PATH" MOCK_STALE_RUNNER=1; bash "$SCRIPT" "${serial_args[@]}" ) >/dev/null 2>&1 || rc=$?

@@ -45,6 +45,13 @@ on:
         description: SHA-256 of the pinned SefariaExport release_metadata.json — forwarded to content-verify the changelog.
         required: false
         default: ''
+      wait_contract_sha256:
+        description: >
+          SHA-256 of the shared SeforimLibrary/Linker relink timeout contract.
+          The default is this revision's contract for standalone intake.
+        required: false
+        default: 'a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f'
+        type: string
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).
         required: false
@@ -102,6 +109,22 @@ jobs:
           token: ${{ secrets.PIPELINE_TOKEN }}
           persist-credentials: false
 
+      - name: Preflight — wait-timeout contract
+        env:
+          WAIT_CONTRACT_SHA256: ${{ inputs.wait_contract_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::wait_contract_sha256 must be a 64-character lowercase SHA-256" >&2
+            exit 1
+          }
+          actual="$(sha256sum .github/contracts/linker_relink_timeouts_v1.json | cut -d' ' -f1)"
+          [ "$actual" = "$WAIT_CONTRACT_SHA256" ] || {
+            echo "::error::wait-timeout contract mismatch: caller=$WAIT_CONTRACT_SHA256 local=$actual" >&2
+            exit 1
+          }
+          echo "wait-timeout contract verified: $actual"
+
       # Inputs reach the shell ONLY via env (never interpolated into the script body —
       # a crafted input would otherwise become a command before any validation runs;
       # this job holds a PAT and the Kaggle token). Values are validated and passed as
@@ -117,6 +140,7 @@ jobs:
           IN_SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           IN_SNAPSHOT_SHA256: ${{ inputs.snapshot_sha256 }}
           IN_SEFARIA_METADATA_SHA256: ${{ inputs.sefaria_release_metadata_sha256 }}
+          IN_WAIT_CONTRACT_SHA256: ${{ inputs.wait_contract_sha256 }}
           IN_ADOPT_FINGERPRINT: ${{ inputs.adopt_fingerprint }}
           IN_NER_CHECKPOINT_SOURCE_RUN_ID: ${{ inputs.ner_checkpoint_source_run_id }}
           IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT: ${{ inputs.ner_checkpoint_source_run_attempt }}
@@ -129,6 +153,7 @@ jobs:
           [ -z "$IN_SEFARIA_TAG" ] || [[ "$IN_SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error::sefaria_tag has an invalid shape"; exit 1; }
           [ -z "$IN_SNAPSHOT_SHA256" ] || [[ "$IN_SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::snapshot_sha256 must be 64-hex"; exit 1; }
           [ -z "$IN_SEFARIA_METADATA_SHA256" ] || [[ "$IN_SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::sefaria_release_metadata_sha256 must be 64-hex"; exit 1; }
+          [[ "$IN_WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::wait_contract_sha256 must be 64-hex"; exit 1; }
           [ -z "$IN_ADOPT_FINGERPRINT" ] || \
             python3 ci/validate_printable_ascii.py adopt_fingerprint 8192 "$IN_ADOPT_FINGERPRINT"
           [ -z "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
@@ -181,6 +206,7 @@ jobs:
             --arg library_run_id "$IN_LIBRARY_RUN_ID" --arg parent_run_attempt "$IN_PARENT_RUN_ATTEMPT" \
             --arg sefaria_tag "$IN_SEFARIA_TAG" --arg snapshot_sha256 "$IN_SNAPSHOT_SHA256" \
             --arg sefaria_metadata_sha256 "$IN_SEFARIA_METADATA_SHA256" \
+            --arg wait_contract_sha256 "$IN_WAIT_CONTRACT_SHA256" \
             --arg adopt_fingerprint "$IN_ADOPT_FINGERPRINT" \
             --arg ner_checkpoint_source_run_id "$IN_NER_CHECKPOINT_SOURCE_RUN_ID" \
             --arg ner_checkpoint_source_run_attempt "$IN_NER_CHECKPOINT_SOURCE_RUN_ATTEMPT" \
@@ -188,9 +214,10 @@ jobs:
             --argjson dry_run "$( [ -n "$IN_DRY_RUN" ] && echo true || echo false )" \
             --argjson recovery_mode "$( [ -n "$IN_RECOVERY_MODE" ] && echo true || echo false )" \
             --argjson intake_run_id "$GITHUB_RUN_ID" --argjson intake_run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{schema_version:4,request_id:$request_id,library_run_id:$library_run_id,
+            '{schema_version:5,request_id:$request_id,library_run_id:$library_run_id,
               parent_run_attempt:$parent_run_attempt,sefaria_tag:$sefaria_tag,
               snapshot_sha256:$snapshot_sha256,sefaria_release_metadata_sha256:$sefaria_metadata_sha256,
+              wait_contract_sha256:$wait_contract_sha256,
               adopt_fingerprint:$adopt_fingerprint,
               ner_checkpoint_source_run_id:$ner_checkpoint_source_run_id,
               ner_checkpoint_source_run_attempt:$ner_checkpoint_source_run_attempt,

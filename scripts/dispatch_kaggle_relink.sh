@@ -5,6 +5,7 @@
 #       [--relink-request-id <64-hex>] [--parent-run-attempt <n>] \
 #       [--sefaria-tag <tag>] [--snapshot-sha256 <sha>] \
 #       [--sefaria-release-metadata-sha256 <sha>] [--adopt-fingerprint <OLD::NEW>] \
+#       [--wait-contract-sha256 <sha>] \
 #       [--ner-checkpoint-source-run-id <id>] \
 #       [--ner-checkpoint-source-run-attempt <n>] \
 #       [--ner-checkpoint-source-engine-fingerprint <fingerprint>]
@@ -15,6 +16,9 @@
 # identity — stamped into the child's run-name for EXACT-match discovery/cleanup.
 # --sefaria-tag / --snapshot-sha256 / --sefaria-release-metadata-sha256: the build's
 # pinned Sefaria vintage + snapshot + metadata digests, forwarded to relink.yml.
+# --wait-contract-sha256: the exact shared timeout-contract digest; required for
+# durable Kaggle intents and optional for direct standalone dispatches (whose
+# relink.yml input retains its checked-in default).
 #
 # Order matters: the relink job is queued FIRST (runs-on [self-hosted, kaggle, gpu] —
 # it just waits), THEN the kernel is pushed; the session boots, registers as a one-job
@@ -38,6 +42,7 @@ LIBRARY_RUN_ID=""
 SEFARIA_TAG=""
 SNAPSHOT_SHA256=""
 SEFARIA_METADATA_SHA256=""
+WAIT_CONTRACT_SHA256=""
 RELINK_REQUEST_ID=""
 PARENT_RUN_ATTEMPT=""
 ADOPT_FINGERPRINT=""
@@ -54,6 +59,7 @@ while [ $# -gt 0 ]; do
     --sefaria-tag) SEFARIA_TAG="$2"; shift 2 ;;
     --snapshot-sha256) SNAPSHOT_SHA256="$2"; shift 2 ;;
     --sefaria-release-metadata-sha256) SEFARIA_METADATA_SHA256="$2"; shift 2 ;;
+    --wait-contract-sha256) WAIT_CONTRACT_SHA256="$2"; shift 2 ;;
     --adopt-fingerprint) ADOPT_FINGERPRINT="$2"; shift 2 ;;
     --ner-checkpoint-source-run-id) NER_CHECKPOINT_SOURCE_RUN_ID="$2"; shift 2 ;;
     --ner-checkpoint-source-run-attempt) NER_CHECKPOINT_SOURCE_RUN_ATTEMPT="$2"; shift 2 ;;
@@ -69,6 +75,7 @@ done
 [ -z "$SEFARIA_TAG" ] || [[ "$SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "--sefaria-tag has an invalid shape" >&2; exit 2; }
 [ -z "$SNAPSHOT_SHA256" ] || [[ "$SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--snapshot-sha256 must be 64-hex" >&2; exit 2; }
 [ -z "$SEFARIA_METADATA_SHA256" ] || [[ "$SEFARIA_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--sefaria-release-metadata-sha256 must be 64-hex" >&2; exit 2; }
+[ -z "$WAIT_CONTRACT_SHA256" ] || [[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "--wait-contract-sha256 must be 64-hex" >&2; exit 2; }
 [ -z "$ADOPT_FINGERPRINT" ] || \
   python3 "$HERE/ci/validate_printable_ascii.py" adopt_fingerprint 8192 "$ADOPT_FINGERPRINT"
 [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
@@ -253,6 +260,8 @@ DISPATCH_ARGS=(workflow run relink.yml -R "$REPO" -f target=kaggle
 [ -z "$SNAPSHOT_SHA256" ] || DISPATCH_ARGS+=(-f "snapshot_sha256=$SNAPSHOT_SHA256")
 [ -z "$SEFARIA_METADATA_SHA256" ] || \
   DISPATCH_ARGS+=(-f "sefaria_release_metadata_sha256=$SEFARIA_METADATA_SHA256")
+[ -z "$WAIT_CONTRACT_SHA256" ] || \
+  DISPATCH_ARGS+=(-f "wait_contract_sha256=$WAIT_CONTRACT_SHA256")
 [ -z "$ADOPT_FINGERPRINT" ] || DISPATCH_ARGS+=(-f "adopt_fingerprint=$ADOPT_FINGERPRINT")
 [ -z "$NER_CHECKPOINT_SOURCE_RUN_ID" ] || \
   DISPATCH_ARGS+=(-f "ner_checkpoint_source_run_id=$NER_CHECKPOINT_SOURCE_RUN_ID")
