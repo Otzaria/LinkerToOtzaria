@@ -194,11 +194,13 @@ class ProcessHygieneTest(unittest.TestCase):
                         "import os, signal, sys, time\\n"
                         "from pathlib import Path\\n"
                         "ready, terminated = map(Path, sys.argv[1:])\\n"
-                        "ready.write_text(os.environ['LINKER_ENGINE_SESSION_TOKEN'] + '\\n' + str(time.monotonic()))\\n"
                         "def stop(*_):\\n"
                         "    terminated.write_text(str(time.monotonic()))\\n"
                         "    raise SystemExit(0)\\n"
                         "signal.signal(signal.SIGTERM, stop)\\n"
+                        "ready.write_text('\\n'.join((os.environ['LINKER_ENGINE_SESSION_TOKEN'], "
+                        "str(os.getppid()), str(os.getpgrp()), str(os.getsid(0)), "
+                        "str(time.monotonic()))))\\n"
                         "while True:\\n"
                         "    time.sleep(0.05)\\n"
                     )
@@ -240,7 +242,13 @@ class ProcessHygieneTest(unittest.TestCase):
                 self.assertEqual(len(tokens), 2)
                 self.assertNotEqual(tokens[0], tokens[1])
                 self.assertTrue(all(len(token) == 64 for token in tokens))
-                self.assertEqual(Path(tmp, "old-worker.ready").read_text().splitlines()[0], tokens[0])
+                ready = Path(tmp, "old-worker.ready").read_text().splitlines()
+                self.assertEqual(len(ready), 5)
+                self.assertEqual(ready[0], tokens[0])
+                self.assertEqual(
+                    ready[1:4], [ready[1]] * 3,
+                    "fixture child must share its original master's PGID and SID",
+                )
                 self.assertLess(
                     float(Path(tmp, "old-worker.terminated").read_text()),
                     float(Path(tmp, "replacement.started").read_text()),

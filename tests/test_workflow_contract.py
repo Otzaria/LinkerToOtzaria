@@ -1,11 +1,10 @@
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 import unittest
-
-import yaml
 
 
 # The two fingerprint components that a source change in THIS repo can move.
@@ -24,6 +23,35 @@ ENGINE_SRC_FILES = (
     "ci/gpu_server_microbatch.patch",
 )
 SEFARIA_PATCH_FILE = "ci/sefaria_resolver.patch"
+
+
+def yaml_mapping_scalar(text: str, *path: str) -> str:
+    """Read one plain mapping scalar without adding a YAML dependency to CI.
+
+    The workflow contract only needs a handful of single-line scalar values.  Keep
+    that check aligned with this repository's zero-third-party-import test suite
+    instead of making every PR install a YAML parser merely to inspect indentation.
+    """
+    stack = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^( *)([A-Za-z0-9_-]+):(?:[ \t]*(.*))?$", line)
+        if match is None:
+            continue
+        indent, key, value = len(match.group(1)), match.group(2), match.group(3)
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        current_path = tuple(item[1] for item in stack) + (key,)
+        if current_path == path:
+            if not value:
+                raise AssertionError(f"{'.'.join(path)} is not a scalar")
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value
+        if not value:
+            stack.append((indent, key))
+    raise KeyError(".".join(path))
 
 
 def committed_blob(root: Path, relative_path: str) -> bytes:
@@ -58,7 +86,7 @@ def substitute_component(fingerprint: str, key: str, value: str) -> str:
 
 class RelinkWorkflowContractTest(unittest.TestCase):
     def test_relink_timeout_expressions_match_the_shared_contract(self):
-        """Parse GitHub YAML and bind every shared timeout to the contract bytes.
+        """Inspect required YAML scalars and bind shared timeouts to contract bytes.
 
         The 7,200-minute standalone ceiling is intentionally outside the
         cross-repository wait contract: no SeforimLibrary build waits for it.
@@ -74,22 +102,17 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertEqual(contract["contractVersion"], 1)
         self.assertEqual(contract["workflow"], "relink.yml")
 
-        # BaseLoader keeps GitHub's unquoted `on` key as a string instead of
-        # applying YAML 1.1's legacy boolean coercion.
-        workflow = yaml.load(
-            (root / ".github/workflows/relink.yml").read_text(encoding="utf-8"),
-            Loader=yaml.BaseLoader,
-        )
-        dispatch = workflow["on"]["workflow_dispatch"]["inputs"]
-        self.assertEqual(dispatch["wait_contract_sha256"]["type"], "string")
+        workflow = (root / ".github/workflows/relink.yml").read_text(encoding="utf-8")
+        digest_path = ("on", "workflow_dispatch", "inputs", "wait_contract_sha256")
+        self.assertEqual(yaml_mapping_scalar(workflow, *digest_path, "type"), "string")
         self.assertEqual(
-            dispatch["wait_contract_sha256"]["default"],
+            yaml_mapping_scalar(workflow, *digest_path, "default"),
             hashlib.sha256(contract_bytes).hexdigest(),
         )
 
         timeouts = contract["timeouts"]
         self.assertEqual(
-            workflow["jobs"]["relink"]["timeout-minutes"],
+            yaml_mapping_scalar(workflow, "jobs", "relink", "timeout-minutes"),
             "${{ inputs.target == 'kaggle' && "
             f"{timeouts['relink']['kaggle']} || "
             "(inputs.target == 'local' && "
@@ -98,25 +121,22 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             f"{timeouts['relink']['server']} || 7200)) }}}}",
         )
         self.assertEqual(
-            workflow["jobs"]["resolve"]["timeout-minutes"],
+            yaml_mapping_scalar(workflow, "jobs", "resolve", "timeout-minutes"),
             "${{ inputs.library_run_id != '' && "
             f"{timeouts['resolve']} || 7200 }}}}",
         )
         self.assertEqual(
-            workflow["jobs"]["publish"]["timeout-minutes"],
+            yaml_mapping_scalar(workflow, "jobs", "publish", "timeout-minutes"),
             str(timeouts["publish"]),
         )
 
-        intake = yaml.load(
-            (root / ".github/workflows/kaggle-relink.yml").read_text(encoding="utf-8"),
-            Loader=yaml.BaseLoader,
+        intake = (root / ".github/workflows/kaggle-relink.yml").read_text(
+            encoding="utf-8"
         )
-        intake_input = intake["on"]["workflow_dispatch"]["inputs"][
-            "wait_contract_sha256"
-        ]
-        self.assertEqual(intake_input["type"], "string")
+        self.assertEqual(yaml_mapping_scalar(intake, *digest_path, "type"), "string")
         self.assertEqual(
-            intake_input["default"], hashlib.sha256(contract_bytes).hexdigest()
+            yaml_mapping_scalar(intake, *digest_path, "default"),
+            hashlib.sha256(contract_bytes).hexdigest(),
         )
 
     def test_local_rocm_target_uses_dedicated_runner_and_persistent_venv(self):
