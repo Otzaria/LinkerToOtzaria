@@ -2,16 +2,16 @@
   "schema_version": 3,
   "description": "Lineage of the last linker run (see stage 3). Source-change clock = snapshot.",
   "snapshot": {
-    "sha256": "e719b7ab1c0330304932ce44aa4ea8afbe3ff591156ef022e3b7d63753ed64d3",
-    "book_count": 7316
+    "sha256": "e75ca0ea6c5942b98f317bc2eec0477c429fba9e1c500ef3171ed46c49df62c8",
+    "book_count": 7367
   },
   "sefaria": {
-    "export_tag": "2026-09-05_22-40-33987734987-1"
+    "export_tag": "2026-09-10_20-32-34508533290-1"
   },
   "engine": {
     "ambiguity_policy": "drop",
     "bavli_convention": false,
-    "fingerprint": "dump=44e55916743983b8;engine_src=ed518d1bde7b54ef;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9ffdfa90517b284a;policy=drop;bavli=0"
+    "fingerprint": "dump=44e55916743983b8;engine_src=3e8ef0b395adff07;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=798d27b90645b03d;policy=drop;bavli=0"
   },
-  "generated_at": "2026-09-06T08:23:55Z"
+  "generated_at": "2026-09-10T22:49:36Z"
 }
