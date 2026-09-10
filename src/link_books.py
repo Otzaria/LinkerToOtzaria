@@ -1461,6 +1461,7 @@ def process_batch(
         # SAME content string in UTF-16 units. They diverge only past a non-BMP char
         # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
         has_non_bmp = any(ord(c) > 0xFFFF for c in content)
+        marker_end = leading_verse_marker_end(content)
         for rr in doc.resolved_refs:
             try:
                 ref = _pick_ref(rr, last_ref)
@@ -1469,6 +1470,10 @@ def process_batch(
                 if ref is None:
                     continue
                 start, end = rr.raw_entity.span.range
+                # "(נח)" opening a Tanach verse is its number, not a citation of
+                # Parashat Noach (otzaria#1185).
+                if end <= marker_end:
+                    continue
                 anchor_text = content[start:end]
                 target_ref = ref.normal()
                 if is_implausible_citation_target(target_ref, anchor_text):
@@ -1739,6 +1744,14 @@ def process_book_checkpointed(
 
 # Bavli-convention flag is read once into a module global by main().
 _BAVLI_CONVENTION = False
+
+_LEADING_VERSE_MARKER = re.compile(r'^\s*\(([א-ת"׳״]{1,4})\)')
+
+
+def leading_verse_marker_end(content: str) -> int:
+    """End offset of a verse/section marker such as "(נח)" opening the line, else 0."""
+    m = _LEADING_VERSE_MARKER.match(content)
+    return m.end() if m else 0
 
 
 def _inherits_sections(candidate, last_ref) -> bool:
