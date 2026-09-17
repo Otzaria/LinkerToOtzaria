@@ -352,6 +352,31 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', workflow)
         self.assertGreaterEqual(workflow.count("--forbid-full-relink"), 2)
 
+    def test_serial_local_migrates_the_baseline_without_operator_action(self):
+        # A deliberate engine change must not strand the weekly build. target=local holds
+        # 1440 min against a 1530-min parent wait cap and a 2880-min parent ceiling, so a
+        # full relink fits and runs unattended; the budget-bounded topologies keep the
+        # guard, or they would start an ~11h migration they can never finish.
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '[ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || '
+            '[ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)',
+            workflow,
+        )
+        # The local engine branch (12 workers + pool) must carry no guard of its own.
+        local_branch = workflow.split("--engine-workers 12", 1)[1]
+        local_branch = local_branch.split('elif [ -n "$LIBRARY_RUN_ID" ]', 1)[0]
+        self.assertNotIn("--forbid-full-relink", local_branch)
+        # Oracle resolve (480 min) and the server serial branch still fail closed.
+        self.assertIn('[ -z "$LIBRARY_RUN_ID" ] || ARGS+=(--forbid-full-relink)', workflow)
+        self.assertIn(
+            '            ARGS+=(--engine-workers 2)\n'
+            '            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)',
+            workflow,
+        )
+
     def test_full_relink_requires_explicit_exact_local_recovery(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"

@@ -943,7 +943,12 @@ jobs:
           if [ "$TARGET" = kaggle ] || [ "$TARGET" = local ]; then
             PLAN="$RUN_DIR/ner-plan.json"
             PLAN_ARGS=("${ARGS[@]}" --plan-only "$PLAN" --relink-request-id "$RELINK_REQUEST_ID")
-            [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || PLAN_ARGS+=(--forbid-full-relink)
+            # target=local absorbs a full relink under a waiting build: its own ceiling is
+            # 1440 min (contract linker_relink_timeouts_v1.json), the parent's wait cap is
+            # 1530 and the parent job ceiling is 2880 — an ~11h migration fits all three.
+            # kaggle NER is bounded at 90 min and cannot, so it still fails fast with
+            # instructions instead of starting work it can never finish.
+            [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || [ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
             CHECKPOINT_ARGS=()
@@ -1039,7 +1044,6 @@ jobs:
               --engine-workers 12
               --engine-pool
             )
-            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           elif [ -n "$LIBRARY_RUN_ID" ]; then
             ARGS+=(--engine-workers 2)
             [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
