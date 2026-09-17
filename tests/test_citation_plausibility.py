@@ -33,6 +33,11 @@ class TalmudAddressTest(unittest.TestCase):
             with self.subTest(anchor=anchor):
                 self.assertFalse(link_books.talmud_address_contradicts(target, anchor))
 
+    def test_tractate_daf_is_not_misread_as_an_unquoted_amud_marker(self):
+        anchor = "לקמן (עבודה זרה עא, א"
+        self.assertEqual(link_books._spelled_addresses(anchor), [("עא", "א")])
+        self.assertTrue(link_books.talmud_address_contradicts("Avodah Zarah 64a", anchor))
+
     def test_words_before_amud_marker_are_not_numbers(self):
         self.assertFalse(link_books.talmud_address_contradicts(
             "Tosafot on Bava Kamma 62b:15:2", "ולקמן ע\"ב תוס' ד\"ה יצאו"))
@@ -111,6 +116,11 @@ class IbidCandidateTest(unittest.TestCase):
         self.assertIsNone(link_books._ibid_candidate(
             self.rr([self.Ref("Genesis", [30, 14]), self.Ref("Genesis", [30, 15])]), last))
 
+    def test_a_different_reference_depth_is_not_treated_as_continuation(self):
+        last = self.Ref("Genesis", [30, 1])
+        self.assertIsNone(link_books._ibid_candidate(
+            self.rr([self.Ref("Genesis", [30, 14, 2]), self.Ref("Genesis", [29, 14, 2])]), last))
+
 
 class AbbreviationMisreadTest(unittest.TestCase):
     def test_magen_avraham_and_page_numbers_are_dropped(self):
@@ -123,6 +133,16 @@ class AbbreviationMisreadTest(unittest.TestCase):
         self.assertFalse(link_books.is_abbreviation_misread("I Kings 7", "מלכים א ז"))
         self.assertFalse(link_books.is_abbreviation_misread("Amos 7:7", "עמוס ז ז"))
         self.assertFalse(link_books.is_abbreviation_misread("Shabbat 2a", "מ\"א"))
+
+
+class MishnahChapterMisreadTest(unittest.TestCase):
+    def test_bavli_first_chapter_is_not_linked_to_mishnah(self):
+        self.assertTrue(link_books.is_mishnah_chapter_misread(
+            "Mishnah Eruvin 1", "בפ\"ק דעירובין"))
+
+    def test_explicit_mishnah_reading_is_kept(self):
+        self.assertFalse(link_books.is_mishnah_chapter_misread(
+            "Mishnah Eruvin 1", "במשנה פ\"ק דעירובין"))
 
 
 if __name__ == "__main__":

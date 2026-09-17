@@ -30,6 +30,11 @@ DIRECTORY_NAME = "line-baseline"
 _HEX16 = re.compile(r"[0-9a-f]{16}\Z")
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+# ``שם`` is resolved from the preceding citation(s), so an unchanged line can no
+# longer be reused safely when another line in the same book changed.  Keep this
+# deliberately broad: a needless full-book pass costs time; a stale ibid target is
+# a silent wrong link.  The linker is still free to reject ordinary uses of the word.
+_IBID_TOKEN_RE = re.compile(r"(?<![א-ת])שם(?![א-ת])")
 
 
 @dataclass(frozen=True)
@@ -340,6 +345,17 @@ def full_ner_delta(current_rows: list[tuple[int, str, str]]) -> LineDelta:
     )
 
 
+def requires_book_context(current_rows: list[tuple[int, str, str]]) -> bool:
+    """Whether resolving this book needs preceding-line citation history.
+
+    Sefaria's ibid resolver carries the last references across inputs.  A line plan
+    that sends only changed rows would omit that history, and reusing an unchanged
+    ibid line would preserve a target selected from obsolete history.  The Hebrew
+    token is intentionally a conservative, cheap pre-NER gate.
+    """
+    return any(_IBID_TOKEN_RE.search(content or "") for _, content, _ in current_rows)
+
+
 def compute_line_delta(
     old_rows: list[tuple[int, str]],
     current_rows: list[tuple[int, str, str]],
@@ -351,6 +367,9 @@ def compute_line_delta(
     Both content and context are output-affecting. An identical line moved to a
     different Sefaria location must be re-resolved because לעיל/לקמן can change.
     """
+    if requires_book_context(current_rows):
+        return full_ner_delta(current_rows)
+
     old_by_index = dict(old_rows)
     current = [
         (line_index, line_fingerprint(content, context_ref))

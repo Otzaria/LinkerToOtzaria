@@ -284,6 +284,51 @@ class WorkerMemoryTest(unittest.TestCase):
             [(["ראו לקמן משנה א"], ["REF:ברכות א, א"], "citation")],
         )
 
+    def test_ibid_history_survives_transport_batch_boundaries(self):
+        class Ref:
+            def __init__(self, text):
+                self.text = text
+
+            def normal(self):
+                return self.text
+
+        class History:
+            def __init__(self):
+                self._refs = []
+
+            @property
+            def last_refs(self):
+                return self._refs
+
+            @last_refs.setter
+            def last_refs(self, ref):
+                self._refs.append(ref)
+                self._refs = self._refs[-3:]
+
+        class Resolver:
+            def __init__(self):
+                self._ibid_history = History()
+
+            def reset_ibid_history(self):
+                self._ibid_history = History()
+
+        class Linker:
+            def __init__(self):
+                self._ref_resolver = Resolver()
+                self.seen = []
+
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+                self._ref_resolver.reset_ibid_history()
+                self.seen.append([ref.normal() for ref in self._ref_resolver._ibid_history.last_refs])
+                self._ref_resolver._ibid_history.last_refs = Ref(texts[0])
+                return [type("Doc", (), {"resolved_refs": []})() for _ in texts]
+
+        linker = Linker()
+        context = link_books.IbidContext()
+        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:1"]), Ref)
+        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:2"]), Ref)
+        self.assertEqual(linker.seen, [[], ["Genesis 30:1"]])
+
     def test_non_prose_payloads_are_not_sent_to_hebrew_ner(self):
         self.assertFalse(link_books.is_ner_eligible_line("<img src='data:image/png;base64,AAAA'>"))
         self.assertFalse(link_books.is_ner_eligible_line("English metadata only"))
