@@ -1384,6 +1384,8 @@ def process_batch(
 
     resolve_done = time.perf_counter()
     records: list[LinkRecord] = []
+    # Antecedent of "שם", in the same scope Sefaria resets its own ibid history: the batch.
+    last_ref = None
     for (line_index, content, context_ref), context_object, doc in zip(batch, context_objects, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
         # links if the source book changed before Phase-2 applies them (cross-cycle drift).
@@ -1394,22 +1396,27 @@ def process_batch(
         has_non_bmp = any(ord(c) > 0xFFFF for c in content)
         for rr in doc.resolved_refs:
             try:
-                ref = _pick_ref(rr)
+                ref = _pick_ref(rr, last_ref)
+                # A citation this book drops is not an antecedent for the next "שם".
+                last_ref = None
                 if ref is None:
                     continue
                 start, end = rr.raw_entity.span.range
-                relative_direction = relative_ref_direction(
-                    rr, ref, context_object, content[start:end]
-                )
+                anchor_text = content[start:end]
+                target_ref = ref.normal()
+                if is_abbreviation_misread(target_ref, anchor_text):
+                    continue
+                if has_raw_part_type(rr, "RELATIVE") and talmud_address_contradicts(
+                    target_ref, anchor_text
+                ):
+                    corrected = spelled_talmud_ref(target_ref, anchor_text, context_ref_factory)
+                    if corrected is None:
+                        continue
+                    ref, target_ref = context_ref_factory(corrected), corrected
+                relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
                 if has_raw_part_type(rr, "RELATIVE") and relative_direction is None:
                     continue
-                target_ref = ref.normal()
-                if is_abbreviation_misread(target_ref, content[start:end]):
-                    continue
-                if relative_direction is not None and talmud_address_contradicts(
-                    target_ref, content[start:end]
-                ):
-                    continue
+                last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
@@ -1650,7 +1657,32 @@ def process_book_checkpointed(
 _BAVLI_CONVENTION = False
 
 
-def _pick_ref(rr):
+def _inherits_sections(candidate, last_ref) -> bool:
+    prefix = getattr(candidate, "sections", [])[:-1]
+    return bool(prefix) and list(prefix) == list(getattr(last_ref, "sections", []))[:len(prefix)]
+
+
+def _ibid_candidate(rr, last_ref):
+    """The candidate an ambiguous "שם" names, when only its section is in doubt.
+
+    Sefaria offers the last three refs as ibid context without preferring the most
+    recent, so "שם שם יד" after two chapters of one book is ambiguous and dropped
+    (issue Otzaria/otzaria#1193). Deciding it by the preceding citation is only safe
+    while every candidate is that same book — a candidate from another book would be
+    a guess about which citation "שם" continues.
+    """
+    if last_ref is None or not has_raw_part_type(rr, "IBID"):
+        return None
+    candidates = [r.ref for r in rr.resolved_raw_refs if r.ref]
+    if len(candidates) < 2:
+        return None
+    if {c.index.title for c in candidates} != {last_ref.index.title}:
+        return None
+    matches = [c for c in candidates if _inherits_sections(c, last_ref)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _pick_ref(rr, last_ref=None):
     """Return the single target Ref for a resolved citation, or None to drop it."""
     if (
         not has_raw_part_type(rr, "RELATIVE")
@@ -1658,6 +1690,9 @@ def _pick_ref(rr):
     ):
         return None
     if rr.is_ambiguous:
+        ibid_ref = _ibid_candidate(rr, last_ref)
+        if ibid_ref is not None:
+            return ibid_ref
         if not _BAVLI_CONVENTION:
             return None
         cands = [r.ref for r in rr.resolved_raw_refs if r.ref]
@@ -1716,7 +1751,7 @@ _GEMATRIA = {
 # "טו, ב" / "טו,ב" / "ט״ו ע״ב" / "דף טו." — the daf token and its amud marker.
 _DAF_COMMA_RE = re.compile(r"(\S+?)\s*,\s*([אב])(?![א-ת])")
 _DAF_AMUD_RE = re.compile(r"(\S+)\s+ע[\"'״׳]?([אב])(?![א-ת])")
-_TALMUD_TARGET_RE = re.compile(r"^.+ (\d+)([ab])(?::[\d:]+)?(?:-(\d+)([ab]))?(?::|$)")
+_TALMUD_TARGET_RE = re.compile(r"^(.+?) (\d+)([ab])(?::[\d:]+)?(?:-(\d+)([ab]))?(?::|$)")
 
 
 def _numeral(letters: str) -> int | None:
@@ -1736,30 +1771,59 @@ def _hebrew_number(token: str) -> set[int]:
     return {value for value in map(_numeral, candidates) if value is not None}
 
 
+def _spelled_addresses(anchor_text: str) -> list[tuple[str, str]]:
+    return [
+        (token, side)
+        for regex in (_DAF_COMMA_RE, _DAF_AMUD_RE)
+        for token, side in (m.groups() for m in regex.finditer(anchor_text))
+        if _hebrew_number(token)
+    ]
+
+
 def talmud_address_contradicts(target_ref: str, anchor_text: str) -> bool:
     """True when the anchor spells a daf/amud and the resolved target is a different one.
 
-    The Sefaria linker resolves an in-book relative daf citation in comma form
-    ("להלן עירובין טו, ב") as a running amud index (issue Otzaria/otzaria#1348).
+    The Sefaria linker reads an in-book relative daf citation in comma form
+    ("להלן עירובין טו, ב") as an offset from the citing amud, not as an address
+    (issue Otzaria/otzaria#1348).
     """
     target = _TALMUD_TARGET_RE.match(target_ref)
     if not target:
         return False
-    spelled = [
-        (m.group(1), m.group(2))
-        for regex in (_DAF_COMMA_RE, _DAF_AMUD_RE)
-        for m in regex.finditer(anchor_text)
-    ]
-    spelled = [(daf, amud) for daf, amud in spelled if _hebrew_number(daf)]
+    spelled = _spelled_addresses(anchor_text)
     if not spelled:
         return False
     addresses = {
         (int(target.group(i)), "א" if target.group(i + 1) == "a" else "ב")
-        for i in (1, 3) if target.group(i)
+        for i in (2, 4) if target.group(i)
     }
     return not any(
         (daf, side) in addresses for token, side in spelled for daf in _hebrew_number(token)
     )
+
+
+def spelled_talmud_ref(target_ref: str, anchor_text: str, ref_factory) -> str | None:
+    """The ref the anchor itself spells, in the resolved target's tractate.
+
+    Recovers the true address of a contradicted citation; the tractate comes from
+    the resolved target because the citation named it. Returns None when the anchor
+    spells more than one address, when the daf is unreadable, or when the rebuilt
+    ref does not exist (a daf past the end of the tractate).
+    """
+    target = _TALMUD_TARGET_RE.match(target_ref)
+    spelled = _spelled_addresses(anchor_text)
+    if not target or len(spelled) != 1 or ref_factory is None:
+        return None
+    token, side = spelled[0]
+    letters = re.sub(r"[^א-ת]", "", token.split("דף")[-1])
+    daf = _numeral(letters) or (_numeral(letters[1:]) if len(letters) > 1 else None)
+    if daf is None:
+        return None
+    tractate = target.group(1)
+    try:
+        return ref_factory(f"{tractate} {daf}{'a' if side == 'א' else 'b'}").normal()
+    except Exception:
+        return None
 
 
 # Abbreviations the linker reads as a book name: מ״א (Magen Avraham) as I Kings and

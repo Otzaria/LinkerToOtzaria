@@ -42,6 +42,76 @@ class TalmudAddressTest(unittest.TestCase):
         self.assertFalse(link_books.talmud_address_contradicts("Genesis 1:1", "לקמן א, ב"))
 
 
+class SpelledTalmudRefTest(unittest.TestCase):
+    class Ref:
+        VALID = {"Eruvin 5a", "Eruvin 15b", "Bava Batra 4a", "Tosafot on Eruvin 12a"}
+
+        def __init__(self, text):
+            if text not in self.VALID:
+                raise ValueError(text)
+            self.text = text
+
+        def normal(self):
+            return self.text
+
+    def rebuild(self, target, anchor):
+        return link_books.spelled_talmud_ref(target, anchor, self.Ref)
+
+    def test_the_address_in_the_text_wins_over_the_resolved_offset(self):
+        self.assertEqual(self.rebuild("Eruvin 9b", "להלן עירובין טו, ב"), "Eruvin 15b")
+        self.assertEqual(self.rebuild("Eruvin 12b", "דלעיל (עירובין ה, א"), "Eruvin 5a")
+        self.assertEqual(self.rebuild("Bava Batra 3b", "לקמן בבא בתרא ד,א"), "Bava Batra 4a")
+
+    def test_a_commentary_target_stays_in_its_own_book(self):
+        self.assertEqual(
+            self.rebuild("Tosafot on Eruvin 6b:2:1", "תוס' לקמן יב, א"), "Tosafot on Eruvin 12a")
+
+    def test_unusable_anchors_and_nonexistent_dafim_are_dropped(self):
+        self.assertIsNone(self.rebuild("Eruvin 9b", "להלן עירובין טו, ב - טז, א"))
+        self.assertIsNone(self.rebuild("Eruvin 9b", "להלן עירובין שנ, ב"))
+        self.assertIsNone(self.rebuild("Genesis 1:1", "לעיל ה, א"))
+        self.assertIsNone(link_books.spelled_talmud_ref("Eruvin 9b", "להלן עירובין טו, ב", None))
+
+
+class IbidCandidateTest(unittest.TestCase):
+    class Ref:
+        def __init__(self, title, sections):
+            self.index = type("Index", (), {"title": title})()
+            self.sections = sections
+
+    def rr(self, candidates, parts=("IBID", "NUMBERED")):
+        Kind = lambda name: type("Kind", (), {"name": name})()  # noqa: E731
+        return type("RR", (), {
+            "is_ambiguous": True,
+            "raw_entity": type("Raw", (), {
+                "raw_ref_parts": [type("Part", (), {"type": Kind(p)})() for p in parts]})(),
+            "resolved_raw_refs": [type("R", (), {"ref": c})() for c in candidates],
+        })()
+
+    def test_the_chapter_of_the_preceding_citation_decides(self):
+        last = self.Ref("Genesis", [30, 1])
+        chosen = link_books._ibid_candidate(
+            self.rr([self.Ref("Genesis", [29, 14]), self.Ref("Genesis", [30, 14])]), last)
+        self.assertEqual(chosen.sections, [30, 14])
+
+    def test_candidates_from_another_book_are_never_guessed(self):
+        last = self.Ref("Rashi on II Chronicles", [2, 13])
+        self.assertIsNone(link_books._ibid_candidate(
+            self.rr([self.Ref("II Chronicles", [28, 14]),
+                     self.Ref("Rashi on II Chronicles", [28, 14])]), last))
+
+    def test_no_antecedent_or_no_ibid_part_keeps_the_drop(self):
+        cands = [self.Ref("Genesis", [29, 14]), self.Ref("Genesis", [30, 14])]
+        self.assertIsNone(link_books._ibid_candidate(self.rr(cands), None))
+        self.assertIsNone(link_books._ibid_candidate(
+            self.rr(cands, parts=("NAMED", "NUMBERED")), self.Ref("Genesis", [30, 1])))
+
+    def test_an_undecidable_ambiguity_is_still_dropped(self):
+        last = self.Ref("Genesis", [30, 1])
+        self.assertIsNone(link_books._ibid_candidate(
+            self.rr([self.Ref("Genesis", [30, 14]), self.Ref("Genesis", [30, 15])]), last))
+
+
 class AbbreviationMisreadTest(unittest.TestCase):
     def test_magen_avraham_and_page_numbers_are_dropped(self):
         self.assertTrue(link_books.is_abbreviation_misread("I Kings", "מ\"א"))
