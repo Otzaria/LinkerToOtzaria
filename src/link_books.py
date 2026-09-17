@@ -1461,6 +1461,7 @@ def process_batch(
         # SAME content string in UTF-16 units. They diverge only past a non-BMP char
         # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
         has_non_bmp = any(ord(c) > 0xFFFF for c in content)
+        marker_end = leading_hebrew_numeral_marker_end(content)
         for rr in doc.resolved_refs:
             try:
                 ref = _pick_ref(rr, last_ref)
@@ -1469,6 +1470,10 @@ def process_batch(
                 if ref is None:
                     continue
                 start, end = rr.raw_entity.span.range
+                # A parenthesized Hebrew number opening a line is its structural
+                # marker, not a citation (for example "(נח)" as Parashat Noach).
+                if end <= marker_end:
+                    continue
                 anchor_text = content[start:end]
                 target_ref = ref.normal()
                 if is_implausible_citation_target(target_ref, anchor_text):
@@ -1739,6 +1744,41 @@ def process_book_checkpointed(
 
 # Bavli-convention flag is read once into a module global by main().
 _BAVLI_CONVENTION = False
+
+_LEADING_PAREN_TOKEN = re.compile(r'^\s*\((?P<token>[א-ת\'"׳״]+)\)')
+_HEBREW_NUMERAL_PUNCTUATION = str.maketrans("", "", "\'\"׳״")
+_HEBREW_NUMERAL_VALUES = {
+    letter: value
+    for letter, value in zip(
+        "אבגדהוזחטיכלמנסעפצקרשת",
+        (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70,
+         80, 90, 100, 200, 300, 400),
+    )
+}
+
+
+def leading_hebrew_numeral_marker_end(content: str) -> int:
+    """End of a parenthesized Hebrew-number line marker, or zero.
+
+    Short parenthesized citations also occur at the start of real source text.
+    Accept only canonical Hebrew numerals: at most three letters in descending
+    value order, plus the traditional טו/טז exceptions.  In particular, ``שם``
+    is an ibid citation rather than the otherwise-valid numeral 340.
+    """
+    match = _LEADING_PAREN_TOKEN.match(content)
+    if match is None:
+        return 0
+    letters = match.group("token").translate(_HEBREW_NUMERAL_PUNCTUATION)
+    if not 1 <= len(letters) <= 3 or letters == "שם":
+        return 0
+    if any(letter not in _HEBREW_NUMERAL_VALUES for letter in letters):
+        return 0
+    values = [_HEBREW_NUMERAL_VALUES[letter] for letter in letters]
+    if letters not in {"טו", "טז"} and any(
+        left < right for left, right in zip(values, values[1:])
+    ):
+        return 0
+    return match.end()
 
 
 def _inherits_sections(candidate, last_ref) -> bool:
