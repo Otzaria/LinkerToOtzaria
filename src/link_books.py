@@ -1403,13 +1403,20 @@ def process_batch(
                 )
                 if has_raw_part_type(rr, "RELATIVE") and relative_direction is None:
                     continue
+                target_ref = ref.normal()
+                if is_abbreviation_misread(target_ref, content[start:end]):
+                    continue
+                if relative_direction is not None and talmud_address_contradicts(
+                    target_ref, content[start:end]
+                ):
+                    continue
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
                     end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
                 records.append(LinkRecord(
                     book_key=bk, line_index=line_index,
-                    start=start, end=end, target_ref=ref.normal(),
+                    start=start, end=end, target_ref=target_ref,
                     source_hash=src_hash,
                     context_ref=record_context,
                     relative_direction=relative_direction,
@@ -1699,6 +1706,75 @@ def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str 
         if below and not target_order > source_order:
             return None
     return "above" if above else "below"
+
+
+_GEMATRIA = {
+    "א": 1, "ב": 2, "ג": 3, "ד": 4, "ה": 5, "ו": 6, "ז": 7, "ח": 8, "ט": 9,
+    "י": 10, "כ": 20, "ך": 20, "ל": 30, "מ": 40, "ם": 40, "נ": 50, "ן": 50, "ס": 60,
+    "ע": 70, "פ": 80, "ף": 80, "צ": 90, "ץ": 90, "ק": 100, "ר": 200, "ש": 300, "ת": 400,
+}
+# "טו, ב" / "טו,ב" / "ט״ו ע״ב" / "דף טו." — the daf token and its amud marker.
+_DAF_COMMA_RE = re.compile(r"(\S+?)\s*,\s*([אב])(?![א-ת])")
+_DAF_AMUD_RE = re.compile(r"(\S+)\s+ע[\"'״׳]?([אב])(?![א-ת])")
+_TALMUD_TARGET_RE = re.compile(r"^.+ (\d+)([ab])(?::[\d:]+)?(?:-(\d+)([ab]))?(?::|$)")
+
+
+def _numeral(letters: str) -> int | None:
+    values = [_GEMATRIA[c] for c in letters]
+    if not values or len(values) > 3:
+        return None
+    # A numeral's letters never ascend ("קנג"); טו/טז are the one spelled exception.
+    if letters not in ("טו", "טז") and any(a < b for a, b in zip(values, values[1:])):
+        return None
+    return sum(values)
+
+
+def _hebrew_number(token: str) -> set[int]:
+    letters = re.sub(r"[^א-ת]", "", token.split("דף")[-1])
+    # A one-letter proclitic ("דל״ג", "בטו") may stick to the number.
+    candidates = (letters, letters[1:]) if len(letters) > 1 else (letters,)
+    return {value for value in map(_numeral, candidates) if value is not None}
+
+
+def talmud_address_contradicts(target_ref: str, anchor_text: str) -> bool:
+    """True when the anchor spells a daf/amud and the resolved target is a different one.
+
+    The Sefaria linker resolves an in-book relative daf citation in comma form
+    ("להלן עירובין טו, ב") as a running amud index (issue Otzaria/otzaria#1348).
+    """
+    target = _TALMUD_TARGET_RE.match(target_ref)
+    if not target:
+        return False
+    spelled = [
+        (m.group(1), m.group(2))
+        for regex in (_DAF_COMMA_RE, _DAF_AMUD_RE)
+        for m in regex.finditer(anchor_text)
+    ]
+    spelled = [(daf, amud) for daf, amud in spelled if _hebrew_number(daf)]
+    if not spelled:
+        return False
+    addresses = {
+        (int(target.group(i)), "א" if target.group(i + 1) == "a" else "ב")
+        for i in (1, 3) if target.group(i)
+    }
+    return not any(
+        (daf, side) in addresses for token, side in spelled for daf in _hebrew_number(token)
+    )
+
+
+# Abbreviations the linker reads as a book name: מ״א (Magen Avraham) as I Kings and
+# עמ׳ (a page number) as Amos.
+_NON_CITATION_ABBREVIATIONS = (
+    (re.compile(r"^\W*מ[\"'״׳]א(?:\W*$|\s+(?:סי|ס[\"'״׳]ק|סק))"), "I Kings"),
+    (re.compile(r"^\W*עמ[\"'׳]"), "Amos"),
+)
+
+
+def is_abbreviation_misread(target_ref: str, anchor_text: str) -> bool:
+    return any(
+        (target_ref == book or target_ref.startswith(book + " ")) and pattern.search(anchor_text)
+        for pattern, book in _NON_CITATION_ABBREVIATIONS
+    )
 
 
 def main():
