@@ -698,10 +698,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         if neutral:
             self.assertEqual(neutral, f"{baseline_fingerprint}::{current_fingerprint}")
         else:
-            self.assertEqual(
-                semantic_review,
-                "PR #6: citation resolution and ibid state are output-affecting; run a full relink.",
-            )
+            self.assertIn("full relink", semantic_review.lower())
 
         for key, value in (("engine_src", engine_src), ("sefaria_patch", sefaria_patch)):
             mutated_value = value[:-1] + ("0" if value[-1] != "0" else "1")

@@ -58,31 +58,52 @@ class _Linker:
 
 
 class VerseMarkerAnchorTest(unittest.TestCase):
-    """otzaria#1185 — the verse marker "(נח)" that opens a Tanach line was linked
-    as a citation of Parashat Noach. A span inside the leading marker is not a
-    citation and must not become a record."""
+    """otzaria#1185 — numeric line markers must not become citations."""
+
+    def _records(self, content, refs, source="MoreBooks"):
+        return link_books.process_batch(
+            _Linker([_Doc(refs)]),
+            link_books.BookKey(source, "ספר"),
+            [(0, content, None)],
+            lambda _line: None,
+        )[0]
 
     def test_span_inside_leading_verse_marker_is_dropped(self):
         content = "(נח) וַיִּקְרְאוּ לְרִבְקָה וַיֹּאמְרוּ אֵלֶיהָ"
         marker = _ResolvedRef(1, 3, "Genesis 6:9")
         real = _ResolvedRef(5, 15, "Genesis 24:58")
-        records, _words = link_books.process_batch(
-            _Linker([_Doc([marker, real])]),
-            link_books.BookKey("Tanach", "בראשית"),
-            [(674, content, None)],
-            lambda _line: None,
-        )
+        records = self._records(content, [marker, real], source="Tanach")
         self.assertEqual([r.target_ref for r in records], ["Genesis 24:58"])
+
+    def test_numeric_marker_is_dropped_outside_tanach_too(self):
+        content = "(צו) סעיף הנסמן בבאר הגולה"
+        records = self._records(content, [_ResolvedRef(1, 3, "Leviticus 6:1")])
+        self.assertEqual(records, [])
+
+    def test_only_canonical_hebrew_numerals_are_markers(self):
+        marker_end = link_books.leading_hebrew_numeral_marker_end
+        self.assertGreater(marker_end('(קכח) טקסט'), 0)
+        self.assertGreater(marker_end('(ט״ו) טקסט'), 0)
+        self.assertGreater(marker_end('(ט"ז) טקסט'), 0)
+        self.assertEqual(marker_end('(ית) ציטוט'), 0)  # ascending, not a numeral
+        self.assertEqual(marker_end('(מן) ציטוט'), 0)  # final letters are not numerals
+
+    def test_short_real_citations_at_line_start_are_preserved(self):
+        cases = (
+            ("(שם) כמבואר לעיל", "Genesis 1:1"),
+            ("(ב״י) עיין בבית יוסף", "Beit Yosef, Orach Chaim 1"),
+            ("(יתרו) נאמר בפרשה", "Exodus 18:1"),
+        )
+        for content, target in cases:
+            with self.subTest(content=content):
+                close = content.index(")")
+                records = self._records(content, [_ResolvedRef(1, close, target)])
+                self.assertEqual([record.target_ref for record in records], [target])
 
     def test_marker_only_matters_at_line_start(self):
         content = "ראה (נח) וגם נח איש צדיק"
         inner = _ResolvedRef(4, 6, "Genesis 6:9")
-        records, _words = link_books.process_batch(
-            _Linker([_Doc([inner])]),
-            link_books.BookKey("MoreBooks", "ספר"),
-            [(0, content, None)],
-            lambda _line: None,
-        )
+        records = self._records(content, [inner])
         self.assertEqual(len(records), 1)
 
 
