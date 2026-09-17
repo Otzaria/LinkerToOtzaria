@@ -37,11 +37,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import (  # noqa: E402
     BookKey, LinkRecord, book_key_to_relpath, content_hash, remove_artifact, write_artifact,
 )
-from line_baseline import indices_from_ranges  # noqa: E402
+from line_baseline import indices_from_ranges, requires_book_context  # noqa: E402
 
-# Lines per bulk NER call. Transport granularity only — per-line output is independent
-# of batching. Tunable per host: GPU serving OOMs on 100-line batches of monster books
-# (16GB VRAM), so Kaggle runs use a smaller batch via env.
+# Lines per bulk NER call. This is transport granularity: the explicit ibid context
+# below keeps citation history continuous across these boundaries. Tunable per host:
+# GPU serving OOMs on 100-line batches of monster books (16GB VRAM), so Kaggle runs
+# use a smaller batch via env.
 BATCH_LINES = int(os.environ.get("LINKER_BATCH_LINES", "100"))
 # A line-count ceiling alone lets one pathological HTML/data row dominate a batch.
 # Keep ordinary batches large, but split before the aggregate source text becomes
@@ -1304,6 +1305,65 @@ def _same_location(one, others) -> bool:
     return any(o.index.title.replace("Jerusalem Talmud ", "") == base for o in others)
 
 
+class IbidContext:
+    """Preserve Sefaria's ibid history across transport batches of one book.
+
+    ``Linker.bulk_link`` resets its resolver at every call, whereas the inputs in a
+    book are consecutive lines.  We skip only that *first* reset on later calls;
+    resets caused by a failed citation inside Sefaria still run normally.  This is
+    deliberately pinned-private API use: fail loudly if the pinned linker no longer
+    exposes the contract rather than silently making output batch-size dependent.
+    """
+
+    def __init__(self):
+        self.initialized = False
+        # These are Sefaria Ref objects, not serialized data: the state lives only
+        # within this worker and has at most the resolver's three remembered refs.
+        self.resolved_refs: tuple[object, ...] = ()
+        self.last_emitted_ref = None
+
+    @staticmethod
+    def _resolver(linker):
+        resolver = getattr(linker, "_ref_resolver", None)
+        history = getattr(resolver, "_ibid_history", None)
+        if resolver is None or history is None or not callable(
+            getattr(resolver, "reset_ibid_history", None)
+        ):
+            raise RuntimeError(
+                "pinned Sefaria linker does not expose the ibid-history contract"
+            )
+        return resolver
+
+    def _restore(self, resolver):
+        resolver.reset_ibid_history()
+        for ref in self.resolved_refs:
+            resolver._ibid_history.last_refs = ref
+
+    def resolve(self, linker, invoke):
+        """Run one bulk call while retaining only its initial ibid history reset."""
+        resolver = self._resolver(linker)
+        original_reset = resolver.reset_ibid_history
+        if self.initialized:
+            self._restore(resolver)
+            skipped_initial_reset = False
+
+            def reset_ibid_history():
+                nonlocal skipped_initial_reset
+                if not skipped_initial_reset:
+                    skipped_initial_reset = True
+                    return
+                original_reset()
+
+            resolver.reset_ibid_history = reset_ibid_history
+        try:
+            docs = invoke()
+        finally:
+            resolver.reset_ibid_history = original_reset
+        self.initialized = True
+        self.resolved_refs = tuple(resolver._ibid_history.last_refs)
+        return docs
+
+
 def process_book(
     linker, bk, lines, skipped_log, heartbeat, precomputed=None,
     context_ref_factory=None,
@@ -1315,11 +1375,12 @@ def process_book(
     """
     records: list[LinkRecord] = []
     words = 0
+    ibid_context = IbidContext() if requires_book_context(lines) else None
     for batch_start, batch in transport_batches(lines):
         heartbeat()
         batch_records, batch_words = process_batch(
             linker, bk, batch, skipped_log, batch_start=batch_start, precomputed=precomputed,
-            context_ref_factory=context_ref_factory,
+            context_ref_factory=context_ref_factory, ibid_context=ibid_context,
         )
         records.extend(batch_records)
         words += batch_words
@@ -1328,9 +1389,9 @@ def process_book(
 
 def process_batch(
     linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None,
-    context_ref_factory=None, metrics=None,
+    context_ref_factory=None, metrics=None, ibid_context=None,
 ):
-    """Link one transport batch. Output is independent of neighbouring batches."""
+    """Link one transport batch, optionally continuing a book's ibid history."""
     started = time.perf_counter()
     words = sum(len(content.split()) for _, content, _ in batch)
     context_objects = []
@@ -1344,17 +1405,22 @@ def process_batch(
             # link context-free; relative citations fail closed below.
             context_objects.append(None)
     context_done = time.perf_counter()
+    def resolve(invoke):
+        if ibid_context is None:
+            return invoke()
+        return ibid_context.resolve(linker, invoke)
+
     try:
         if precomputed is not None:
-            docs = precomputed.resolve_batch(
+            docs = resolve(lambda: precomputed.resolve_batch(
                 linker, bk, batch, batch_start, book_context_refs=context_objects,
-            )
+            ))
         else:
-            docs = linker.bulk_link(
+            docs = resolve(lambda: linker.bulk_link(
                 [content for _, content, _ in batch],
                 book_context_refs=context_objects,
                 type_filter="citation",
-            )
+            ))
         if len(docs) != len(batch):  # a short reply would silently drop tail lines
             raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
     except Exception:
@@ -1372,11 +1438,11 @@ def process_batch(
                     # Re-batching would destroy the exact context boundary in the
                     # signed contract, so fail the book rather than guessing.
                     raise
-                docs.append(linker.bulk_link(
+                docs.append(resolve(lambda: linker.bulk_link(
                     [content],
                     book_context_refs=[context_objects[batch_offset]],
                     type_filter="citation",
-                )[0])
+                )[0]))
             except Exception as le:
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
                 raise RuntimeError(
@@ -1384,6 +1450,9 @@ def process_batch(
 
     resolve_done = time.perf_counter()
     records: list[LinkRecord] = []
+    # Prefer the preceding emitted target for a remaining ambiguous "שם".  Unlike
+    # Sefaria's resolver history this deliberately excludes records we reject.
+    last_ref = ibid_context.last_emitted_ref if ibid_context is not None else None
     for (line_index, content, context_ref), context_object, doc in zip(batch, context_objects, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
         # links if the source book changed before Phase-2 applies them (cross-cycle drift).
@@ -1394,22 +1463,34 @@ def process_batch(
         has_non_bmp = any(ord(c) > 0xFFFF for c in content)
         for rr in doc.resolved_refs:
             try:
-                ref = _pick_ref(rr)
+                ref = _pick_ref(rr, last_ref)
+                # A citation this book drops is not an antecedent for the next "שם".
+                last_ref = None
                 if ref is None:
                     continue
                 start, end = rr.raw_entity.span.range
-                relative_direction = relative_ref_direction(
-                    rr, ref, context_object, content[start:end]
-                )
+                anchor_text = content[start:end]
+                target_ref = ref.normal()
+                if is_implausible_citation_target(target_ref, anchor_text):
+                    continue
+                if has_raw_part_type(rr, "RELATIVE") and talmud_address_contradicts(
+                    target_ref, anchor_text
+                ):
+                    corrected = spelled_talmud_ref(target_ref, anchor_text, context_ref_factory)
+                    if corrected is None:
+                        continue
+                    ref, target_ref = context_ref_factory(corrected), corrected
+                relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
                 if has_raw_part_type(rr, "RELATIVE") and relative_direction is None:
                     continue
+                last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
                     end += sum(1 for c in content[:end] if ord(c) > 0xFFFF)
                 records.append(LinkRecord(
                     book_key=bk, line_index=line_index,
-                    start=start, end=end, target_ref=ref.normal(),
+                    start=start, end=end, target_ref=target_ref,
                     source_hash=src_hash,
                     context_ref=record_context,
                     relative_direction=relative_direction,
@@ -1420,6 +1501,8 @@ def process_batch(
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{line_index}\tcit\t{type(ce).__name__}: {ce}")
                 raise RuntimeError(
                     f"citation on line {line_index} failed: {type(ce).__name__}: {ce}") from ce
+    if ibid_context is not None:
+        ibid_context.last_emitted_ref = last_ref
     if metrics is not None:
         finished = time.perf_counter()
         metrics.update({
@@ -1439,7 +1522,7 @@ def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
     precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
     metric_log=None, cooperative=False, prior_lock_path=None, defer_when_heavy=True,
-    recycle_cap=None,
+    recycle_cap=None, ibid_context=None,
 ):
     """Link a book with an atomic checkpoint after every transport batch.
 
@@ -1462,6 +1545,14 @@ def process_book_checkpointed(
         line_index: (content, context_ref)
         for line_index, content, context_ref in lines
     }
+    stateful_ibid = ibid_context is not None
+    if stateful_ibid:
+        if reuse:
+            raise RuntimeError("stateful ibid linking cannot reuse per-line artifacts")
+        if set(ner_indices) != set(current_by_index):
+            raise RuntimeError("stateful ibid linking must resolve the whole book")
+        if cooperative:
+            raise RuntimeError("stateful ibid linking cannot claim batches cooperatively")
     reuse_by_old = {}
     reused_destinations = set()
     for old_index, new_index in reuse:
@@ -1529,6 +1620,12 @@ def process_book_checkpointed(
     batches_this_life = 0
     cap = RSS_CAP if recycle_cap is None else float(recycle_cap)
     memory_at_start = worker_memory_bytes()
+    if stateful_ibid:
+        # A shard contains records but not Sefaria's last-three-reference state.  It
+        # is therefore not a valid restart point: replay this book from its beginning
+        # to preserve exactly the same ibid history after a retry or worker recycle.
+        for batch_start, _batch in transport_batches(lines, ner_indices):
+            remove_artifact(os.path.join(checkpoint_dir, f"{batch_start:012d}.jsonl"))
     for i, batch in transport_batches(lines, ner_indices):
         total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
@@ -1582,6 +1679,7 @@ def process_book_checkpointed(
             records, _ = process_batch(
                 linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
                 context_ref_factory=context_ref_factory, metrics=metrics,
+                ibid_context=ibid_context,
             )
             write_started = time.perf_counter()
             write_artifact(shard, records)
@@ -1643,7 +1741,39 @@ def process_book_checkpointed(
 _BAVLI_CONVENTION = False
 
 
-def _pick_ref(rr):
+def _inherits_sections(candidate, last_ref) -> bool:
+    candidate_sections = list(getattr(candidate, "sections", []))
+    last_sections = list(getattr(last_ref, "sections", []))
+    # The only permitted ambiguity is the final section (chapter/verse/daf
+    # component).  A different depth is a different reference shape, not ibid
+    # continuation evidence.
+    if len(candidate_sections) != len(last_sections):
+        return False
+    prefix = candidate_sections[:-1]
+    return bool(prefix) and prefix == last_sections[:-1]
+
+
+def _ibid_candidate(rr, last_ref):
+    """The candidate an ambiguous "שם" names, when only its section is in doubt.
+
+    Sefaria offers the last three refs as ibid context without preferring the most
+    recent, so "שם שם יד" after two chapters of one book is ambiguous and dropped
+    (issue Otzaria/otzaria#1193). Deciding it by the preceding citation is only safe
+    while every candidate is that same book — a candidate from another book would be
+    a guess about which citation "שם" continues.
+    """
+    if last_ref is None or not has_raw_part_type(rr, "IBID"):
+        return None
+    candidates = [r.ref for r in rr.resolved_raw_refs if r.ref]
+    if len(candidates) < 2:
+        return None
+    if {c.index.title for c in candidates} != {last_ref.index.title}:
+        return None
+    matches = [c for c in candidates if _inherits_sections(c, last_ref)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _pick_ref(rr, last_ref=None):
     """Return the single target Ref for a resolved citation, or None to drop it."""
     if (
         not has_raw_part_type(rr, "RELATIVE")
@@ -1651,6 +1781,9 @@ def _pick_ref(rr):
     ):
         return None
     if rr.is_ambiguous:
+        ibid_ref = _ibid_candidate(rr, last_ref)
+        if ibid_ref is not None:
+            return ibid_ref
         if not _BAVLI_CONVENTION:
             return None
         cands = [r.ref for r in rr.resolved_raw_refs if r.ref]
@@ -1699,6 +1832,130 @@ def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str 
         if below and not target_order > source_order:
             return None
     return "above" if above else "below"
+
+
+_GEMATRIA = {
+    "א": 1, "ב": 2, "ג": 3, "ד": 4, "ה": 5, "ו": 6, "ז": 7, "ח": 8, "ט": 9,
+    "י": 10, "כ": 20, "ך": 20, "ל": 30, "מ": 40, "ם": 40, "נ": 50, "ן": 50, "ס": 60,
+    "ע": 70, "פ": 80, "ף": 80, "צ": 90, "ץ": 90, "ק": 100, "ר": 200, "ש": 300, "ת": 400,
+}
+# "טו, ב" / "טו,ב" / "ט״ו ע״ב" / "דף טו." — the daf token and its amud marker.
+_DAF_COMMA_RE = re.compile(r"(\S+?)\s*,\s*([אב])(?![א-ת])")
+# A bare ``עא`` is a very common daf numeral (e.g. ``עבודה זרה עא, א``),
+# not an amud marker.  Require its customary geresh/gershayim so the comma
+# form remains the single address in that phrase.
+_DAF_AMUD_RE = re.compile(r"(\S+)\s+ע[\"'״׳]([אב])(?![א-ת])")
+_TALMUD_TARGET_RE = re.compile(r"^(.+?) (\d+)([ab])(?::[\d:]+)?(?:-(\d+)([ab]))?(?::|$)")
+
+
+def _numeral(letters: str) -> int | None:
+    values = [_GEMATRIA[c] for c in letters]
+    if not values or len(values) > 3:
+        return None
+    # A numeral's letters never ascend ("קנג"); טו/טז are the one spelled exception.
+    if letters not in ("טו", "טז") and any(a < b for a, b in zip(values, values[1:])):
+        return None
+    return sum(values)
+
+
+def _hebrew_number(token: str) -> set[int]:
+    letters = re.sub(r"[^א-ת]", "", token.split("דף")[-1])
+    # A one-letter proclitic ("דל״ג", "בטו") may stick to the number.
+    candidates = (letters, letters[1:]) if len(letters) > 1 else (letters,)
+    return {value for value in map(_numeral, candidates) if value is not None}
+
+
+def _spelled_addresses(anchor_text: str) -> list[tuple[str, str]]:
+    return [
+        (token, side)
+        for regex in (_DAF_COMMA_RE, _DAF_AMUD_RE)
+        for token, side in (m.groups() for m in regex.finditer(anchor_text))
+        if _hebrew_number(token)
+    ]
+
+
+def talmud_address_contradicts(target_ref: str, anchor_text: str) -> bool:
+    """True when the anchor spells a daf/amud and the resolved target is a different one.
+
+    The Sefaria linker reads an in-book relative daf citation in comma form
+    ("להלן עירובין טו, ב") as an offset from the citing amud, not as an address
+    (issue Otzaria/otzaria#1348).
+    """
+    target = _TALMUD_TARGET_RE.match(target_ref)
+    if not target:
+        return False
+    spelled = _spelled_addresses(anchor_text)
+    if not spelled:
+        return False
+    addresses = {
+        (int(target.group(i)), "א" if target.group(i + 1) == "a" else "ב")
+        for i in (2, 4) if target.group(i)
+    }
+    return not any(
+        (daf, side) in addresses for token, side in spelled for daf in _hebrew_number(token)
+    )
+
+
+def spelled_talmud_ref(target_ref: str, anchor_text: str, ref_factory) -> str | None:
+    """The ref the anchor itself spells, in the resolved target's tractate.
+
+    Recovers the true address of a contradicted citation; the tractate comes from
+    the resolved target because the citation named it. Returns None when the anchor
+    spells more than one address, when the daf is unreadable, or when the rebuilt
+    ref does not exist (a daf past the end of the tractate).
+    """
+    target = _TALMUD_TARGET_RE.match(target_ref)
+    spelled = _spelled_addresses(anchor_text)
+    if not target or len(spelled) != 1 or ref_factory is None:
+        return None
+    token, side = spelled[0]
+    letters = re.sub(r"[^א-ת]", "", token.split("דף")[-1])
+    daf = _numeral(letters) or (_numeral(letters[1:]) if len(letters) > 1 else None)
+    if daf is None:
+        return None
+    tractate = target.group(1)
+    try:
+        return ref_factory(f"{tractate} {daf}{'a' if side == 'א' else 'b'}").normal()
+    except Exception:
+        return None
+
+
+# Abbreviations the linker reads as a book name: מ״א (Magen Avraham) as I Kings and
+# עמ׳ (a page number) as Amos.
+_NON_CITATION_ABBREVIATIONS = (
+    (re.compile(r"^\W*מ[\"'״׳]א(?:\W*$|\s+(?:סי|ס[\"'״׳]ק|סק))"), "I Kings"),
+    (re.compile(r"^\W*עמ[\"'׳]"), "Amos"),
+)
+_MISHNAH_CHAPTER_MISREAD_RE = re.compile(r"פ[\"'״׳]ק\s+ד?עירובין")
+
+
+def is_abbreviation_misread(target_ref: str, anchor_text: str) -> bool:
+    return any(
+        (target_ref == book or target_ref.startswith(book + " ")) and pattern.search(anchor_text)
+        for pattern, book in _NON_CITATION_ABBREVIATIONS
+    )
+
+
+def is_mishnah_chapter_misread(target_ref: str, anchor_text: str) -> bool:
+    """Reject ``פ\"ק דעירובין`` when the linker chose Mishnah Eruvin.
+
+    The phrase ordinarily names the first Bavli chapter; without an explicit daf
+    we cannot safely manufacture its full range, but retaining a link into the
+    Mishnah is demonstrably wrong (#1348).  An anchor that itself says ``משנה``
+    is left alone because that reading is explicit.
+    """
+    return (
+        target_ref.startswith("Mishnah Eruvin")
+        and "משנה" not in anchor_text
+        and bool(_MISHNAH_CHAPTER_MISREAD_RE.search(anchor_text))
+    )
+
+
+def is_implausible_citation_target(target_ref: str, anchor_text: str) -> bool:
+    return (
+        is_abbreviation_misread(target_ref, anchor_text)
+        or is_mishnah_chapter_misread(target_ref, anchor_text)
+    )
 
 
 def main():
@@ -2001,7 +2258,6 @@ def main():
                 while True:
                     if os.path.exists(os.path.join(run, "done", cid)):
                         break
-                    cooperative = precomputed is not None
                     # Exclusive, unconditionally.  The raw-NER (cooperative) path used
                     # to skip the book claim entirely and rely on per-batch locks, so
                     # every worker that reached a book re-read its lines, re-validated
@@ -2012,6 +2268,8 @@ def main():
                     if claim is None:
                         break  # done, or another live worker owns it (it marks done/failed)
                     lines = book_lines(con, bk)
+                    stateful_ibid = requires_book_context(lines)
+                    cooperative = precomputed is not None and not stateful_ibid
                     item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
                     if "ner_ranges" in item:
                         ner_indices = indices_from_ranges(item["ner_ranges"])
@@ -2032,6 +2290,12 @@ def main():
                     else:
                         ner_indices = {line_index for line_index, _, _ in lines}
                         reuse = []
+                    if stateful_ibid and (reuse or set(ner_indices) != {
+                        line_index for line_index, _, _ in lines
+                    }):
+                        raise RuntimeError(
+                            "incremental plan omitted ibid context; resolve this whole book"
+                        )
                     out_path = os.path.join(args.repo, book_key_to_relpath(bk))
                     checkpoint_dir = os.path.join(run, "checkpoints", cid)
                     t0 = time.time()
@@ -2070,6 +2334,7 @@ def main():
                                 prior_lock_path=os.path.join(run, "claim", f"prior-{cid}.lock"),
                                 defer_when_heavy=not heavy,
                                 recycle_cap=HEAVY_RSS_CAP if heavy else None,
+                                ibid_context=IbidContext() if stateful_ibid else None,
                             )
                     except BookWorkInProgress:
                         # A batch lock is still held by a process this worker took the book

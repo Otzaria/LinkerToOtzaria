@@ -603,22 +603,50 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
-    def test_committed_fingerprint_is_accepted_lineage_not_dirty_source(self):
-        """HEAD's engine must be adoptable from the committed lineage.
+    def semantic_relink_review(self, root: Path, previous: str, actual: str) -> str | None:
+        """Return the exact reviewed semantic transition, if it exists.
+
+        This registry is deliberately separate from output-neutral migrations:
+        its entries document a required full relink and must never cause fingerprint
+        adoption in the workflow.
+        """
+        registry = json.loads(
+            (root / "baseline/output_affecting_fingerprint_changes.json").read_text()
+        )
+        self.assertEqual(set(registry), {"schema_version", "changes"})
+        self.assertEqual(registry["schema_version"], 1)
+        self.assertIsInstance(registry["changes"], list)
+        matches = []
+        for index, change in enumerate(registry["changes"]):
+            self.assertEqual(
+                set(change), {"from", "to", "review"},
+                f"invalid output-affecting change at index {index}",
+            )
+            for key in ("from", "to", "review"):
+                self.assertIsInstance(change[key], str)
+            self.assertTrue(change["from"].strip())
+            self.assertTrue(change["to"].strip())
+            self.assertTrue(change["review"].strip())
+            if change["from"] == previous and change["to"] == actual:
+                matches.append(change["review"])
+        self.assertLessEqual(len(matches), 1, "ambiguous output-affecting transition")
+        return matches[0] if matches else None
+
+    def test_committed_fingerprint_has_a_reviewed_relink_policy(self):
+        """HEAD's engine drift is either adoptable or explicitly forces relinking.
 
         What this proves, exactly: ``engine_src`` and ``sefaria_patch`` recomputed
         from HEAD's blobs -- the only two fingerprint components a source change in
         this repo can move -- substituted into the committed lineage fingerprint,
-        are resolved by ci/resolve_output_neutral_fingerprint_migration.py into the
-        exact ``OLD::NEW`` adoption contract, using the same baseline file and the
-        same registry the workflow passes it.  So the next relink at this commit
-        adopts instead of relinking all ~7,300 books.  Running the resolver rather
-        than re-implementing the lookup also re-asserts the registry's schema and
-        its per-entry ``review`` requirement, and that no two entries are ambiguous.
+        have exactly one reviewed policy: either the workflow's exact ``OLD::NEW``
+        output-neutral adoption contract, or an output-affecting change record that
+        requires a full relink.  The latter is intentionally *not* consumed by the
+        workflow: the neutral resolver must return empty, leaving incremental.py to
+        rebuild every book.  Both registries are checked byte-for-byte here.
 
         And that the guard is EXACT: a one-character drift in either component is
-        not resolved, so an engine that is not the reviewed one still forces a full
-        relink.
+        neither adopted nor classified as a semantic transition, so an unreviewed
+        engine always forces a full relink.
 
         What this does NOT prove: that the change is output-neutral.  Only the
         review text carries that claim; this asserts a reviewed entry exists and
@@ -659,17 +687,21 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             self.assertEqual(self.resolve_migration(root, current_fingerprint), "")
             return
 
-        migrations = json.loads(
-            (root / "baseline/output_neutral_fingerprint_migrations.json").read_text()
+        neutral = self.resolve_migration(root, current_fingerprint)
+        semantic_review = self.semantic_relink_review(
+            root, baseline_fingerprint, current_fingerprint
         )
-        self.assertEqual(migrations.get("schema_version"), 1)
-        self.assertEqual(
-            self.resolve_migration(root, current_fingerprint),
-            f"{baseline_fingerprint}::{current_fingerprint}",
-            "the engine committed here has drifted from the published lineage without "
-            "a reviewed output-neutral migration entry: the next relink would rebuild "
-            "every book",
+        self.assertNotEqual(
+            bool(neutral), bool(semantic_review),
+            "engine drift needs exactly one policy: output-neutral adoption or full relink",
         )
+        if neutral:
+            self.assertEqual(neutral, f"{baseline_fingerprint}::{current_fingerprint}")
+        else:
+            self.assertEqual(
+                semantic_review,
+                "PR #6: citation resolution and ibid state are output-affecting; run a full relink.",
+            )
 
         for key, value in (("engine_src", engine_src), ("sefaria_patch", sefaria_patch)):
             mutated_value = value[:-1] + ("0" if value[-1] != "0" else "1")
@@ -679,6 +711,10 @@ class RelinkWorkflowContractTest(unittest.TestCase):
                     self.resolve_migration(root, mutated),
                     "",
                     f"a one-character drift in {key} must NOT be adopted",
+                )
+                self.assertIsNone(
+                    self.semantic_relink_review(root, baseline_fingerprint, mutated),
+                    f"a one-character drift in {key} must NOT be pre-approved as semantic",
                 )
 
     def test_pack_steps_saturate_the_runner_without_losing_determinism(self):

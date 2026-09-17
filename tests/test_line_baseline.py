@@ -61,6 +61,18 @@ class LineBaselineTest(unittest.TestCase):
         self.assertEqual(delta.reuse, ())
         self.assertEqual(indices_from_ranges(delta.ner_ranges), {4})
 
+    def test_ibid_book_is_relinked_as_a_whole_context(self):
+        old = [
+            (0, line_fingerprint("בראשית ל א", "ספר")),
+            (1, line_fingerprint("שם שם יד", "ספר")),
+        ]
+        delta = compute_line_delta(old, [
+            (0, "בראשית ל ב", "ספר"),
+            (1, "שם שם יד", "ספר"),
+        ])
+        self.assertEqual(delta.reuse, ())
+        self.assertEqual(indices_from_ranges(delta.ner_ranges), {0, 1})
+
     def test_release_baseline_identity_and_per_book_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
