@@ -1317,7 +1317,9 @@ class IbidContext:
 
     def __init__(self):
         self.initialized = False
-        self.resolved_refs: tuple[str, ...] = ()
+        # These are Sefaria Ref objects, not serialized data: the state lives only
+        # within this worker and has at most the resolver's three remembered refs.
+        self.resolved_refs: tuple[object, ...] = ()
         self.last_emitted_ref = None
 
     @staticmethod
@@ -1332,19 +1334,17 @@ class IbidContext:
             )
         return resolver
 
-    def _restore(self, resolver, ref_factory):
-        if ref_factory is None:
-            raise RuntimeError("ibid history requires a Ref factory")
+    def _restore(self, resolver):
         resolver.reset_ibid_history()
-        for normal in self.resolved_refs:
-            resolver._ibid_history.last_refs = ref_factory(normal)
+        for ref in self.resolved_refs:
+            resolver._ibid_history.last_refs = ref
 
-    def resolve(self, linker, invoke, ref_factory):
+    def resolve(self, linker, invoke):
         """Run one bulk call while retaining only its initial ibid history reset."""
         resolver = self._resolver(linker)
         original_reset = resolver.reset_ibid_history
         if self.initialized:
-            self._restore(resolver, ref_factory)
+            self._restore(resolver)
             skipped_initial_reset = False
 
             def reset_ibid_history():
@@ -1360,7 +1360,7 @@ class IbidContext:
         finally:
             resolver.reset_ibid_history = original_reset
         self.initialized = True
-        self.resolved_refs = tuple(ref.normal() for ref in resolver._ibid_history.last_refs)
+        self.resolved_refs = tuple(resolver._ibid_history.last_refs)
         return docs
 
 
@@ -1408,7 +1408,7 @@ def process_batch(
     def resolve(invoke):
         if ibid_context is None:
             return invoke()
-        return ibid_context.resolve(linker, invoke, context_ref_factory)
+        return ibid_context.resolve(linker, invoke)
 
     try:
         if precomputed is not None:

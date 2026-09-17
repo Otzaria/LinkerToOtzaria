@@ -325,8 +325,8 @@ class WorkerMemoryTest(unittest.TestCase):
 
         linker = Linker()
         context = link_books.IbidContext()
-        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:1"]), Ref)
-        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:2"]), Ref)
+        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:1"]))
+        context.resolve(linker, lambda: linker.bulk_link(["Genesis 30:2"]))
         self.assertEqual(linker.seen, [[], ["Genesis 30:1"]])
 
     def test_non_prose_payloads_are_not_sent_to_hebrew_ner(self):
