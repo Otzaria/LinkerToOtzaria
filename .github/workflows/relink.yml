@@ -948,6 +948,11 @@ jobs:
             # 1530 and the parent job ceiling is 2880 — an ~11h migration fits all three.
             # kaggle NER is bounded at 90 min and cannot, so it still fails fast with
             # instructions instead of starting work it can never finish.
+            # The rationale beside forbid_full_relink in src/incremental.py still cites
+            # the old "a waiting build cannot absorb ~11h" reading and is stale for
+            # local; it is left untouched on purpose, because that file feeds
+            # ENGINE_SRC_FILES and even a comment-only edit moves engine_src and buys
+            # an extra full relink. Correct it when a real engine change next lands.
             [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || [ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"

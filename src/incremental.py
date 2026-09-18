@@ -711,17 +711,14 @@ def compute_incremental_plan(args) -> dict:
         elif stored_fingerprint is None:
             _log(f"baseline predates fingerprinting — ADOPTING {fingerprint!r} (no full relink)")
         elif getattr(args, "forbid_full_relink", False):
-            # Serial mode on a BUDGET-BOUNDED topology only. target=local no longer sets
-            # this flag: its relink job holds 1440 min, the waiting build's loop caps at
-            # 1530 and the parent job at 2880, so an ~11h migration fits and simply runs.
-            # Kaggle NER (90 min) and the Oracle resolve (480 min) cannot absorb one, so
-            # they still fail fast here rather than start work they can never finish.
+            # Serial mode: a waiting DB build cannot absorb an ~11h full relink (it
+            # would time out mid-release). The engine change is deliberate — run the
+            # standalone relink first, then re-run the weekly build.
             raise RuntimeError(
                 "engine fingerprint changed "
-                f"({stored_fingerprint!r} -> {fingerprint!r}) but a full relink does not "
-                "fit this topology's budget under a waiting build — dispatch relink.yml "
-                "manually (standalone, no library_run_id) to migrate, then rerun the "
-                "build, or re-run the build with target=local, which migrates in place")
+                f"({stored_fingerprint!r} -> {fingerprint!r}) but a full relink is "
+                "forbidden under a waiting build — dispatch relink.yml manually "
+                "(standalone, no library_run_id) to migrate, then rerun the build")
         else:
             _log("engine fingerprint changed "
                  f"({stored_fingerprint!r} -> {fingerprint!r}) — FULL relink")
