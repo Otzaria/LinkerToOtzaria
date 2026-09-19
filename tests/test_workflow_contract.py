@@ -97,7 +97,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         contract = json.loads(contract_bytes)
         self.assertEqual(
             hashlib.sha256(contract_bytes).hexdigest(),
-            "a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f",
+            "fb2383e2c71c535ab8bc9f126180588e35c00cbf714e74823940d83527ba72c0",
         )
         self.assertEqual(contract["contractVersion"], 1)
         self.assertEqual(contract["workflow"], "relink.yml")
@@ -485,7 +485,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         # Run 33994031370 packed a complete payload 12 s after being cancelled at 480 min.
         self.assertIn(
             "timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || "
-            "(inputs.target == 'local' && 1440 || "
+            "(inputs.target == 'local' && 2880 || "
             "(inputs.library_run_id != '' && 480 || 7200)) }}",
             workflow,
         )

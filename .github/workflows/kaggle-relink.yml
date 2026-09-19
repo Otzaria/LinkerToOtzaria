@@ -50,7 +50,7 @@ on:
           SHA-256 of the shared SeforimLibrary/Linker relink timeout contract.
           The default is this revision's contract for standalone intake.
         required: false
-        default: 'a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f'
+        default: 'fb2383e2c71c535ab8bc9f126180588e35c00cbf714e74823940d83527ba72c0'
         type: string
       dry_run:
         description: Skip publish + baseline commit on the relink (canary/testing).

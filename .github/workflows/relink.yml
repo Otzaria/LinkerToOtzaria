@@ -97,7 +97,7 @@ on:
           dispatching SeforimLibrary revision. The checked-in default supports
           standalone dispatches; serial callers must forward their exact contract hash.
         required: false
-        default: 'a60c139ac604039d8a8af6a845cb818e96c56312e3327a17105459ec8f59c88f'
+        default: 'fb2383e2c71c535ab8bc9f126180588e35c00cbf714e74823940d83527ba72c0'
         type: string
       target:
         description: >
@@ -257,19 +257,20 @@ jobs:
     # itself stops at 60 minutes so packaging + release upload retain real headroom.
     # Its per-book checkpoints are published on that bounded failure and an exact rerun
     # of this databaseId resumes them instead of spending the next session from zero.
-    # target=local gets 24 hours UNCONDITIONALLY, not only under allow_full_relink.
+    # target=local gets 48 hours UNCONDITIONALLY, not only under allow_full_relink.
     # 480 is the CPU-RESOLVE budget of the split topology (90m Kaggle NER + 480m Oracle
     # resolve, see the `resolve` job); on local ONE job does both, and how much work it
     # faces is decided by the snapshot, not by allow_full_relink — that input only
     # authorizes a baseline migration in recovery_mode. Run 33994031370 was an ordinary
     # parented local run that legitimately needed 6h16m GPU NER + 1h38m resolve for
     # 5,127 changed books; it was cancelled at 480.35 min, 12 s after packing a complete
-    # payload. 1440 cannot outlive the parent either: the SeforimLibrary build's own
-    # ceiling is 1440 and its wait loop has no shorter cap, so the parent still fails
-    # closed first. Server-only legacy/manual runs keep their existing serial/full ceilings.
+    # payload. A full local relink is larger still: 35288565488's NER alone took 20h25m
+    # (two model processes; ~3h20m with one) before resolve, so the ceiling is 2880 and
+    # the SeforimLibrary parent waits up to 2970 inside a 4320-min job - the contract
+    # linker_relink_timeouts_v1.json keeps both repos in step. Server-only legacy/manual runs keep their existing serial/full ceilings.
     # The per-book heartbeat watchdog detects an engine that stops making progress;
     # this timeout remains the coarse backstop for failures outside the engine loop.
-    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.target == 'local' && 1440 || (inputs.library_run_id != '' && 480 || 7200)) }}
+    timeout-minutes: ${{ inputs.target == 'kaggle' && 90 || (inputs.target == 'local' && 2880 || (inputs.library_run_id != '' && 480 || 7200)) }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       # NER model wheels + the Sefaria Mongo dump live in THIS repo's fixed releases
@@ -1074,6 +1075,9 @@ jobs:
 
       - name: Upload local performance diagnostics
         if: always() && inputs.target == 'local'
+        # Diagnostics only: after a 48h job the runtime token behind upload-artifact may
+        # have expired, and that must not skip the publish steps that follow.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: linker-perf-${{ github.run_id }}-${{ github.run_attempt }}
