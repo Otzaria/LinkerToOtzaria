@@ -1025,12 +1025,20 @@ jobs:
             # took the VM down): defer a book that grows a pool child by >0.8 GB of
             # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
             # wins over batch-by-batch recycling - finish every ordinary book first,
-            # then resolve the deferred ones at most three at a time under a 5 GB cap
+            # then resolve the deferred ones at most two at a time under a 20 GB cap
             # (idle workers recycle so the heavy slots get the RAM they shed).  The
             # cap is judged between batches, so budget one more batch of growth per
-            # slot: 3 x (5 + ~4) + master ~3 + idle + mongod 3 = ~35 GB (~45 GB if all
-            # three reach 13 GB), which fits the 55 GB VM only because the heavy phase
-            # is serialized and never overlaps the normal phase.
+            # slot: 2 x 20 + master ~3 + recycled idle workers (~1 GB private each) +
+            # mongod 3 = ~48 GB, which fits the 55 GB VM only because the heavy phase is
+            # serialized and never overlaps the normal phase.
+            # The cap must EXCEED what a heavy book needs, or the book never ends: since
+            # 2c2e01d a book carrying standalone ibid (`שם`) deletes its own shards and
+            # replays from batch 0, so a mid-book recycle makes no progress at all.  Run
+            # 35458432836 span three workers against the same book forever at a 5 GB cap
+            # (identical batch counts every life, 73 deferred books stuck for hours);
+            # 'דור המלקטים על אורח חיים' (190,759 lines) needs ~16 GB at ~7.6 MB/batch.
+            # link_books.py's zero-progress guard counts batches, not books, so it cannot
+            # see that loop; fix it there when a real engine change next lands.
             # A deferred book is additionally given a worker that has completed no book
             # in its current life (LINKER_HEAVY_FRESH_WORKER, on by default): in
             # 34016397157 one line asked for 11.9 GB on a worker already holding 75
@@ -1045,10 +1053,10 @@ jobs:
             # its baseline image already crowds (see apply_address_space_limit) rather
             # than failing every book.
             export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
-            export LINKER_HEAVY_BOOK_SLOTS=3
-            export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
+            export LINKER_HEAVY_BOOK_SLOTS=2
+            export LINKER_HEAVY_RSS_CAP_BYTES=20000000000
             export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
-            export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
+            export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=30000000000
             export MALLOC_ARENA_MAX=2
             export OMP_NUM_THREADS=1
             export OPENBLAS_NUM_THREADS=1
