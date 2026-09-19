@@ -129,6 +129,8 @@ on:
           against an exact failed serial parent snapshot. Requires recovery_mode,
           target=local and a pinned parent; it must never be used for an ordinary
           weekly delta or together with fingerprint adoption/Kaggle checkpoint recovery.
+          target=local no longer forbids a needed full relink at all (48h ceiling), so
+          this now only marks an exact recovery replay as a deliberate migration.
         required: false
         default: false
         type: boolean
@@ -1024,7 +1026,7 @@ jobs:
             # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
             # wins over batch-by-batch recycling - finish every ordinary book first,
             # then resolve the deferred ones at most three at a time under a 5 GB cap
-            # (idle workers recycle so the heavy pair gets the RAM they shed).  The
+            # (idle workers recycle so the heavy slots get the RAM they shed).  The
             # cap is judged between batches, so budget one more batch of growth per
             # slot: 3 x (5 + ~4) + master ~3 + idle + mongod 3 = ~35 GB (~45 GB if all
             # three reach 13 GB), which fits the 55 GB VM only because the heavy phase

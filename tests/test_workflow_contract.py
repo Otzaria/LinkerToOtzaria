@@ -182,7 +182,11 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('from otzaria_microbatch import OrderedMicroBatcher', setup)
         self.assertIn('"${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"', setup)
         self.assertIn("NER_THREADS: '16'", canary)
-        self.assertIn("(inputs.target == 'local' && '1' ||", workflow)  # one GPU model process
+        self.assertIn(  # one GPU model process on local; kaggle/server keep their counts
+            "NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') "
+            "|| (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}",
+            workflow,
+        )
         self.assertIn("ci/ner_shared_model_probe.py", canary)
 
     def test_recovery_guards_are_event_driven_and_exact(self):
@@ -366,7 +370,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             workflow,
         )
         # The local engine branch (15 workers + pool) must carry no guard of its own.
-        local_branch = workflow.split("--engine-workers 15", 1)[1]
+        local_branch = workflow.split('echo "final local raw-NER micro-batch metrics:"', 1)[1]
         local_branch = local_branch.split('elif [ -n "$LIBRARY_RUN_ID" ]', 1)[0]
         self.assertNotIn("--forbid-full-relink", local_branch)
         # Oracle resolve (480 min) and the server serial branch still fail closed.

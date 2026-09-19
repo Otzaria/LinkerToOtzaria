@@ -435,8 +435,9 @@ EOF
 # Each gunicorn worker owns one GPU-resident model and lets its HTTP threads
 # accumulate compatible resolver requests for its single ordered inference thread
 # (the overlay below).  NER_WORKERS picks how many such processes share the GPU:
-# the local host runs two, since one process saturated at ~400 texts/s while the
-# card sat at ~70% with VRAM to spare (2026-09-02).  The patch is deliberately tied
+# the local host runs one.  Two (5310abe, from one process saturating at ~400
+# texts/s with the card at ~70% on 2026-09-02) collapsed every run within the
+# first hour to ~40-60 texts/s per process with VRAM pinned (reverted in 2978be1).  The patch is deliberately tied
 # to the pinned upstream app.py and fails closed if that source layout changes.
 MICROBATCH_SOURCE="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"
 MICROBATCH_PATCH="${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.patch"
