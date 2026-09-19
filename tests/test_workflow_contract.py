@@ -182,7 +182,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('from otzaria_microbatch import OrderedMicroBatcher', setup)
         self.assertIn('"${LINKER_REPO:-$PWD}/ci/gpu_server_microbatch.py"', setup)
         self.assertIn("NER_THREADS: '16'", canary)
-        self.assertIn("(inputs.target == 'local' && '2' ||", workflow)  # two GPU model processes
+        self.assertIn("(inputs.target == 'local' && '1' ||", workflow)  # one GPU model process
         self.assertIn("ci/ner_shared_model_probe.py", canary)
 
     def test_recovery_guards_are_event_driven_and_exact(self):

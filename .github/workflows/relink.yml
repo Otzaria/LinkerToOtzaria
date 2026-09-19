@@ -774,12 +774,15 @@ jobs:
         id: compute
         continue-on-error: ${{ inputs.target == 'kaggle' }}
         env:
-          # The local ROCm host serves raw NER from two model processes: the 2026-09-02
-          # full relink showed one process saturated (model_seconds ~= wall, ~400
-          # texts/s) while the GPU sat at ~70% with VRAM nearly empty. Resolution starts
-          # after stop_ner releases the VRAM. Kaggle/server retain their independently
-          # measured process counts.
-          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '2' || (inputs.library_run_id != '' && '2' || '3')) }}
+          # The local ROCm host serves raw NER from ONE model process.  5310abe
+          # (2026-09-03) tried two, reading the 2026-09-02 full relink (one process
+          # saturated at ~400 texts/s, GPU ~70%) as headroom - but with two processes
+          # every run after it collapsed within the first hour to ~40-60 texts/s per
+          # process (VRAM pinned at 15.3/16 GB, GPU ~5%, request latency 0.5s -> 8-22s):
+          # 35288565488's full NER took 20h25m against ~3h20m for 33661988644 with one.
+          # Resolution starts after stop_ner releases the VRAM. Kaggle/server retain
+          # their independently measured process counts.
+          NER_WORKERS: ${{ inputs.target == 'kaggle' && (inputs.library_run_id != '' && '1' || '2') || (inputs.target == 'local' && '1' || (inputs.library_run_id != '' && '2' || '3')) }}
           # One gthread process owns the single GPU model.  Its ordered micro-batcher
           # coalesces concurrent resolver requests into the GPU-server's native
           # 150-line device batch, so CPU resolution can overlap the next inference
