@@ -352,6 +352,31 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")', workflow)
         self.assertGreaterEqual(workflow.count("--forbid-full-relink"), 2)
 
+    def test_serial_local_migrates_the_baseline_without_operator_action(self):
+        # A deliberate engine change must not strand the weekly build. target=local is
+        # sized for a ~48h migration (NER alone measured 20h25m in 35288565488), so a
+        # full relink runs unattended; the budget-bounded topologies keep the guard, or
+        # they would start a migration they can never finish.
+        workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '[ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || '
+            '[ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)',
+            workflow,
+        )
+        # The local engine branch (15 workers + pool) must carry no guard of its own.
+        local_branch = workflow.split("--engine-workers 15", 1)[1]
+        local_branch = local_branch.split('elif [ -n "$LIBRARY_RUN_ID" ]', 1)[0]
+        self.assertNotIn("--forbid-full-relink", local_branch)
+        # Oracle resolve (480 min) and the server serial branch still fail closed.
+        self.assertIn('[ -z "$LIBRARY_RUN_ID" ] || ARGS+=(--forbid-full-relink)', workflow)
+        self.assertIn(
+            '            ARGS+=(--engine-workers 2)\n'
+            '            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)',
+            workflow,
+        )
+
     def test_full_relink_requires_explicit_exact_local_recovery(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/relink.yml").read_text(
             encoding="utf-8"
@@ -401,10 +426,10 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('source.get("head_sha") != args.head_sha', guard)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
-        self.assertIn("--engine-workers 12", workflow)
+        self.assertIn("--engine-workers 15", workflow)
         self.assertIn("--engine-pool", workflow)
         self.assertIn("LINKER_RSS_CAP_BYTES=1200000000", workflow)
-        self.assertIn("LINKER_HEAVY_BOOK_SLOTS=2", workflow)
+        self.assertIn("LINKER_HEAVY_BOOK_SLOTS=3", workflow)
         self.assertIn("LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000", workflow)
         self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=5000000000", workflow)
         self.assertIn("LINKER_WORKER_ADDRESS_SPACE_BYTES=", workflow)

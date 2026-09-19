@@ -746,7 +746,7 @@ jobs:
 
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
       # local runs the same raw-NER handoff first, then stops the GPU model and starts
-      # twelve CPU-only resolver processes forked from one loaded library. target=server retains the legacy combined
+      # fifteen CPU-only resolver processes forked from one loaded library. target=server retains the legacy combined
       # Mongo+NER+Django fallback. The server path runs as
       # ONE step under a host lease: a kernel flock whose FD is
       # held by this step's shell for the phase's whole life and released by the kernel
@@ -766,7 +766,7 @@ jobs:
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
       # so flipping e.g. --bavli-convention also forces a full relink. The legacy
       # server fallback keeps three workers for OOM headroom on its 22GB host; local
-      # resolution uses twelve pooled, cooperative workers after unloading the GPU.
+      # resolution uses fifteen pooled, cooperative workers after unloading the GPU.
       # NER teardown is bound to this same step's EXIT trap — still under the lease, so
       # it can never kill another run's fresh stack (that run needs the lease first) —
       # freeing ~3GB of models for whatever resumes on the shared host either way.
@@ -943,7 +943,18 @@ jobs:
           if [ "$TARGET" = kaggle ] || [ "$TARGET" = local ]; then
             PLAN="$RUN_DIR/ner-plan.json"
             PLAN_ARGS=("${ARGS[@]}" --plan-only "$PLAN" --relink-request-id "$RELINK_REQUEST_ID")
-            [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || PLAN_ARGS+=(--forbid-full-relink)
+            # target=local absorbs a full relink under a waiting build instead of
+            # stranding it.  Measured: the full NER of 35288565488 alone took 20h25m
+            # (7,367 books, 6.03M lines) before resolve even started, so the local job
+            # ceiling and the parent's wait cap / job ceiling are sized for a ~48h
+            # migration.  kaggle NER is bounded at 90 min and cannot, so it still fails
+            # fast with instructions instead of starting work it can never finish.
+            # The rationale beside forbid_full_relink in src/incremental.py still cites
+            # the old "a waiting build cannot absorb ~11h" reading and is stale for
+            # local; it is left untouched on purpose, because that file feeds
+            # ENGINE_SRC_FILES and even a comment-only edit moves engine_src and buys
+            # an extra full relink. Correct it when a real engine change next lands.
+            [ -z "$LIBRARY_RUN_ID" ] || [ -n "$ALLOW_FULL_RELINK" ] || [ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)
             [ -z "$ADOPT_FINGERPRINT" ] || PLAN_ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
             "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${PLAN_ARGS[@]}"
             CHECKPOINT_ARGS=()
@@ -987,7 +998,7 @@ jobs:
             # own Windows account, sized by that account's .wslconfig (outside this
             # repo), so the only honest figure for a run is its OWN perf/host.jsonl -
             # relink 34016397157 measured MemTotal 41,072,256 KiB = 42.1 GB with 12 GiB
-            # of swap.  (This comment used to say "~32GB", which it never was.)  Do NOT
+            # of swap; since 2026-09 the VM is 55 GB (35288565488: MemTotal 56.6 GB).  (This comment used to say "~32GB", which it never was.)  Do NOT
             # size this job from the interactive WSL VM on the same machine: that one
             # belongs to a different Windows account (26 GB, 32 GiB swap) and is a
             # different VM - the swap figures alone tell them apart.
@@ -996,20 +1007,24 @@ jobs:
             # --engine-pool loads the library ONCE and forks the resolvers from it, so
             # the ~2GB library is shared copy-on-write; the cap below then bounds each
             # child's PRIVATE growth (Ref cache, batch documents), not its shared RSS:
-            # 12 x 1.2GB private + ~2.5GB shared + mongod (3GB cache) + runner = ~20 GB,
-            # comfortably inside the 42 GB measured. Prevent native libraries inside
+            # measured ~1.25 GB/worker in steady state (34539171481: 18.5 GB median at
+            # 12 workers), so 15 x 1.25 + ~6 GB base = ~25 GB of the 56.6 GB VM, leaving
+            # room for two or three 12 GB single-line balloons (34016397157 peaked at
+            # 34.8 GB used).  Resolve is CPU-bound (children at ~100% CPU), so 15 of the
+            # 16 logical CPUs, one left for the pool master, mongod and fsync; more
+            # workers than CPUs only time-slice while each adds private memory. Prevent native libraries inside
             # each Python process from creating another thread pool.
             export LINKER_RSS_CAP_BYTES=1200000000
             # Heavy books (a few texts grew a resolver to 6-12 GB inside one book and
             # took the VM down): defer a book that grows a pool child by >0.8 GB of
             # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
             # wins over batch-by-batch recycling - finish every ordinary book first,
-            # then resolve the deferred ones at most two at a time under a 5 GB cap
+            # then resolve the deferred ones at most three at a time under a 5 GB cap
             # (idle workers recycle so the heavy pair gets the RAM they shed).  The
             # cap is judged between batches, so budget one more batch of growth per
-            # slot: 2 x (5 + ~4) + master ~3 + idle + mongod 3 = ~24 GB, which fits
-            # the 42 GB the audited run measured only because the heavy phase is
-            # serialized and never overlaps the twelve-worker normal phase.
+            # slot: 3 x (5 + ~4) + master ~3 + idle + mongod 3 = ~35 GB (~45 GB if all
+            # three reach 13 GB), which fits the 55 GB VM only because the heavy phase
+            # is serialized and never overlaps the normal phase.
             # A deferred book is additionally given a worker that has completed no book
             # in its current life (LINKER_HEAVY_FRESH_WORKER, on by default): in
             # 34016397157 one line asked for 11.9 GB on a worker already holding 75
@@ -1019,12 +1034,12 @@ jobs:
             # RLIMIT_AS is the last resort so a runaway line ends in a MemoryError
             # inside its worker instead of the kernel OOM killer; it bounds VIRTUAL
             # size per process and is a ceiling, never a reservation (the 26 GB heavy
-            # ceiling below is ~62% of the 42 GB VM, so two heavy slots may map more
+            # ceiling below is ~47% of the 55 GB VM, so heavy slots may map more
             # than the VM holds - that is the point), and the engine refuses a ceiling
             # its baseline image already crowds (see apply_address_space_limit) rather
             # than failing every book.
             export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
-            export LINKER_HEAVY_BOOK_SLOTS=2
+            export LINKER_HEAVY_BOOK_SLOTS=3
             export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
             export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
             export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
@@ -1036,10 +1051,9 @@ jobs:
             ARGS+=(
               --ner-bundle-dir "$NER_BUNDLE_DIR"
               --relink-request-id "$RELINK_REQUEST_ID"
-              --engine-workers 12
+              --engine-workers 15
               --engine-pool
             )
-            [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
           elif [ -n "$LIBRARY_RUN_ID" ]; then
             ARGS+=(--engine-workers 2)
             [ -n "$ALLOW_FULL_RELINK" ] || ARGS+=(--forbid-full-relink)
