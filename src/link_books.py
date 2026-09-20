@@ -620,6 +620,59 @@ def recycle_needed(current_rss: int, cap: float, processed: int) -> bool:
     return True
 
 
+RECYCLE_PROGRESS_FILE = "recycle-progress.json"
+
+
+def committed_shard_count(checkpoint_dir: str) -> int:
+    """How many batches of one book are committed on disk right now."""
+    try:
+        return sum(1 for name in os.listdir(checkpoint_dir) if name.endswith(".jsonl")
+                   and name[0].isdigit())
+    except FileNotFoundError:
+        return 0
+
+
+def refuse_a_book_that_recycles_without_progress(checkpoint_dir: str) -> None:
+    """Fail a book that would recycle a second time having committed nothing new.
+
+    A recycle is only worth its cost if the next life starts further along.  A book
+    that replays the same batches every life (2026-09: a stateful-ibid book deleted
+    its own shards, so relinks 35458432836 and 35477368314 span three workers for
+    hours at 100% CPU and never finished) must therefore end as a loud failure, not
+    as a job that burns its whole 48-hour ceiling.  recycle_needed() cannot see this:
+    a life that commits 27 batches and loses them looks identical to one that keeps
+    them, so the comparison has to survive the exec - hence a file, not a counter.
+    """
+    import json as _json
+
+    marker = os.path.join(checkpoint_dir, RECYCLE_PROGRESS_FILE)
+    committed = committed_shard_count(checkpoint_dir)
+    previous = None
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            previous = _json.load(fh).get("committed_shards")
+    except Exception:
+        previous = None
+    if isinstance(previous, int) and committed <= previous:
+        raise RuntimeError(
+            f"book is recycling without progress: {committed} committed batch(es) now, "
+            f"{previous} before the previous recycle; refusing an endless replay"
+        )
+    tmp = f"{marker}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _json.dump({"committed_shards": committed}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, marker)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def claim_id(bk: BookKey) -> str:
     """Filesystem-safe, collision-free handle for a book (claim/done markers)."""
     h = hashlib.sha1(f"{bk.source_name}\0{bk.canonical_he_title}".encode("utf-8"))
@@ -1875,6 +1928,7 @@ def process_book_checkpointed(
             # ballooning book would only ever be recycled batch by batch, never deferred.
             raise BookDeferred(bk, growth, batches_this_life)
         if recycle_needed(current_rss, cap, batches_this_life):
+            refuse_a_book_that_recycles_without_progress(checkpoint_dir)
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 

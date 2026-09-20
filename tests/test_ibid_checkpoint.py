@@ -332,5 +332,51 @@ class IbidCheckpointTest(unittest.TestCase):
         self.assertEqual(context.last_emitted_ref, Ref("Genesis 1:1"))
 
 
+class RecycleProgressGuardTest(unittest.TestCase):
+    """A book that recycles twice without committing anything new must fail loudly."""
+
+    def test_a_replaying_book_fails_instead_of_spinning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "book")
+            os.makedirs(checkpoint)
+            # First recycle: nothing committed yet, but nothing to compare against.
+            link_books.refuse_a_book_that_recycles_without_progress(checkpoint)
+            with open(os.path.join(checkpoint, "000000000000.jsonl"), "w") as stream:
+                stream.write("{}\n")
+            # Second: one batch more than last time, so the recycle is worth its cost.
+            link_books.refuse_a_book_that_recycles_without_progress(checkpoint)
+            # Third: the batch was replayed, not added.
+            with self.assertRaises(RuntimeError) as raised:
+                link_books.refuse_a_book_that_recycles_without_progress(checkpoint)
+            self.assertIn("without progress", str(raised.exception))
+
+    def test_the_guard_runs_before_every_mid_book_recycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = os.path.join(tmp, "i")
+            output = os.path.join(tmp, "i.jsonl")
+            with self.assertRaises(_Recycled):
+                _run(_Linker(), checkpoint, output, recycle_after=1)
+            with open(os.path.join(checkpoint, link_books.RECYCLE_PROGRESS_FILE),
+                      encoding="utf-8") as stream:
+                self.assertEqual(json.load(stream)["committed_shards"], 1)
+
+    def test_the_durable_cache_carries_the_progress_marker(self):
+        sys.path.insert(0, os.path.join(ROOT, "ci"))
+        import local_checkpoint_cache  # noqa: E402
+        import pathlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = os.path.join(tmp, "checkpoints", "b" * 40)
+            os.makedirs(book)
+            with open(os.path.join(tmp, "changed_books.json"), "w", encoding="utf-8") as stream:
+                stream.write("[]\n")
+            for name in ("000000000000.jsonl", link_books.RECYCLE_PROGRESS_FILE):
+                with open(os.path.join(book, name), "w", encoding="utf-8") as stream:
+                    stream.write("{}\n")
+            listed = {entry["path"] for entry in
+                      local_checkpoint_cache.listed_files(pathlib.Path(tmp))}
+            self.assertIn(f"checkpoints/{'b' * 40}/{link_books.RECYCLE_PROGRESS_FILE}", listed)
+
+
 if __name__ == "__main__":
     unittest.main()
