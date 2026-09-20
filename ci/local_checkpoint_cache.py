@@ -23,6 +23,9 @@ import time
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 SHARD_PATH = re.compile(r"checkpoints/[0-9a-f]{40}/[0-9]{12}\.jsonl\Z")
+# A stateful-ibid book stores the resolver history that produced each shard beside
+# it; without the sidecar the resumed batch would replay the whole book.
+IBID_STATE_PATH = re.compile(r"checkpoints/[0-9a-f]{40}/[0-9]{12}\.ibid\.json\Z")
 PRIOR_PATH = re.compile(r"checkpoints/[0-9a-f]{40}/prior\.(?:jsonl|absent)\Z")
 COMPLETED_ARTIFACT_PATH = re.compile(r"completed_artifacts/[0-9a-f]{40}\.jsonl\Z")
 CLAIM_ID = re.compile(r"[0-9a-f]{40}\Z")
@@ -82,6 +85,7 @@ def listed_files(root: Path) -> list[dict]:
         if (
             relative not in {"changed_books.json", "completed_books.json"}
             and not SHARD_PATH.fullmatch(relative)
+            and not IBID_STATE_PATH.fullmatch(relative)
             and not PRIOR_PATH.fullmatch(relative)
             and not COMPLETED_ARTIFACT_PATH.fullmatch(relative)
         ):

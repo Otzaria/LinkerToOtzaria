@@ -1315,7 +1315,7 @@ class IbidContext:
     exposes the contract rather than silently making output batch-size dependent.
     """
 
-    IBID_STATE_SCHEMA = 1
+    IBID_STATE_SCHEMA = 2
 
     def __init__(self):
         self.initialized = False
@@ -1324,39 +1324,54 @@ class IbidContext:
         self.resolved_refs: tuple[object, ...] = ()
         self.last_emitted_ref = None
 
-    def state(self) -> dict:
+    def state(self, book_key, batch_start: int, shard_sha256: str) -> dict:
         """The whole cross-batch state, as normalized ref strings.
 
-        A batch's output depends on this and nothing else, so a shard written
-        beside it makes a recycled worker resume with byte-identical history
-        instead of replaying the book from its first batch.
+        A batch's output depends on this and nothing else, so writing it beside the
+        shard makes a recycled worker resume with byte-identical history instead of
+        replaying the book from its first batch.  It carries the identity of the
+        exact shard it followed, because history adopted for the wrong batch would
+        change the output silently - the one failure this checkpoint must not have.
         """
         return {
             "schema": self.IBID_STATE_SCHEMA,
+            "book": [book_key.source_name, book_key.canonical_he_title],
+            "batch_start": int(batch_start),
+            "shard_sha256": shard_sha256,
             "resolved_refs": [ref.normal() for ref in self.resolved_refs],
             "last_emitted_ref": (
                 None if self.last_emitted_ref is None else self.last_emitted_ref.normal()
             ),
         }
 
-    def restore_state(self, state, ref_factory) -> None:
-        """Adopt a state() written by an earlier life; raise if it is unusable.
+    def restore_state(self, state, ref_factory, book_key, batch_start, shard_sha256) -> None:
+        """Adopt a state() written for this exact shard; raise if it is unusable.
 
         Refusing loudly is the point: the caller then recomputes that batch (and
         every later one) rather than continuing with a silently different history.
+        Nothing is assigned until every field has been rebuilt, so a rejected state
+        can never leave half of one batch's history next to half of another's.
         """
         if ref_factory is None:
             raise RuntimeError("ibid history requires a Ref factory")
         if not isinstance(state, dict) or state.get("schema") != self.IBID_STATE_SCHEMA:
             raise RuntimeError("unrecognized ibid checkpoint state")
+        if state.get("book") != [book_key.source_name, book_key.canonical_he_title]:
+            raise RuntimeError("ibid checkpoint state belongs to a different book")
+        if state.get("batch_start") != int(batch_start):
+            raise RuntimeError("ibid checkpoint state belongs to a different batch")
+        if state.get("shard_sha256") != shard_sha256:
+            raise RuntimeError("ibid checkpoint state does not match its shard")
         refs = state.get("resolved_refs")
         last = state.get("last_emitted_ref")
         if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
             raise RuntimeError("malformed ibid checkpoint refs")
         if last is not None and not isinstance(last, str):
             raise RuntimeError("malformed ibid checkpoint antecedent")
-        self.resolved_refs = tuple(ref_factory(normal) for normal in refs)
-        self.last_emitted_ref = None if last is None else ref_factory(last)
+        resolved = tuple(ref_factory(normal) for normal in refs)
+        emitted = None if last is None else ref_factory(last)
+        self.resolved_refs = resolved
+        self.last_emitted_ref = emitted
         self.initialized = True
 
     @staticmethod
@@ -1566,6 +1581,15 @@ def ibid_state_path(shard_path: str) -> str:
         else f"{shard_path}.ibid.json"
 
 
+def shard_digest(shard_path: str) -> str:
+    """The sha256 of one committed shard, binding an ibid state to its records."""
+    digest = hashlib.sha256()
+    with open(shard_path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def write_ibid_state(shard_path: str, state: dict) -> None:
     """Commit a shard's ibid state atomically, like the shard itself.
 
@@ -1582,6 +1606,13 @@ def write_ibid_state(shard_path: str, state: dict) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        # The rename itself must reach the disk too, or a machine crash could leave
+        # a shard whose state is gone - recoverable, but only by replaying the book.
+        directory = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         try:
             os.remove(tmp)
@@ -1756,15 +1787,17 @@ def process_book_checkpointed(
             if not stateful_ibid:
                 continue
             try:
-                ibid_context.restore_state(read_ibid_state(shard), context_ref_factory)
-            except (OSError, ValueError, RuntimeError) as exc:
+                ibid_context.restore_state(
+                    read_ibid_state(shard), context_ref_factory, bk, i, shard_digest(shard)
+                )
+            except Exception as exc:  # any unusable state is recoverable by replay
                 # Without this batch's history the next one cannot be reproduced, so
                 # the shard is recomputed from the history in hand (the previous
                 # batch's sidecar, or the book's start).  Every later shard is dropped
                 # by the guard above, for the same reason.
                 skipped_log(
-                    f"{bk.source_name}\t{bk.canonical_he_title}\t{i}\tibid-state\t"
-                    f"{type(exc).__name__}: {exc}"
+                    f"{bk.source_name}\t{bk.canonical_he_title}\t"
+                    f"batch {i}\tibid-state\t{type(exc).__name__}: {exc}"
                 )
                 ibid_resumable = False
                 remove_artifact(shard)
@@ -1789,7 +1822,7 @@ def process_book_checkpointed(
             write_artifact(shard, records)
             if stateful_ibid:
                 # Written after the shard, so a sidecar never describes absent records.
-                write_ibid_state(shard, ibid_context.state())
+                write_ibid_state(shard, ibid_context.state(bk, i, shard_digest(shard)))
             write_done = time.perf_counter()
         finally:
             if batch_claim is not None:
