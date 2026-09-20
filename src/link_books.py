@@ -1315,12 +1315,49 @@ class IbidContext:
     exposes the contract rather than silently making output batch-size dependent.
     """
 
+    IBID_STATE_SCHEMA = 1
+
     def __init__(self):
         self.initialized = False
         # These are Sefaria Ref objects, not serialized data: the state lives only
         # within this worker and has at most the resolver's three remembered refs.
         self.resolved_refs: tuple[object, ...] = ()
         self.last_emitted_ref = None
+
+    def state(self) -> dict:
+        """The whole cross-batch state, as normalized ref strings.
+
+        A batch's output depends on this and nothing else, so a shard written
+        beside it makes a recycled worker resume with byte-identical history
+        instead of replaying the book from its first batch.
+        """
+        return {
+            "schema": self.IBID_STATE_SCHEMA,
+            "resolved_refs": [ref.normal() for ref in self.resolved_refs],
+            "last_emitted_ref": (
+                None if self.last_emitted_ref is None else self.last_emitted_ref.normal()
+            ),
+        }
+
+    def restore_state(self, state, ref_factory) -> None:
+        """Adopt a state() written by an earlier life; raise if it is unusable.
+
+        Refusing loudly is the point: the caller then recomputes that batch (and
+        every later one) rather than continuing with a silently different history.
+        """
+        if ref_factory is None:
+            raise RuntimeError("ibid history requires a Ref factory")
+        if not isinstance(state, dict) or state.get("schema") != self.IBID_STATE_SCHEMA:
+            raise RuntimeError("unrecognized ibid checkpoint state")
+        refs = state.get("resolved_refs")
+        last = state.get("last_emitted_ref")
+        if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
+            raise RuntimeError("malformed ibid checkpoint refs")
+        if last is not None and not isinstance(last, str):
+            raise RuntimeError("malformed ibid checkpoint antecedent")
+        self.resolved_refs = tuple(ref_factory(normal) for normal in refs)
+        self.last_emitted_ref = None if last is None else ref_factory(last)
+        self.initialized = True
 
     @staticmethod
     def _resolver(linker):
@@ -1523,6 +1560,43 @@ def process_batch(
     return records, words
 
 
+def ibid_state_path(shard_path: str) -> str:
+    """The ibid-state sidecar of one batch shard."""
+    return f"{shard_path[:-len('.jsonl')]}.ibid.json" if shard_path.endswith(".jsonl") \
+        else f"{shard_path}.ibid.json"
+
+
+def write_ibid_state(shard_path: str, state: dict) -> None:
+    """Commit a shard's ibid state atomically, like the shard itself.
+
+    A torn sidecar must never be read as a valid restart point, and a crash between
+    the two renames is safe in one direction only: the shard is written first, so a
+    sidecar can never describe a batch whose records are missing.
+    """
+    import json as _json
+    path = ibid_state_path(shard_path)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _json.dump(state, fh, ensure_ascii=False, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_ibid_state(shard_path: str) -> dict:
+    """The sidecar of `shard_path`; raises when it is absent or unreadable."""
+    import json as _json
+    with open(ibid_state_path(shard_path), encoding="utf-8") as fh:
+        return _json.load(fh)
+
+
 def process_book_checkpointed(
     linker, bk, lines, skipped_log, heartbeat, checkpoint_dir, out_path, on_recycle,
     precomputed=None, ner_indices=None, reuse=(), context_ref_factory=None,
@@ -1625,17 +1699,25 @@ def process_book_checkpointed(
     batches_this_life = 0
     cap = RSS_CAP if recycle_cap is None else float(recycle_cap)
     memory_at_start = worker_memory_bytes()
-    if stateful_ibid:
-        # A shard contains records but not Sefaria's last-three-reference state.  It
-        # is therefore not a valid restart point: replay this book from its beginning
-        # to preserve exactly the same ibid history after a retry or worker recycle.
-        for batch_start, _batch in transport_batches(lines, ner_indices):
-            remove_artifact(os.path.join(checkpoint_dir, f"{batch_start:012d}.jsonl"))
+    # A shard alone is not a valid restart point for a stateful-ibid book: it holds
+    # records but not Sefaria's last-three-reference state, so batch N+1 would resume
+    # with a different history and a different output.  Each shard therefore carries
+    # that state beside it, and a resumed batch adopts it.  Only where the state is
+    # missing or unreadable does the replay-from-here rule apply, and then every later
+    # shard goes too, because it was produced under history this life cannot reproduce.
+    # (Before 2026-09-20 every shard was deleted unconditionally, so a book whose peak
+    # exceeded the recycle cap replayed the same batches forever: relinks 35458432836
+    # and 35477368314 both livelocked there and never finished.)
+    ibid_resumable = stateful_ibid and context_ref_factory is not None
     for i, batch in transport_batches(lines, ner_indices):
         total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
         shard = os.path.join(checkpoint_dir, f"{i:012d}.jsonl")
         shard_paths.append(shard)
+        if os.path.exists(shard) and stateful_ibid and not ibid_resumable:
+            # This life cannot reproduce the history the shard was written under.
+            remove_artifact(shard)
+            remove_artifact(ibid_state_path(shard))
         if os.path.exists(shard):
             # A resumed shard is useful only if it is bound to this exact book, batch,
             # source content and contextual line identity. The cache manifest protects
@@ -1671,7 +1753,24 @@ def process_book_checkpointed(
                         f"checkpoint shard offset exceeds source line for "
                         f"{bk.source_name}/{bk.canonical_he_title}/{record.line_index}"
                     )
-            continue
+            if not stateful_ibid:
+                continue
+            try:
+                ibid_context.restore_state(read_ibid_state(shard), context_ref_factory)
+            except (OSError, ValueError, RuntimeError) as exc:
+                # Without this batch's history the next one cannot be reproduced, so
+                # the shard is recomputed from the history in hand (the previous
+                # batch's sidecar, or the book's start).  Every later shard is dropped
+                # by the guard above, for the same reason.
+                skipped_log(
+                    f"{bk.source_name}\t{bk.canonical_he_title}\t{i}\tibid-state\t"
+                    f"{type(exc).__name__}: {exc}"
+                )
+                ibid_resumable = False
+                remove_artifact(shard)
+                remove_artifact(ibid_state_path(shard))
+            else:
+                continue
         batch_claim = BatchClaim.acquire(checkpoint_dir, i) if cooperative else None
         if cooperative and batch_claim is None:
             continue
@@ -1688,6 +1787,9 @@ def process_book_checkpointed(
             )
             write_started = time.perf_counter()
             write_artifact(shard, records)
+            if stateful_ibid:
+                # Written after the shard, so a sidecar never describes absent records.
+                write_ibid_state(shard, ibid_context.state())
             write_done = time.perf_counter()
         finally:
             if batch_claim is not None:
