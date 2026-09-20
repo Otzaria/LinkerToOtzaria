@@ -291,9 +291,10 @@ class IbidCheckpointTest(unittest.TestCase):
         context.resolved_refs = (Ref("Genesis 1:1"), Ref("Genesis 1:2"))
         context.last_emitted_ref = Ref("Genesis 1:2")
         context.initialized = True
-        state = context.state(BOOK, 4, "d" * 64)
+        batch = [(4, "שורה 4 שם", "ספר"), (5, "שורה 5 שם", "ספר")]
+        state = context.state(BOOK, 4, batch, "d" * 64)
         restored = link_books.IbidContext()
-        restored.restore_state(state, Ref, BOOK, 4, "d" * 64)
+        restored.restore_state(state, Ref, BOOK, 4, batch, "d" * 64)
         self.assertEqual(list(restored.resolved_refs), list(context.resolved_refs))
         self.assertEqual(restored.last_emitted_ref, context.last_emitted_ref)
         self.assertTrue(restored.initialized)
@@ -301,11 +302,12 @@ class IbidCheckpointTest(unittest.TestCase):
                        {**state, "last_emitted_ref": 7},
                        {**state, "book": ["other", "book"]},
                        {**state, "batch_start": 6},
+                       {**state, "batch_extent": [1, 4]},
                        {**state, "shard_sha256": "e" * 64}):
             with self.assertRaises(RuntimeError):
-                link_books.IbidContext().restore_state(broken, Ref, BOOK, 4, "d" * 64)
+                link_books.IbidContext().restore_state(broken, Ref, BOOK, 4, batch, "d" * 64)
         with self.assertRaises(RuntimeError):
-            link_books.IbidContext().restore_state(state, None, BOOK, 4, "d" * 64)
+            link_books.IbidContext().restore_state(state, None, BOOK, 4, batch, "d" * 64)
 
     def test_a_rejected_state_leaves_no_half_restored_history(self):
         def factory(normal):
@@ -318,12 +320,14 @@ class IbidCheckpointTest(unittest.TestCase):
         context.last_emitted_ref = Ref("Genesis 1:1")
         context.initialized = True
         poisoned = {
-            **link_books.IbidContext().state(BOOK, 0, "d" * 64),
+            **link_books.IbidContext().state(BOOK, 0, [(0, "שורה", "ספר")], "d" * 64),
             "resolved_refs": ["Genesis 2:2"],
             "last_emitted_ref": "Genesis 1:9",
         }
         with self.assertRaises(ValueError):
-            context.restore_state(poisoned, factory, BOOK, 0, "d" * 64)
+            context.restore_state(
+                poisoned, factory, BOOK, 0, [(0, "שורה", "ספר")], "d" * 64
+            )
         self.assertEqual(list(context.resolved_refs), [Ref("Genesis 1:1")])
         self.assertEqual(context.last_emitted_ref, Ref("Genesis 1:1"))
 

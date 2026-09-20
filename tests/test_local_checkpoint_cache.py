@@ -53,6 +53,18 @@ class LocalCheckpointCacheTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_round_trip_carries_the_ibid_state_beside_its_shard(self):
+        # A stateful-ibid book resumes from the state written next to each shard; a
+        # durable checkpoint that dropped it would make the book replay from batch 0.
+        sidecar = self.run / "checkpoints" / self.claim / "000000000000.ibid.json"
+        sidecar.write_text('{"schema":3,"resolved_refs":[]}', encoding="utf-8")
+        cache.save(self.args)
+        sidecar.unlink()
+
+        cache.restore(self.args)
+
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), '{"schema":3,"resolved_refs":[]}')
+
     def test_round_trip_restores_plan_shards_and_completed_outputs(self):
         prior = self.run / "checkpoints" / self.claim / "prior.jsonl"
         prior.write_text('{"record":"prior"}\n', encoding="utf-8")

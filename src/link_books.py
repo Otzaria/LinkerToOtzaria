@@ -1315,7 +1315,7 @@ class IbidContext:
     exposes the contract rather than silently making output batch-size dependent.
     """
 
-    IBID_STATE_SCHEMA = 2
+    IBID_STATE_SCHEMA = 3
 
     def __init__(self):
         self.initialized = False
@@ -1324,7 +1324,7 @@ class IbidContext:
         self.resolved_refs: tuple[object, ...] = ()
         self.last_emitted_ref = None
 
-    def state(self, book_key, batch_start: int, shard_sha256: str) -> dict:
+    def state(self, book_key, batch_start: int, batch, shard_sha256: str) -> dict:
         """The whole cross-batch state, as normalized ref strings.
 
         A batch's output depends on this and nothing else, so writing it beside the
@@ -1337,6 +1337,11 @@ class IbidContext:
             "schema": self.IBID_STATE_SCHEMA,
             "book": [book_key.source_name, book_key.canonical_he_title],
             "batch_start": int(batch_start),
+            # The start alone does not say which lines the batch held: a batch whose
+            # last lines yield no link writes the same shard bytes as a shorter one
+            # starting there, and adopting its state would carry lines into the next
+            # batch's history that it never saw.
+            "batch_extent": [len(batch), int(batch[-1][0])],
             "shard_sha256": shard_sha256,
             "resolved_refs": [ref.normal() for ref in self.resolved_refs],
             "last_emitted_ref": (
@@ -1344,7 +1349,7 @@ class IbidContext:
             ),
         }
 
-    def restore_state(self, state, ref_factory, book_key, batch_start, shard_sha256) -> None:
+    def restore_state(self, state, ref_factory, book_key, batch_start, batch, shard_sha256) -> None:
         """Adopt a state() written for this exact shard; raise if it is unusable.
 
         Refusing loudly is the point: the caller then recomputes that batch (and
@@ -1360,6 +1365,8 @@ class IbidContext:
             raise RuntimeError("ibid checkpoint state belongs to a different book")
         if state.get("batch_start") != int(batch_start):
             raise RuntimeError("ibid checkpoint state belongs to a different batch")
+        if state.get("batch_extent") != [len(batch), int(batch[-1][0])]:
+            raise RuntimeError("ibid checkpoint state covers a different span of lines")
         if state.get("shard_sha256") != shard_sha256:
             raise RuntimeError("ibid checkpoint state does not match its shard")
         refs = state.get("resolved_refs")
@@ -1788,7 +1795,8 @@ def process_book_checkpointed(
                 continue
             try:
                 ibid_context.restore_state(
-                    read_ibid_state(shard), context_ref_factory, bk, i, shard_digest(shard)
+                    read_ibid_state(shard), context_ref_factory, bk, i, batch,
+                    shard_digest(shard),
                 )
             except Exception as exc:  # any unusable state is recoverable by replay
                 # Without this batch's history the next one cannot be reproduced, so
@@ -1822,7 +1830,9 @@ def process_book_checkpointed(
             write_artifact(shard, records)
             if stateful_ibid:
                 # Written after the shard, so a sidecar never describes absent records.
-                write_ibid_state(shard, ibid_context.state(bk, i, shard_digest(shard)))
+                write_ibid_state(
+                    shard, ibid_context.state(bk, i, batch, shard_digest(shard))
+                )
             write_done = time.perf_counter()
         finally:
             if batch_claim is not None:
