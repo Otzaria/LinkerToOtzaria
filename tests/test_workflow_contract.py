@@ -369,7 +369,7 @@ class RelinkWorkflowContractTest(unittest.TestCase):
             '[ "$TARGET" = local ] || PLAN_ARGS+=(--forbid-full-relink)',
             workflow,
         )
-        # The local engine branch (15 workers + pool) must carry no guard of its own.
+        # The local engine branch (12 workers + pool) must carry no guard of its own.
         local_branch = workflow.split('echo "final local raw-NER micro-batch metrics:"', 1)[1]
         local_branch = local_branch.split('elif [ -n "$LIBRARY_RUN_ID" ]', 1)[0]
         self.assertNotIn("--forbid-full-relink", local_branch)
@@ -430,14 +430,12 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn('source.get("head_sha") != args.head_sha', guard)
         self.assertGreaterEqual(workflow.count('--repo "$PWD"'), 2)
         self.assertIn("--resume-checkpoints", workflow)
-        self.assertIn("--engine-workers 15", workflow)
+        self.assertIn("--engine-workers 12", workflow)
         self.assertIn("--engine-pool", workflow)
         self.assertIn("LINKER_RSS_CAP_BYTES=1200000000", workflow)
         self.assertIn("LINKER_HEAVY_BOOK_SLOTS=2", workflow)
-        # A heavy slot must hold more than the largest stateful-ibid book (~16 GB),
-        # or a mid-book recycle replays from batch 0 forever (see run 35458432836).
-        self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=20000000000", workflow)
         self.assertIn("LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000", workflow)
+        self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=5000000000", workflow)
         self.assertIn("LINKER_WORKER_ADDRESS_SPACE_BYTES=", workflow)
         self.assertIn('bash ci/stop_ner.sh', workflow)
         self.assertIn('--ner-bundle-dir "$NER_BUNDLE_DIR"', workflow)

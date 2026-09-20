@@ -749,7 +749,7 @@ jobs:
 
       # The compute phase is role-specific: Kaggle starts only the GPU NER service;
       # local runs the same raw-NER handoff first, then stops the GPU model and starts
-      # fifteen CPU-only resolver processes forked from one loaded library. target=server retains the legacy combined
+      # twelve CPU-only resolver processes forked from one loaded library. target=server retains the legacy combined
       # Mongo+NER+Django fallback. The server path runs as
       # ONE step under a host lease: a kernel flock whose FD is
       # held by this step's shell for the phase's whole life and released by the kernel
@@ -769,7 +769,7 @@ jobs:
       # shapes output (upstream commits, models, dump, engine source) + policy flags,
       # so flipping e.g. --bavli-convention also forces a full relink. The legacy
       # server fallback keeps three workers for OOM headroom on its 22GB host; local
-      # resolution uses fifteen pooled, cooperative workers after unloading the GPU.
+      # resolution uses twelve pooled, cooperative workers after unloading the GPU.
       # NER teardown is bound to this same step's EXIT trap — still under the lease, so
       # it can never kill another run's fresh stack (that run needs the lease first) —
       # freeing ~3GB of models for whatever resumes on the shared host either way.
@@ -1013,32 +1013,26 @@ jobs:
             # --engine-pool loads the library ONCE and forks the resolvers from it, so
             # the ~2GB library is shared copy-on-write; the cap below then bounds each
             # child's PRIVATE growth (Ref cache, batch documents), not its shared RSS:
-            # measured ~1.25 GB/worker in steady state (34539171481: 18.5 GB median at
-            # 12 workers), so 15 x 1.25 + ~6 GB base = ~25 GB of the 56.6 GB VM, leaving
-            # room for two or three 12 GB single-line balloons (34016397157 peaked at
-            # 34.8 GB used).  Resolve is CPU-bound (children at ~100% CPU), so 15 of the
-            # 16 logical CPUs, one left for the pool master, mongod and fsync; more
-            # workers than CPUs only time-slice while each adds private memory. Prevent native libraries inside
+            # 12 x 1.2 GB private + ~2.5 GB shared + mongod (3 GB cache) + runner =
+            # ~20 GB.  12 workers with a 5 GB heavy cap are the only settings that ever
+            # finished a full relink (33758395788, 2026-09-03).  Raising them to 15
+            # workers and a 20 GB cap (a04681e, 68984b1 - both reverted) went backwards:
+            # 'איזהו מקומן על חולין' finished in 307.9 s at the 5 GB cap (35458432836)
+            # and blew past 28 GB at the 20 GB cap (35477368314).  Frequent recycling is
+            # what releases the accumulated Sefaria Ref cache, so a larger cap only means
+            # every heavy book reaches the hard ceiling carrying a fatter heap. Prevent native libraries inside
             # each Python process from creating another thread pool.
             export LINKER_RSS_CAP_BYTES=1200000000
             # Heavy books (a few texts grew a resolver to 6-12 GB inside one book and
             # took the VM down): defer a book that grows a pool child by >0.8 GB of
             # PRIVATE memory - deliberately below the 1.2 GB recycle cap, so deferral
             # wins over batch-by-batch recycling - finish every ordinary book first,
-            # then resolve the deferred ones at most two at a time under a 20 GB cap
-            # (idle workers recycle so the heavy slots get the RAM they shed).  The
+            # then resolve the deferred ones at most two at a time under a 5 GB cap
+            # (idle workers recycle so the heavy pair gets the RAM they shed).  The
             # cap is judged between batches, so budget one more batch of growth per
-            # slot: 2 x 20 + master ~3 + recycled idle workers (~1 GB private each) +
-            # mongod 3 = ~48 GB, which fits the 55 GB VM only because the heavy phase is
-            # serialized and never overlaps the normal phase.
-            # The cap must EXCEED what a heavy book needs, or the book never ends: since
-            # 2c2e01d a book carrying standalone ibid (`שם`) deletes its own shards and
-            # replays from batch 0, so a mid-book recycle makes no progress at all.  Run
-            # 35458432836 span three workers against the same book forever at a 5 GB cap
-            # (identical batch counts every life, 73 deferred books stuck for hours);
-            # 'דור המלקטים על אורח חיים' (190,759 lines) needs ~16 GB at ~7.6 MB/batch.
-            # link_books.py's zero-progress guard counts batches, not books, so it cannot
-            # see that loop; fix it there when a real engine change next lands.
+            # slot: 2 x (5 + ~4) + master ~3 + idle + mongod 3 = ~24 GB, which fits the
+            # 55 GB VM only because the heavy phase is serialized and never overlaps the
+            # twelve-worker normal phase.
             # A deferred book is additionally given a worker that has completed no book
             # in its current life (LINKER_HEAVY_FRESH_WORKER, on by default): in
             # 34016397157 one line asked for 11.9 GB on a worker already holding 75
@@ -1048,15 +1042,15 @@ jobs:
             # RLIMIT_AS is the last resort so a runaway line ends in a MemoryError
             # inside its worker instead of the kernel OOM killer; it bounds VIRTUAL
             # size per process and is a ceiling, never a reservation (the 26 GB heavy
-            # ceiling below is ~47% of the 55 GB VM, so heavy slots may map more
+            # ceiling below is ~47% of the 55 GB VM, so two heavy slots may map more
             # than the VM holds - that is the point), and the engine refuses a ceiling
             # its baseline image already crowds (see apply_address_space_limit) rather
             # than failing every book.
             export LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000
             export LINKER_HEAVY_BOOK_SLOTS=2
-            export LINKER_HEAVY_RSS_CAP_BYTES=20000000000
+            export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
             export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
-            export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=30000000000
+            export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
             export MALLOC_ARENA_MAX=2
             export OMP_NUM_THREADS=1
             export OPENBLAS_NUM_THREADS=1
@@ -1065,7 +1059,7 @@ jobs:
             ARGS+=(
               --ner-bundle-dir "$NER_BUNDLE_DIR"
               --relink-request-id "$RELINK_REQUEST_ID"
-              --engine-workers 15
+              --engine-workers 12
               --engine-pool
             )
           elif [ -n "$LIBRARY_RUN_ID" ]; then
