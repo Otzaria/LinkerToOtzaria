@@ -109,6 +109,22 @@ HEAVY_FRESH_GROWTH_BYTES = float(os.environ.get("LINKER_HEAVY_FRESH_GROWTH_BYTES
 # growth that let one ordinary book reach it.
 WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_WORKER_ADDRESS_SPACE_BYTES", "0")))
 HEAVY_WORKER_ADDRESS_SPACE_BYTES = int(float(os.environ.get("LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES", "0")))
+# Pool memory governor: the ceilings above are per process, so together they can
+# exhaust the host (36112302819 took the whole machine down). Below the soft floor
+# (MemAvailable) the largest worker is asked to drop its book; below the hard floor,
+# or after the grace, it is killed. 0 = a fraction of MemTotal.
+POOL_MEMORY_GOVERNOR = os.environ.get("LINKER_POOL_MEMORY_GOVERNOR", "1").strip().lower() \
+    not in ("0", "false", "no", "off", "")
+POOL_MEMORY_SOFT_FLOOR_BYTES = float(os.environ.get("LINKER_POOL_MEMORY_SOFT_FLOOR_BYTES", "0"))
+POOL_MEMORY_HARD_FLOOR_BYTES = float(os.environ.get("LINKER_POOL_MEMORY_HARD_FLOOR_BYTES", "0"))
+POOL_MEMORY_SOFT_FLOOR_FRACTION = 0.18
+POOL_MEMORY_HARD_FLOOR_FRACTION = 0.10
+POOL_MEMORY_MIN_VICTIM_BYTES = float(os.environ.get("LINKER_POOL_MEMORY_MIN_VICTIM_BYTES", 2e9))
+POOL_MEMORY_GRACE_SECONDS = float(os.environ.get("LINKER_POOL_MEMORY_GRACE_SECONDS", "20"))
+POOL_MEMORY_KILL_INTERVAL_SECONDS = 2.0
+# Heavy-phase memory retries continue while the book commits new batches (36072909683:
+# 1108 -> 1971 -> 6193); a second standstill in a row fails it. Hard cap below.
+MEMORY_RETRY_LIMIT = max(1, int(os.environ.get("LINKER_MEMORY_RETRY_LIMIT", "40")))
 NER_URL = "http://127.0.0.1:5051/recognize-entities"
 # Exit status a forked pool child uses to ask the warm master for a fresh image (see
 # run_pool): the equivalent of the standalone worker's self-exec, without reloading
@@ -369,6 +385,322 @@ def _recycle_process() -> None:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+# ── pool memory governor ──────────────────────────────────────────────────────────
+class HostMemoryPressure(BaseException):
+    """The governor asked this worker to drop its book.
+
+    BaseException so Sefaria's ``except Exception`` cannot swallow it; the book loop
+    handles it exactly like a MemoryError.
+    """
+
+
+MEMORY_CURRENT_DIR = "current"
+GOVERNOR_KILL_ERROR = "killed by the pool memory governor"
+SINGLE_HEAVY_MARKER = "heavy-one-at-a-time"
+_MEMORY_WINDOW = False
+_MEMORY_RECYCLE_REQUESTED = False
+# Set by ANY MemoryError or abort in this image, even one Sefaria swallows (a bare
+# ``except:`` there drops a citation silently): such an image commits nothing more.
+_IMAGE_TAINTED = False
+_TAINT_TOOL_ID = 3
+
+
+def _taint_on_raise(_code, _offset, exception):
+    global _IMAGE_TAINTED
+    if isinstance(exception, (MemoryError, HostMemoryPressure)):
+        _IMAGE_TAINTED = True
+
+
+def install_memory_taint_monitor() -> bool:
+    """Watch every raise in this process (sys.monitoring, Python 3.12+)."""
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is None:
+        return False
+    try:
+        monitoring.use_tool_id(_TAINT_TOOL_ID, "linker-memory-taint")
+    except ValueError:
+        return monitoring.get_tool(_TAINT_TOOL_ID) == "linker-memory-taint"
+    monitoring.register_callback(_TAINT_TOOL_ID, monitoring.events.RAISE, _taint_on_raise)
+    monitoring.set_events(_TAINT_TOOL_ID, monitoring.events.RAISE)
+    return True
+
+
+class TaintedImage(HostMemoryPressure):
+    """The commit gate's refusal (a swallowed MemoryError or abort in this image)."""
+
+
+def refuse_to_commit_after_memory_trouble() -> None:
+    """The commit gate: nothing computed after a MemoryError or abort is written."""
+    if _IMAGE_TAINTED:
+        raise TaintedImage(
+            "this worker image hit a MemoryError or a governor abort; it commits nothing more"
+        )
+
+
+def single_heavy_marker_path(run_dir: str) -> str:
+    return os.path.join(run_dir, MEMORY_DIR, SINGLE_HEAVY_MARKER)
+
+
+def single_heavy_mode(run_dir: str) -> bool:
+    """Heavy books run one at a time until the book the governor stopped is done
+    (else two giants would stop each other in turn)."""
+    try:
+        with open(single_heavy_marker_path(run_dir), encoding="ascii") as fh:
+            cid = fh.read().strip()
+    except OSError:
+        return False
+    return bool(cid) and not os.path.exists(os.path.join(run_dir, "done", cid))
+
+
+def enter_single_heavy_mode(run_dir: str, cid: str, log) -> None:
+    if single_heavy_mode(run_dir):
+        return
+    path = single_heavy_marker_path(run_dir)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = f"{path}.tmp-{os.getpid()}"
+        with open(temporary, "w", encoding="ascii") as fh:
+            fh.write(cid)
+        os.replace(temporary, path)
+    except OSError:
+        return
+    log("heavy phase: the memory governor had to stop a book; heavy books run one at a "
+        "time until it is done")
+
+
+def _on_memory_pressure(_signum, _frame):
+    """SIGUSR1: abort the book in progress, or recycle at the next safe point."""
+    global _MEMORY_RECYCLE_REQUESTED, _IMAGE_TAINTED
+    _MEMORY_RECYCLE_REQUESTED = True
+    if _MEMORY_WINDOW:
+        _IMAGE_TAINTED = True
+        raise HostMemoryPressure(
+            "host MemAvailable fell below the pool memory floor; the pool memory "
+            "governor stopped this book"
+        )
+
+
+def install_memory_pressure_handler() -> None:
+    """Pool children only: the master is the one process that never resolves."""
+    import signal
+    signal.signal(signal.SIGUSR1, _on_memory_pressure)
+    signal.siginterrupt(signal.SIGUSR1, False)
+
+
+def current_book_path(run_dir: str, label: str) -> str:
+    return os.path.join(run_dir, MEMORY_DIR, MEMORY_CURRENT_DIR, label)
+
+
+@contextmanager
+def memory_pressure_window(run_dir: str, label: str, record: dict, log=None):
+    """While resolving a book: abortable, and the book is published for the master."""
+    import json as _json
+    global _MEMORY_WINDOW
+    path = current_book_path(run_dir, label)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = f"{path}.tmp-{os.getpid()}"
+        with open(temporary, "w", encoding="utf-8") as fh:
+            _json.dump(record, fh, ensure_ascii=False, sort_keys=True)
+        os.replace(temporary, path)
+    except Exception as error:
+        if log is not None:
+            log(f"pool memory governor: could not publish the current book ({error}); "
+                "a kill of this worker could not be accounted")
+    _MEMORY_WINDOW = True
+    try:
+        if _MEMORY_RECYCLE_REQUESTED:
+            raise HostMemoryPressure("the pool memory governor asked before the book began")
+        yield
+    finally:
+        # The published book stays until the book loop is done with it (its own
+        # failure accounting included), so a kill in between is still charged.
+        _MEMORY_WINDOW = False
+
+
+def close_memory_window() -> None:
+    """From here the book only assembles its shards: no abort may land."""
+    global _MEMORY_WINDOW
+    _MEMORY_WINDOW = False
+
+
+def read_current_book(run_dir: str, label: str):
+    """The book a (dead) worker had published on entering its window, or None."""
+    import json as _json
+    try:
+        with open(current_book_path(run_dir, label), encoding="utf-8") as fh:
+            value = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if not all(isinstance(value.get(key), str)
+               for key in ("claim_id", "source_name", "canonical_he_title")):
+        return None
+    return value
+
+
+def clear_current_book(run_dir: str, label: str) -> None:
+    try:
+        os.remove(current_book_path(run_dir, label))
+    except OSError:
+        pass
+
+
+def mem_available_bytes():
+    """MemAvailable of this (guest) kernel, or None where /proc/meminfo is absent."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def mem_total_bytes():
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def owned_bytes_from_smaps(text: str) -> int:
+    """Private resident plus swapped bytes from an smaps_rollup text."""
+    total = 0
+    for line in text.splitlines():
+        if line.startswith(("Private_Clean:", "Private_Dirty:", "SwapPss:")):
+            total += int(line.split()[1]) * 1024
+    return total
+
+
+def process_private_bytes(pid: int):
+    """What another process (a pool child) owns, swap included, or None if gone."""
+    try:
+        with open(f"/proc/{int(pid)}/smaps_rollup", encoding="ascii") as fh:
+            return owned_bytes_from_smaps(fh.read())
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def pool_memory_floors(total=None) -> tuple:
+    """(soft, hard) MemAvailable floors in bytes; explicit env wins over fractions."""
+    if total is None:
+        total = mem_total_bytes() or 0
+    soft = POOL_MEMORY_SOFT_FLOOR_BYTES or total * POOL_MEMORY_SOFT_FLOOR_FRACTION
+    hard = POOL_MEMORY_HARD_FLOOR_BYTES or total * POOL_MEMORY_HARD_FLOOR_FRACTION
+    return float(soft), float(min(hard, soft))
+
+
+class PoolMemoryGovernor:
+    """Once per pool poll: ask the largest worker to drop its book (one request at a
+    time), kill it after the grace or below the hard floor. Readers are injectable."""
+
+    def __init__(self, *, log, soft_floor, hard_floor, min_victim=POOL_MEMORY_MIN_VICTIM_BYTES,
+                 grace=POOL_MEMORY_GRACE_SECONDS, kill_interval=POOL_MEMORY_KILL_INTERVAL_SECONDS,
+                 read_available=mem_available_bytes, read_private=process_private_bytes,
+                 send_signal=os.kill):
+        self.log = log
+        self.soft_floor = float(soft_floor)
+        self.hard_floor = float(hard_floor)
+        self.min_victim = float(min_victim)
+        self.grace = float(grace)
+        self.kill_interval = float(kill_interval)
+        self.read_available = read_available
+        self.read_private = read_private
+        self.send_signal = send_signal
+        self.asked = {}      # pid -> unix time the child was asked
+        self.reasked = set()
+        self.killed = {}     # pid -> private bytes at the kill
+        self.last_kill = 0.0
+        self.last_idle_note = 0.0
+
+    def forget(self, pid: int) -> None:
+        self.asked.pop(pid, None)
+        self.reasked.discard(pid)
+
+    def was_killed(self, pid: int):
+        """Private bytes the governor killed ``pid`` at, or None if it did not."""
+        return self.killed.pop(pid, None)
+
+    def tick(self, active: dict, now: float) -> None:
+        import signal
+        available = self.read_available()
+        if available is None or available >= self.soft_floor:
+            if available is not None and available >= self.soft_floor * 1.25:
+                self.asked.clear()  # recovered: a later dip starts with a fresh grace
+                self.reasked.clear()
+            return
+        if now - self.last_kill < self.kill_interval:
+            return  # let the last kill free its memory first
+        sizes = []
+        for label, (pid, _spawned) in active.items():
+            if pid in self.killed:
+                continue
+            size = self.read_private(pid)
+            if size is not None and size >= self.min_victim:
+                sizes.append((size, label, pid))
+        if not sizes:
+            if now - self.last_idle_note >= 60:
+                self.last_idle_note = now
+                self.log(
+                    f"pool memory governor: MemAvailable {format_bytes_gb(available)} is "
+                    f"below the {format_bytes_gb(self.soft_floor)} floor but no worker owns "
+                    f"{format_bytes_gb(self.min_victim)}; not intervening"
+                )
+            return
+        sizes.sort(reverse=True)
+        size, label, pid = sizes[0]
+        overdue = pid in self.asked and now - self.asked[pid] >= self.grace
+        if available < self.hard_floor or overdue:
+            reason = ("below the hard floor " + format_bytes_gb(self.hard_floor)
+                      if available < self.hard_floor else
+                      f"still alive {now - self.asked[pid]:.0f}s after being asked")
+            self.log(
+                f"pool memory governor: MemAvailable {format_bytes_gb(available)} {reason}; "
+                f"killing {label} pid={pid} ({format_bytes_gb(size)} private)"
+            )
+            try:
+                self.send_signal(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            self.killed[pid] = int(size)
+            self.last_kill = now
+            return
+        live = {child_pid for child_pid, _spawned in active.values()}
+        pending = [asked_pid for asked_pid, asked_at in self.asked.items()
+                   if asked_pid in live and now - asked_at < self.grace]
+        if pending:
+            # One request at a time; repeat it once at half the grace in case the
+            # abort landed where Python swallows it (a finalizer).
+            for asked_pid in pending:
+                if (asked_pid not in self.reasked
+                        and now - self.asked[asked_pid] >= self.grace / 2):
+                    self.reasked.add(asked_pid)
+                    try:
+                        self.send_signal(asked_pid, signal.SIGUSR1)
+                    except ProcessLookupError:
+                        pass
+            return
+        if pid in self.asked:
+            return
+        self.log(
+            f"pool memory governor: MemAvailable {format_bytes_gb(available)} below the "
+            f"{format_bytes_gb(self.soft_floor)} floor; asking {label} pid={pid} "
+            f"({format_bytes_gb(size)} private) to give up its book"
+        )
+        try:
+            self.send_signal(pid, signal.SIGUSR1)
+        except ProcessLookupError:
+            return
+        self.asked[pid] = now
+
+
 def _os_thread_count():
     """Threads the KERNEL sees — the number CPython itself judges at fork(), which
     counts threads started by native libraries that ``threading`` never hears about."""
@@ -402,7 +734,8 @@ def fork_thread_inventory() -> str:
 
 
 def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
-             restart_limit=2, stall_seconds=1800.0, log=print, poll_seconds=1.0) -> int:
+             restart_limit=2, stall_seconds=1800.0, log=print, poll_seconds=1.0,
+             governor=None) -> int:
     """Fork ``worker_count`` resolver children from this already-loaded process.
 
     The master keeps the loaded Sefaria library, resolver tries and verified NER
@@ -445,6 +778,7 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
             os.remove(os.path.join(heartbeat_dir, label))
         except FileNotFoundError:
             pass
+        clear_current_book(run_dir, label)  # never charge a new life for an old book
         sys.stdout.flush()
         sys.stderr.flush()
         try:
@@ -513,13 +847,13 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
                 pid, status = os.waitpid(child_pid, os.WNOHANG)
             except ChildProcessError:
                 del active[label]
-                return label, 1
+                return label, 1, child_pid
             if pid == 0:
                 continue
             del active[label]
             if os.WIFSIGNALED(status):
-                return label, -os.WTERMSIG(status)
-            return label, os.WEXITSTATUS(status)
+                return label, -os.WTERMSIG(status), child_pid
+            return label, os.WEXITSTATUS(status), child_pid
         return None
 
     def on_term(_signum, _frame):
@@ -528,6 +862,8 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
         signal_children(signal.SIGTERM)
 
     previous = signal.signal(signal.SIGTERM, on_term)
+    # Children inherit SIG_IGN until they install the governor's handler.
+    previous_usr1 = signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     # State, once, what else is alive at the moment of the fork.  Two warnings in every
     # relink log are about exactly this and neither says which threads it means; the
     # inventory is what makes the next post-mortem able to answer it (see
@@ -544,9 +880,21 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
             touch_master()
             reaped = reap_nonblocking()
             if reaped is not None:
-                label, code = reaped
+                label, code, pid = reaped
+                killed_at = None
+                if governor is not None:
+                    governor.forget(pid)
+                    killed_at = governor.was_killed(pid)
                 if terminating:
                     codes[label].append(code)
+                    continue
+                if killed_at is not None:
+                    # A governor kill is a recycle, not a crash.
+                    try:
+                        account_governor_kill(run_dir, label, killed_at, log)
+                    except Exception as error:
+                        log(f"pool memory governor: accounting for {label} failed: {error}")
+                    fork_child(label)
                     continue
                 if code == RECYCLE_EXIT_CODE:
                     log(f"pool: {label} recycled; forking a fresh child from the warm master")
@@ -580,9 +928,16 @@ def run_pool(worker_count, run_dir, master_label, child_setup, child_body, *,
                         os.kill(pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+            if governor is not None:
+                try:
+                    governor.tick(active, now)
+                except Exception as error:  # a governor bug must never stop the pool
+                    log(f"pool memory governor: tick failed: {error}")
             time.sleep(poll_seconds)
     finally:
         signal.signal(signal.SIGTERM, previous)
+        if previous_usr1 is not None:
+            signal.signal(signal.SIGUSR1, previous_usr1)
         signal_children(signal.SIGTERM)
         deadline = time.time() + float(os.environ.get("LINKER_PROCESS_TERM_GRACE", "15"))
         while active and time.time() < deadline:
@@ -901,17 +1256,40 @@ class BookDeferred(Exception):
         self.batches = batches
 
 
-def is_memory_error(error: BaseException) -> bool:
-    """True if ``error`` is, or was caused by, a MemoryError (process_batch wraps
-    per-line failures in RuntimeError with the original as __cause__)."""
+def _memory_exception(error: BaseException):
+    """The MemoryError (or governor abort) in ``error``'s cause chain, or None."""
     seen = set()
     current = error
     while current is not None and id(current) not in seen:
-        if isinstance(current, MemoryError):
-            return True
+        if isinstance(current, (MemoryError, HostMemoryPressure)):
+            return current
         seen.add(id(current))
         current = current.__cause__ or current.__context__
-    return False
+    return None
+
+
+def is_memory_error(error: BaseException) -> bool:
+    """True if ``error`` is, or was caused by, a MemoryError or a governor abort."""
+    return _memory_exception(error) is not None
+
+
+def memory_error_site(error: BaseException, depth: int = 5) -> list:
+    """Innermost ``dir/file.py:function:line`` frames of the memory exception."""
+    import traceback
+    try:  # runs right after a MemoryError: never let it raise a second one
+        memory = _memory_exception(error)
+        if memory is None or memory.__traceback__ is None:
+            return []
+        # No source lookup; the site is the interrupted frame, not the signal handler.
+        frames = [(frame.f_code, lineno) for frame, lineno in traceback.walk_tb(memory.__traceback__)
+                  if frame.f_code.co_name != "_on_memory_pressure"][-max(1, int(depth)):]
+        site = []
+        for code, lineno in frames:
+            parts = code.co_filename.replace("\\", "/").split("/")
+            site.append(f"{'/'.join(parts[-2:])}:{code.co_name}:{lineno}")
+        return site
+    except BaseException:
+        return []
 
 
 def virtual_bytes() -> int:
@@ -1015,11 +1393,9 @@ _MEMORY_LINE_RE = re.compile(r"\bline (\d+) failed to link\b")
 
 
 def memory_error_line_number(message: str):
-    """The snapshot line a wrapped per-line MemoryError names, or None.
+    """The line a wrapped MemoryError names, or None.
 
-    process_batch reports `line 43 failed to link: MemoryError:`; naming that line in
-    the requeue/failure lines is the difference between "a book is heavy" and "one
-    row of this book is".
+    On the raw-NER path this is the batch's FIRST line, not the offending row.
     """
     found = _MEMORY_LINE_RE.search(message or "")
     return int(found.group(1)) if found else None
@@ -1081,37 +1457,74 @@ def count_memory_events(run_dir: str, event: str) -> int:
     return sum(1 for item in read_memory_journal(run_dir) if item.get("event") == event)
 
 
-def requeue_marker_path(run_dir: str, cid: str) -> str:
-    return os.path.join(run_dir, MEMORY_DIR, REQUEUE_MARKER_DIR, cid)
+def requeue_marker_path(run_dir: str, cid: str, attempt: int = 1) -> str:
+    """Marker of a book's ``attempt``-th memory retry (the first keeps its old name)."""
+    name = cid if attempt <= 1 else f"{cid}.{int(attempt)}"
+    return os.path.join(run_dir, MEMORY_DIR, REQUEUE_MARKER_DIR, name)
 
 
-def claim_memory_requeue(run_dir: str, cid: str, record: dict):
-    """Spend this book's single requeue-after-MemoryError budget.
-
-    Returns ``(True, record)`` to the caller that won the budget - it releases the
-    book and recycles, and the book (still lacking a done marker) is retried on a
-    fresh worker - and ``(False, first_record)`` to every later caller, which must
-    fail the book so the run stops rather than looping on it.  O_EXCL creation is the
-    whole gate: two workers that MemoryError on the same book in the same second
-    cannot both requeue it.  A record torn by a crash between create and write reads
-    back empty, which fails the book (safe) instead of granting a second budget.
-    """
+def read_memory_retries(run_dir: str, cid: str) -> list:
+    """Every retry this book was granted, oldest first; ``{}`` for a torn marker."""
     import json as _json
-    path = requeue_marker_path(run_dir, cid)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
+    records = []
+    attempt = 1
+    while True:
+        path = requeue_marker_path(run_dir, cid, attempt)
+        if not os.path.exists(path):
+            return records
         try:
             with open(path, encoding="utf-8") as stream:
                 stored = _json.load(stream)
         except (OSError, ValueError):
-            return False, {}
-        return False, stored if isinstance(stored, dict) else {}
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stored = {}
+        records.append(stored if isinstance(stored, dict) else {})
+        attempt += 1
+
+
+def _made_progress(before: dict, after: dict) -> bool:
+    earlier, later = before.get("committed"), after.get("committed")
+    return (type(earlier) is int and type(later) is int and later > earlier)
+
+
+def _standstill(before: dict, after: dict) -> bool:
+    """No new batch, by the book's own doing (a governor stop is outside pressure)."""
+    return not after.get("governor") and not _made_progress(before, after)
+
+
+def claim_memory_requeue(run_dir: str, cid: str, record: dict):
+    """(granted, earlier retries) for a heavy-phase memory failure.
+
+    Granted while ``record["committed"]`` rises; one standstill is forgiven, a second
+    in a row is not. O_EXCL numbered markers; a torn marker fails the book.
+    """
+    import json as _json
+    earlier = read_memory_retries(run_dir, cid)
+    if earlier:
+        if len(earlier) >= MEMORY_RETRY_LIMIT:
+            return False, earlier
+        if not earlier[-1]:
+            return False, earlier  # torn: never grant on a record we cannot read
+        if _standstill(earlier[-1], record):
+            standstill_before = len(earlier) >= 2 and _standstill(earlier[-2], earlier[-1])
+            if standstill_before or "committed" not in earlier[-1]:
+                return False, earlier
+    path = requeue_marker_path(run_dir, cid, len(earlier) + 1)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Written aside, then linked: exclusive like O_EXCL, and never torn by a kill.
+    temporary = f"{path}.tmp-{os.getpid()}"
+    with open(temporary, "w", encoding="utf-8") as stream:
         _json.dump(record, stream, ensure_ascii=False, sort_keys=True)
         stream.write("\n")
-    return True, dict(record)
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        return False, read_memory_retries(run_dir, cid)
+    finally:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+    return True, earlier
 
 
 def current_memory_limits(heavy: bool) -> dict:
@@ -1128,49 +1541,134 @@ def current_memory_limits(heavy: bool) -> dict:
 
 
 def _memory_attempt_phrase(record: dict) -> str:
-    line_number = record.get("line")
-    where = "in one line" if line_number is None else f"in one line (line {line_number})"
+    """One attempt for the log: growth this life, batch, worker, progress, site."""
     worker = record.get("worker") or "an unknown worker"
+    if "growth_bytes" not in record:
+        return f"figures unavailable (journal record incomplete) on {worker}"
+    line_number = record.get("line")
+    where = "" if line_number is None else f" in the batch from line {line_number}"
     processed = record.get("processed")
     after = "" if processed is None else \
         f" after {processed} book{'' if processed == 1 else 's'}"
-    if "growth_bytes" not in record:
-        return f"figures unavailable (journal record incomplete) on {worker}"
-    return f"grew {format_bytes_gb(record['growth_bytes'])} {where} on {worker}{after}"
+    committed = record.get("committed")
+    shards = "" if type(committed) is not int else f", {committed} batch(es) committed"
+    site = record.get("site") or []
+    at = "" if not site else f", at {site[-1]}"
+    size = format_bytes_gb(record["growth_bytes"])
+    what = (f"killed holding {size}" if record.get("error") == GOVERNOR_KILL_ERROR
+            else f"grew {size} this life")
+    return f"{what}{where} on {worker}{after}{shards}{at}"
 
 
-def format_memory_requeue_line(*, bk, growth_bytes, worker, processed, line_number=None) -> str:
-    """The one line an operator needs when a book is given its single retry."""
-    return "memory: requeued {}/{!r} once after MemoryError ({}; retrying on a fresh worker)".format(
-        bk.source_name, bk.canonical_he_title,
+def format_memory_requeue_line(*, bk, growth_bytes, worker, processed, line_number=None,
+                               retry=1, committed=None, site=None) -> str:
+    """The one line an operator needs when a book is given another attempt."""
+    return "memory: requeued {}/{!r} after MemoryError, retry {} ({}; retrying on a fresh worker)".format(
+        bk.source_name, bk.canonical_he_title, int(retry),
         _memory_attempt_phrase({
-            "growth_bytes": growth_bytes, "worker": worker,
-            "processed": processed, "line": line_number,
+            "growth_bytes": growth_bytes, "worker": worker, "processed": processed,
+            "line": line_number, "committed": committed, "site": site or [],
         }),
     )
 
 
-def format_memory_failure(*, bk, first: dict, second: dict, limits: dict) -> str:
-    """Why the run is being failed: the book, BOTH attempts, and the live ceilings.
-
-    A run that stops on one book must say what it already tried.  Relink 34016397157
-    printed only `line 43 failed to link: MemoryError:` and the next run linked the
-    same book in 2.3 s - the growth figures and the worker's book count are what
-    separate "this book is impossible" from "that worker was full", so each attempt
-    reports how many books its worker had already completed (with the fresh-worker
-    rule on, the retry's count is 0).
-    """
+def format_memory_failure(*, bk, earlier: list, last: dict, limits: dict) -> str:
+    """One line: the book, every attempt and the live ceilings."""
+    attempts = list(earlier) + [last]
+    listed = "; ".join(
+        f"attempt {index} {_memory_attempt_phrase(item)}"
+        for index, item in enumerate(attempts, start=1)
+    )
     return (
-        "{}/{!r}: MemoryError twice - the book had already spent its single requeue "
-        "(attempt 1 {}; attempt 2 {}); limits: address space {}, recycle cap {}, "
-        "heavy deferral threshold {}".format(
-            bk.source_name, bk.canonical_he_title,
-            _memory_attempt_phrase(first), _memory_attempt_phrase(second),
+        "{}/{!r}: MemoryError on {} attempt(s), stopped because it no longer made "
+        "progress or reached the retry limit {} ({}); limits: address space {}, "
+        "recycle cap {}, heavy deferral threshold {}".format(
+            bk.source_name, bk.canonical_he_title, len(attempts), MEMORY_RETRY_LIMIT,
+            listed,
             limits.get("address_space_bytes", 0) or "unlimited",
             limits.get("recycle_cap_bytes", 0),
             limits.get("heavy_growth_bytes", 0),
         )
     )
+
+
+def write_failed_book(run_dir: str, cid: str, bk: BookKey, note=None, mark_done_too=True) -> None:
+    """`failed` (the driver will not advance) plus `done` (no retry in this run)."""
+    import json as _json
+    os.makedirs(os.path.join(run_dir, "failed"), exist_ok=True)
+    with open(os.path.join(run_dir, "failed", cid), "w", encoding="utf-8") as ff:
+        _json.dump({**bk.to_dict(), **({"note": note} if note else {})}, ff, ensure_ascii=False)
+    if mark_done_too:
+        mark_done(run_dir, cid)
+
+
+def account_governor_kill(run_dir: str, label: str, private_bytes_at_kill: int, log) -> None:
+    """Account a killed worker's book as the worker would have (defer/retry/fail),
+    so a kill can never become an endless retry."""
+    current = read_current_book(run_dir, label)
+    clear_current_book(run_dir, label)
+    base = {"event": "killed-by-memory-governor", "worker": label,
+            "growth_bytes": int(private_bytes_at_kill)}
+    if current is None:
+        journal_memory_event(run_dir, base)
+        return
+    cid = current["claim_id"]
+    bk = BookKey(current["source_name"], current["canonical_he_title"])
+    journal_memory_event(run_dir, {**base, "claim_id": cid,
+                                   "source_name": bk.source_name,
+                                   "canonical_he_title": bk.canonical_he_title})
+    import fcntl
+    lock_path = os.path.join(run_dir, "claim", f".{cid}.lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            peer_holds = False
+        except BlockingIOError:
+            peer_holds = True  # already resuming: charge it all the same, never mark done
+        _account_killed_book(run_dir, label, cid, bk, current, private_bytes_at_kill, log,
+                             peer_holds)
+    finally:
+        os.close(lock_fd)
+
+
+def _account_killed_book(run_dir, label, cid, bk, current, private_bytes_at_kill, log,
+                         peer_holds=False):
+    if os.path.exists(os.path.join(run_dir, "done", cid)):
+        return
+    heavy = bool(current.get("heavy"))
+    attempt = {
+        "claim_id": cid, "source_name": bk.source_name,
+        "canonical_he_title": bk.canonical_he_title, "worker": label,
+        "processed": current.get("processed"), "growth_bytes": int(private_bytes_at_kill),
+        "line": None, "phase": "heavy" if heavy else "normal",
+        "error": GOVERNOR_KILL_ERROR, "governor": not current.get("exclusive"),
+        "committed": committed_shard_count(os.path.join(run_dir, "checkpoints", cid)),
+        "limits": current.get("limits") or {},
+    }
+    if not heavy:
+        journal_memory_event(run_dir, {"event": "deferred-after-memoryerror", **attempt})
+        mark_heavy(run_dir, cid, bk, attempt["growth_bytes"], "killed by the pool memory governor")
+        log(f"pool memory governor: deferred {bk.source_name}/{bk.canonical_he_title!r} "
+            "to the heavy phase")
+        return
+    enter_single_heavy_mode(run_dir, cid, log)
+    won, earlier = claim_memory_requeue(run_dir, cid, attempt)
+    if won:
+        journal_memory_event(run_dir, {"event": "requeued-after-memoryerror", **attempt})
+        log(format_memory_requeue_line(
+            bk=bk, growth_bytes=attempt["growth_bytes"], worker=label,
+            processed=attempt["processed"], retry=len(earlier) + 1,
+            committed=attempt["committed"],
+        ))
+        return
+    journal_memory_event(run_dir, {"event": "failed-after-requeue", **attempt})
+    note = format_memory_failure(bk=bk, earlier=earlier, last=attempt, limits=attempt["limits"])
+    write_failed_book(run_dir, cid, bk, note, mark_done_too=not peer_holds)
+    log(f"ERROR {bk.canonical_he_title!r}: {note}")
 
 
 def partition_pending(books, run_dir: str):
@@ -1208,9 +1706,10 @@ class HeavySlot:
 
     flock is released by the kernel on any death, so a slot can never leak."""
 
-    def __init__(self, fd: int, path: str):
+    def __init__(self, fd: int, path: str, extra_fds=()):
         self.fd = fd
         self.path = path
+        self.extra_fds = list(extra_fds)
 
     @classmethod
     def acquire(cls, run_dir: str, slots: int):
@@ -1228,7 +1727,33 @@ class HeavySlot:
             return cls(fd, path)
         return None
 
+    @classmethod
+    def acquire_all(cls, run_dir: str, slots: int):
+        """Every slot or none: this book resolves with no other heavy book beside it."""
+        import fcntl
+        root = os.path.join(run_dir, "heavy-slots")
+        os.makedirs(root, exist_ok=True)
+        held = []
+        for index in range(slots):
+            path = os.path.join(root, f"{index:02d}.lock")
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                for other in held:
+                    os.close(other)
+                return None
+            held.append(fd)
+        return cls(held[0], os.path.join(root, "00.lock"), held[1:])
+
     def release(self) -> None:
+        for fd in self.extra_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.extra_fds = []
         if self.fd is not None:
             try:
                 os.close(self.fd)   # closing drops the flock
@@ -1880,12 +2405,15 @@ def process_book_checkpointed(
                 ibid_context=ibid_context,
             )
             write_started = time.perf_counter()
+            refuse_to_commit_after_memory_trouble()
             write_artifact(shard, records)
             if stateful_ibid:
                 # Written after the shard, so a sidecar never describes absent records.
-                write_ibid_state(
-                    shard, ibid_context.state(bk, i, batch, shard_digest(shard))
-                )
+                state = ibid_context.state(bk, i, batch, shard_digest(shard))
+                if _IMAGE_TAINTED:
+                    remove_artifact(shard)
+                    refuse_to_commit_after_memory_trouble()
+                write_ibid_state(shard, state)
             write_done = time.perf_counter()
         finally:
             if batch_claim is not None:
@@ -1932,6 +2460,8 @@ def process_book_checkpointed(
             on_recycle(current_rss, batches_this_life)
             raise RuntimeError("worker recycle callback returned unexpectedly")
 
+    refuse_to_commit_after_memory_trouble()
+    close_memory_window()
     if cooperative and any(not os.path.isfile(path) for path in shard_paths):
         raise BookWorkInProgress
     records = list(reused_records)
@@ -2265,6 +2795,8 @@ def main():
             stream.write(_json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+    # Before the library load: pool children inherit the monitor and any taint.
+    install_memory_taint_monitor()
     import django
     django.setup()
     quiet_sefaria_linker_logs()
@@ -2359,6 +2891,8 @@ def main():
         # Idle-recycle decisions are relative to this life's baseline: an absolute
         # threshold below a fresh image's own footprint would recycle forever.
         life_baseline = worker_memory_bytes()
+        if not install_memory_taint_monitor():
+            log("memory: sys.monitoring unavailable; a swallowed MemoryError cannot be gated")
         applied = apply_address_space_limit(WORKER_ADDRESS_SPACE_BYTES, log)
         log(
             f"worker life: virtual size {virtual_bytes()}, address-space limit "
@@ -2424,6 +2958,8 @@ def main():
             `finally` is free to release again on the paths that reach it (these do
             not: exec/exit never returns).
             """
+            close_memory_window()  # no abort may interrupt the release below
+            clear_current_book(run, args.label)
             log(
                 f"{message} [life: {processed} book(s), "
                 f"{worker_memory_bytes() - life_baseline} private bytes above baseline]"
@@ -2450,6 +2986,8 @@ def main():
 
         processed = 0
         for bk in pending_books():
+            if _MEMORY_RECYCLE_REQUESTED or _IMAGE_TAINTED:
+                recycle_now("memory: recycling between books")
             cid = claim_id(bk)
             gate = gate_heavy_book(run, cid, heavy_phase)
             if gate == "skip":
@@ -2477,8 +3015,10 @@ def main():
                     )
             slot = None
             claim = None
+            exclusive = heavy and single_heavy_mode(run)
             if heavy:
-                slot = HeavySlot.acquire(run, HEAVY_BOOK_SLOTS)
+                slot = (HeavySlot.acquire_all(run, HEAVY_BOOK_SLOTS) if exclusive
+                        else HeavySlot.acquire(run, HEAVY_BOOK_SLOTS))
                 if slot is None:
                     # Every slot is busy; another heavy book (or a rescan) comes next.
                     # A pool child that idles here gives its accumulated PRIVATE memory
@@ -2560,7 +3100,15 @@ def main():
                             worker_heartbeat(),
                             claim.heartbeat() if claim is not None else None,
                         )
-                        with periodic_heartbeat(heartbeat):
+                        if _MEMORY_RECYCLE_REQUESTED:
+                            recycle_now("pool memory governor: recycling before the book",
+                                        claim, slot)
+                        window = {"claim_id": cid, **bk.to_dict(), "heavy": heavy,
+                                  "exclusive": exclusive,
+                                  "processed": processed,
+                                  "limits": current_memory_limits(heavy)}
+                        with periodic_heartbeat(heartbeat), \
+                                memory_pressure_window(run, args.label, window, log):
                             record_count, words = process_book_checkpointed(
                                 linker, bk, lines, skipped_log, heartbeat,
                                 checkpoint_dir, out_path, recycle_worker,
@@ -2585,14 +3133,27 @@ def main():
                         defer_book(bk, cid, deferred.growth_bytes,
                                    f"grew past the heavy threshold after {deferred.batches} batch(es)",
                                    claim)
-                    except Exception as e:
+                    except (Exception, HostMemoryPressure) as e:
                         detail = f"{type(e).__name__}: {e}"
                         fatal_memory = False
-                        if is_memory_error(e):
+                        if is_memory_error(e) or _IMAGE_TAINTED:
                             # The address-space ceiling caught a runaway line. Nothing of
                             # this image is trustworthy after MemoryError, so the worker
                             # goes either way; the question is where the book goes.
+                            site = memory_error_site(e)
+                            if site:
+                                log(f"memory: {bk.source_name}/{bk.canonical_he_title!r} "
+                                    f"ran out in {' > '.join(site)}")
+                            # Stopped by the governor while another heavy book ran beside it:
+                            # outside pressure, not this book's own standstill.
+                            governor_caused = _MEMORY_RECYCLE_REQUESTED and not exclusive
+                            if heavy and _MEMORY_RECYCLE_REQUESTED:
+                                enter_single_heavy_mode(run, cid, log)
                             attempt = {
+                                "committed": committed_shard_count(checkpoint_dir),
+                                "governor": governor_caused,
+                                "asked_by_governor": _MEMORY_RECYCLE_REQUESTED,
+                                "site": site,
                                 "claim_id": cid,
                                 "source_name": bk.source_name,
                                 "canonical_he_title": bk.canonical_he_title,
@@ -2613,28 +3174,24 @@ def main():
                                 journal_memory_event(run, {"event": "deferred-after-memoryerror",
                                                            **attempt})
                                 defer_book(bk, cid, attempt["growth_bytes"], detail, claim)
-                            won, first = claim_memory_requeue(run, cid, attempt)
+                            won, earlier = claim_memory_requeue(run, cid, attempt)
                             if won:
-                                # Exactly once per book: release it undone and unclaimed and
-                                # shed this image.  The heavy gate above then guarantees the
-                                # retry runs on a worker with nothing accumulated - the whole
-                                # difference between the 8-hour failure of 34016397157 and the
-                                # 2.3 s completion of the same book in 34021656701.
+                                # Undone and unclaimed: resumes from its shards on a fresh worker.
                                 journal_memory_event(run, {"event": "requeued-after-memoryerror",
                                                            **attempt})
                                 recycle_now(
                                     format_memory_requeue_line(
                                         bk=bk, growth_bytes=attempt["growth_bytes"],
                                         worker=args.label, processed=processed,
-                                        line_number=attempt["line"],
+                                        line_number=attempt["line"], retry=len(earlier) + 1,
+                                        committed=attempt["committed"], site=site,
                                     ),
                                     claim, slot,
                                 )
-                            # The budget was already spent on this book: fail the run, and
-                            # say what both attempts cost and under which ceilings.
+                            # No more progress to buy: fail the run.
                             journal_memory_event(run, {"event": "failed-after-requeue", **attempt})
                             detail = format_memory_failure(
-                                bk=bk, first=first, second=attempt, limits=attempt["limits"],
+                                bk=bk, earlier=earlier, last=attempt, limits=attempt["limits"],
                             )
                             fatal_memory = True
                         if not fatal_memory and precomputed is None and ner_indices and not ner_alive():
@@ -2655,11 +3212,10 @@ def main():
                         # loop guard). Content = the book_key (cid is not reversible) plus, for
                         # a memory failure, the note the driver quotes in its own error: the
                         # ##[error] a human reads is the driver's, not this line.
-                        import json as _json
-                        with open(os.path.join(run, "failed", cid), "w", encoding="utf-8") as ff:
-                            _json.dump({**bk.to_dict(), **({"note": detail} if fatal_memory else {})},
-                                       ff, ensure_ascii=False)
-                        mark_done(run, cid)
+                        write_failed_book(run, cid, bk, detail if fatal_memory else None)
+                        if fatal_memory:
+                            # Exit before Python frees the exploded object graph.
+                            recycle_now("memory: recycling after a failed book", claim, slot)
                         if claim is not None:
                             claim.release()
                         break
@@ -2705,6 +3261,10 @@ def main():
                     claim.release()
                 if slot is not None:
                     slot.release()
+                clear_current_book(run, args.label)
+
+            if _MEMORY_RECYCLE_REQUESTED or _IMAGE_TAINTED:
+                recycle_now("memory: recycling between books")
 
             # Self-recycle BETWEEN books (never mid-book): the Ref cache grows across books,
             # so releasing it here reclaims memory without abandoning a claimed, half-linked book.
@@ -2755,14 +3315,25 @@ def main():
             nonlocal con, heartbeat_path
             args.label = label
             con, heartbeat_path = prepare_pool_child(args.snapshot, run, label)
+            install_memory_pressure_handler()
             worker_heartbeat()
 
+        governor = None
+        if POOL_MEMORY_GOVERNOR and mem_available_bytes() is not None:
+            soft, hard = pool_memory_floors()
+            governor = PoolMemoryGovernor(log=log, soft_floor=soft, hard_floor=hard)
+            log(f"pool memory governor: soft floor {format_bytes_gb(soft)}, hard floor "
+                f"{format_bytes_gb(hard)} MemAvailable, victims from "
+                f"{format_bytes_gb(POOL_MEMORY_MIN_VICTIM_BYTES)} private, grace "
+                f"{POOL_MEMORY_GRACE_SECONDS:.0f}s")
+        else:
+            log("pool memory governor: off")
         log(f"pool master: forking {args.pool_workers} resolver child(ren) from the loaded library")
         code = run_pool(
             args.pool_workers, run, args.label, _child_setup, _worker_loop,
             restart_limit=max(0, int(os.environ.get("LINKER_POOL_RESTART_LIMIT", "2"))),
             stall_seconds=float(os.environ.get("LINKER_POOL_STALL_SECONDS", "1800")),
-            log=log,
+            log=log, governor=governor,
         )
         worker_heartbeat()
         sys.exit(code)

@@ -437,6 +437,25 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("LINKER_HEAVY_BOOK_GROWTH_BYTES=800000000", workflow)
         self.assertIn("LINKER_HEAVY_RSS_CAP_BYTES=5000000000", workflow)
         self.assertIn("LINKER_WORKER_ADDRESS_SPACE_BYTES=", workflow)
+        # Host-wide guard: without it 36112302819 took the whole host down.
+        self.assertIn("export LINKER_POOL_MEMORY_SOFT_FLOOR_BYTES=10000000000", workflow)
+        self.assertIn("export LINKER_POOL_MEMORY_HARD_FLOOR_BYTES=6000000000", workflow)
+        self.assertNotIn("LINKER_POOL_MEMORY_GOVERNOR=0", workflow)
+        # The compute step only: the separate CPU resolve job keeps a seed per process.
+        self.assertEqual(workflow.count('echo "engine PYTHONHASHSEED=$ENGINE_HASH_SEED"'), 1)
+        self.assertEqual(workflow.count(
+            'PYTHONHASHSEED="$ENGINE_HASH_SEED" "$SEF_PROJECT/.venv/bin/python" '
+            'src/incremental.py "${ARGS[@]}"'), 1)
+        packer = (Path(__file__).parents[1] / "ci/pack_and_publish.sh").read_text(encoding="utf-8")
+        self.assertIn("--exclude='*.tmp' --exclude='*.tmp-*'", packer)
+        engine = (Path(__file__).parents[1] / "src/link_books.py").read_text(encoding="utf-8")
+        self.assertIn("except (Exception, HostMemoryPressure) as e:", engine)
+        self.assertIn("memory_pressure_window(run, args.label, window, log)", engine)
+        self.assertIn("install_memory_taint_monitor()", engine)
+        self.assertIn("HeavySlot.acquire_all(run, HEAVY_BOOK_SLOTS) if exclusive", engine)
+        self.assertIn("if is_memory_error(e) or _IMAGE_TAINTED:", engine)
+        self.assertIn("install_memory_pressure_handler()", engine)
+        self.assertIn("log=log, governor=governor,", engine)
         self.assertIn('bash ci/stop_ner.sh', workflow)
         self.assertIn('--ner-bundle-dir "$NER_BUNDLE_DIR"', workflow)
         self.assertIn('NER_BUNDLE_DIR="$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT/raw-ner/', workflow)

@@ -19,8 +19,9 @@ Two rules follow, and these tests pin them:
   * a deferred (heavy) book is taken only by a worker with a fresh life; a worker
     that is not fresh recycles BEFORE claiming it, so nothing is held and the book
     is left unclaimed and undone for the fresh image;
-  * a MemoryError in the heavy phase requeues the book exactly once (O_EXCL marker)
-    and fails the run on the second, naming both attempts' growth and the ceilings.
+  * a MemoryError in the heavy phase requeues the book while it keeps committing
+    batches (one standstill forgiven, O_EXCL numbered markers) and fails the run on
+    a second standstill in a row, naming every attempt and the ceilings.
 
 Windows: `link_books` imports POSIX-only `resource`/`fcntl`, so the engine-side
 cases are skipped there (as the repo's other engine tests are). The driver-side
@@ -89,7 +90,7 @@ class _Life:
         self.requeued = []
         self.failed = []
 
-    def offer(self, bk, memory_error=None):
+    def offer(self, bk, memory_error=None, committed=0):
         """Offer one pending book to this life; True while the life continues.
 
         ``memory_error`` simulates process_book_checkpointed raising the wrapped
@@ -119,7 +120,7 @@ class _Life:
                 return True
             self.claimed.append(cid)
             if memory_error is not None:
-                return self._on_memory_error(bk, cid, memory_error, heavy)
+                return self._on_memory_error(bk, cid, memory_error, heavy, committed)
             link_books.mark_done(self.run, cid)
             self.completed.append(cid)
             self.processed += 1
@@ -130,29 +131,27 @@ class _Life:
                 slot.release()
         return True
 
-    def _on_memory_error(self, bk, cid, growth, heavy):
+    def _on_memory_error(self, bk, cid, growth, heavy, committed):
         """The loop's `except Exception` branch for a MemoryError in the heavy phase."""
         attempt = {
+            "committed": committed,
             "claim_id": cid, "source_name": bk.source_name,
             "canonical_he_title": bk.canonical_he_title, "worker": self.label,
             "processed": self.processed, "growth_bytes": int(growth), "line": 43,
             "phase": "heavy" if heavy else "normal",
             "limits": link_books.current_memory_limits(heavy),
         }
-        won, first = link_books.claim_memory_requeue(self.run, cid, attempt)
+        won, earlier = link_books.claim_memory_requeue(self.run, cid, attempt)
         if won:
             link_books.journal_memory_event(
                 self.run, {"event": "requeued-after-memoryerror", **attempt})
             self.requeued.append(cid)
             return False  # the worker recycles; the book stays undone and unclaimed
         note = link_books.format_memory_failure(
-            bk=bk, first=first, second=attempt, limits=attempt["limits"])
-        os.makedirs(os.path.join(self.run, "failed"), exist_ok=True)
-        with open(os.path.join(self.run, "failed", cid), "w", encoding="utf-8") as fh:
-            json.dump({**bk.to_dict(), "note": note}, fh, ensure_ascii=False)
-        link_books.mark_done(self.run, cid)  # poison-book loop guard, as today
+            bk=bk, earlier=earlier, last=attempt, limits=attempt["limits"])
+        link_books.write_failed_book(self.run, cid, bk, note)  # failed + done, as the loop
         self.failed.append(cid)
-        return True
+        return False  # the loop now recycles at once after a failed book
 
 
 @ENGINE
@@ -255,7 +254,7 @@ class FreshWorkerForHeavyBooksTest(unittest.TestCase):
 
 @ENGINE
 class RequeueAfterMemoryErrorTest(unittest.TestCase):
-    """The O_EXCL budget: one retry per book, then the run fails."""
+    """The progress-bounded budget: retries while committing, then the run fails."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -267,8 +266,9 @@ class RequeueAfterMemoryErrorTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _attempt(self, worker, processed, growth, line=43):
+    def _attempt(self, worker, processed, growth, line=43, committed=0):
         return {
+            "committed": committed,
             "claim_id": self.cid,
             "source_name": self.book.source_name,
             "canonical_he_title": self.book.canonical_he_title,
@@ -280,51 +280,91 @@ class RequeueAfterMemoryErrorTest(unittest.TestCase):
                        "heavy_growth_bytes": 800_000_000},
         }
 
-    def test_first_memory_error_wins_the_budget_and_the_second_does_not(self):
-        first_attempt = self._attempt("w06", 75, 11_888_857_088)
-        won, stored = link_books.claim_memory_requeue(self.run, self.cid, first_attempt)
+    def test_one_standstill_is_forgiven_and_a_second_in_a_row_is_not(self):
+        won, earlier = link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt("w06", 75, 11_888_857_088, committed=4))
         self.assertTrue(won)
-        self.assertEqual(stored["growth_bytes"], 11_888_857_088)
+        self.assertEqual(earlier, [])
         self.assertTrue(os.path.isfile(link_books.requeue_marker_path(self.run, self.cid)))
 
-        second_attempt = self._attempt("w01", 0, 11_946_172_416, line=4)
-        won_again, first = link_books.claim_memory_requeue(self.run, self.cid, second_attempt)
-        self.assertFalse(won_again, "a book may be requeued once, never twice")
-        self.assertEqual(first["worker"], "w06")
-        self.assertEqual(first["processed"], 75)
+        won, earlier = link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt("w01", 0, 11_946_172_416, line=4, committed=4))
+        self.assertTrue(won, "the same spot gets one more fresh worker")
+        self.assertEqual([item["worker"] for item in earlier], ["w06"])
+
+        won, earlier = link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt("w02", 0, 12_000_000_000, committed=4))
+        self.assertFalse(won, "two standstills in a row fail the book")
+        self.assertEqual([item["worker"] for item in earlier], ["w06", "w01"])
         # A different book still has its own budget.
         other = link_books.claim_id(_book("ספר אחר"))
         self.assertTrue(link_books.claim_memory_requeue(self.run, other, {})[0])
 
-    def test_only_one_of_twelve_simultaneous_workers_may_requeue(self):
-        results = []
-        for label in (f"w{n:02d}" for n in range(1, 13)):
-            results.append(link_books.claim_memory_requeue(
-                self.run, self.cid, self._attempt(label, 5, 12_000_000_000))[0])
-        self.assertEqual(sum(1 for won in results if won), 1)
+    def test_a_book_that_keeps_committing_keeps_its_retries(self):
+        for committed in (3, 7, 12, 20, 31):
+            self.assertTrue(link_books.claim_memory_requeue(
+                self.run, self.cid, self._attempt("w03", 0, 24_900_000_000,
+                                                  committed=committed))[0])
+        self.assertEqual(len(link_books.read_memory_retries(self.run, self.cid)), 5)
+
+    def test_the_retry_limit_bounds_even_a_progressing_book(self):
+        with unittest.mock.patch.object(link_books, "MEMORY_RETRY_LIMIT", 3):
+            grants = [link_books.claim_memory_requeue(
+                self.run, self.cid, self._attempt("w03", 0, 1, committed=n))[0]
+                for n in range(1, 6)]
+        self.assertEqual(grants, [True, True, True, False, False])
+
+    def test_a_concurrent_winner_of_the_same_attempt_makes_the_loser_fail(self):
+        with unittest.mock.patch.object(link_books, "read_memory_retries",
+                                        side_effect=[[], ["winner"]]):
+            path = link_books.requeue_marker_path(self.run, self.cid, 1)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("{}")  # the peer linked its marker first
+            won, earlier = link_books.claim_memory_requeue(
+                self.run, self.cid, self._attempt("w02", 0, 1, committed=3))
+        self.assertFalse(won)
+        self.assertEqual(earlier, ["winner"])
+        self.assertFalse([name for name in os.listdir(os.path.dirname(path))
+                          if ".tmp-" in name], "no temporary marker left behind")
+
+    def test_twelve_standstills_grant_two_retries_and_no_more(self):
+        results = [link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt(f"w{n:02d}", 5, 12_000_000_000))[0]
+            for n in range(1, 13)]
+        self.assertEqual(results.count(True), 2)
+        self.assertEqual(len(link_books.read_memory_retries(self.run, self.cid)), 2)
+
+    def test_a_record_without_progress_figures_is_never_forgiven(self):
+        link_books.claim_memory_requeue(self.run, self.cid, {"worker": "w06"})
+        self.assertFalse(link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt("w01", 0, 1, committed=9))[0])
 
     def test_a_torn_marker_fails_the_book_rather_than_granting_a_second_retry(self):
         path = link_books.requeue_marker_path(self.run, self.cid)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "w").close()  # created, never written (worker killed between the two)
-        won, first = link_books.claim_memory_requeue(self.run, self.cid, self._attempt("w02", 1, 1))
+        won, earlier = link_books.claim_memory_requeue(
+            self.run, self.cid, self._attempt("w02", 1, 1, committed=5))
         self.assertFalse(won)
-        self.assertEqual(first, {})
+        self.assertEqual(earlier, [{}])
 
     def test_requeue_line_names_the_book_the_growth_the_worker_and_its_book_count(self):
         line = link_books.format_memory_requeue_line(
             bk=self.book, growth_bytes=11_888_857_088, worker="w06",
-            processed=75, line_number=43,
+            processed=75, line_number=43, retry=2, committed=9,
+            site=["linker/ref_resolver.py:resolve:590"],
         )
         self.assertEqual(
             line,
-            f"memory: requeued Sefaria/{self.book.canonical_he_title!r} once after "
-            "MemoryError (grew 11.9 GB in one line (line 43) on w06 after 75 books; "
+            f"memory: requeued Sefaria/{self.book.canonical_he_title!r} after MemoryError, "
+            "retry 2 (grew 11.9 GB this life in the batch from line 43 on w06 after 75 "
+            "books, 9 batch(es) committed, at linker/ref_resolver.py:resolve:590; "
             "retrying on a fresh worker)",
         )
         # A line-less MemoryError still reports the growth and the worker's life.
         self.assertIn(
-            "grew 11.9 GB in one line on w01 after 1 book;",
+            "grew 11.9 GB this life on w01 after 1 book;",
             link_books.format_memory_requeue_line(
                 bk=self.book, growth_bytes=11_888_857_088, worker="w01", processed=1),
         )
@@ -332,19 +372,20 @@ class RequeueAfterMemoryErrorTest(unittest.TestCase):
     def test_failure_message_names_the_book_both_attempts_and_the_live_limits(self):
         message = link_books.format_memory_failure(
             bk=self.book,
-            first=self._attempt("w06", 75, 11_888_857_088),
-            second=self._attempt("w01", 0, 12_217_487_360, line=4),
+            earlier=[self._attempt("w06", 75, 11_888_857_088),
+                     self._attempt("w01", 0, 12_217_487_360, line=4)],
+            last=self._attempt("w02", 0, 12_300_000_000, line=4),
             limits={"address_space_bytes": 26_000_000_000,
                     "recycle_cap_bytes": 5_000_000_000,
                     "heavy_growth_bytes": 800_000_000},
         )
         self.assertIn(self.book.canonical_he_title, message)
-        self.assertIn("MemoryError twice - the book had already spent its single requeue",
-                      message)
-        self.assertIn("attempt 1 grew 11.9 GB in one line (line 43) on w06 after 75 books",
-                      message)
-        self.assertIn("attempt 2 grew 12.2 GB in one line (line 4) on w01 after 0 books",
-                      message)
+        self.assertIn("MemoryError on 3 attempt(s)", message)
+        self.assertIn("attempt 1 grew 11.9 GB this life in the batch from line 43 on w06 "
+                      "after 75 books", message)
+        self.assertIn("attempt 2 grew 12.2 GB this life in the batch from line 4 on w01 "
+                      "after 0 books", message)
+        self.assertIn("attempt 3 grew 12.3 GB", message)
         self.assertIn("address space 26000000000", message)
         self.assertIn("recycle cap 5000000000", message)
         self.assertIn("heavy deferral threshold 800000000", message)
@@ -352,7 +393,7 @@ class RequeueAfterMemoryErrorTest(unittest.TestCase):
 
     def test_an_incomplete_first_record_is_reported_instead_of_being_invented(self):
         message = link_books.format_memory_failure(
-            bk=self.book, first={}, second=self._attempt("w01", 0, 1_000_000_000),
+            bk=self.book, earlier=[{}], last=self._attempt("w01", 0, 1_000_000_000),
             limits={},
         )
         self.assertIn("figures unavailable", message)
@@ -409,13 +450,16 @@ class HeavyPhaseScenarioTest(unittest.TestCase):
             "memory: 1 book requeued after MemoryError, 1 succeeded on retry, 0 failed",
         )
 
-    def test_a_second_memory_error_fails_the_run_and_names_the_book_and_both_attempts(self):
+    def test_two_standstills_in_a_row_fail_the_run_and_name_every_attempt(self):
         first = _Life(self.run, "w06")
         first.processed = 0
         self.assertFalse(first.offer(self.book, memory_error=11_888_857_088))
+        forgiven = _Life(self.run, "w01")
+        self.assertFalse(forgiven.offer(self.book, memory_error=11_900_000_000),
+                         "one standstill buys one more fresh worker")
         retry = _Life(self.run, "w01")
-        self.assertTrue(retry.offer(self.book, memory_error=12_217_487_360),
-                        "the second failure must not silently recycle for ever")
+        self.assertFalse(retry.offer(self.book, memory_error=12_217_487_360),
+                         "the failed book's worker recycles; the book is done, so no loop")
         self.assertEqual(retry.failed, [self.cid])
         self.assertEqual(retry.requeued, [])
 
@@ -428,6 +472,7 @@ class HeavyPhaseScenarioTest(unittest.TestCase):
             (self.book.source_name, self.book.canonical_he_title)]
         self.assertIn("grew 11.9 GB", note)
         self.assertIn("grew 12.2 GB", note)
+        self.assertIn("MemoryError on 3 attempt(s)", note)
         self.assertIn("address space", note)
         stats = incremental.read_memory_stats(self.run)
         self.assertEqual((stats["requeued"], stats["succeeded"], stats["failed"]), (1, 0, 1))
@@ -437,6 +482,18 @@ class HeavyPhaseScenarioTest(unittest.TestCase):
         self.assertTrue(third.offer(self.book))
         self.assertEqual(third.completed, [])
         self.assertEqual(third.claimed, [])
+
+    def test_a_book_that_advances_on_every_attempt_is_linked_in_the_end(self):
+        # 36072909683: each retry failed further on (1108 -> 1971 -> 6193).
+        for committed in (11, 19, 61):
+            life = _Life(self.run, "w10")
+            self.assertFalse(life.offer(self.book, memory_error=24_700_000_000,
+                                        committed=committed))
+        final = _Life(self.run, "w10")
+        self.assertTrue(final.offer(self.book))
+        self.assertEqual(final.completed, [self.cid])
+        stats = incremental.read_memory_stats(self.run)
+        self.assertEqual((stats["requeued"], stats["succeeded"], stats["failed"]), (1, 1, 0))
 
     def test_the_requeue_and_the_fresh_worker_rule_compose(self):
         # The full 34016397157 ending: a full worker meets the deferred book, recycles

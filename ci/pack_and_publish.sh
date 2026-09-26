@@ -49,6 +49,7 @@ fi
 # Deterministic tar (sorted, fixed mtimes/owner) so an unchanged corpus packs byte-identically.
 tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
     --exclude='*/.DS_Store' --exclude='*/.gitkeep' --exclude='*/._*' \
+    --exclude='*.tmp' --exclude='*.tmp-*' \
     -cf - artifacts line-baseline meta.json \
   | zstd "${ZSTD_TUNING[@]}" -T"$WORKERS" -o "$OUT" -f
 

@@ -407,8 +407,8 @@ def format_memory_summary(*, requeued: int, succeeded: int, failed: int) -> str 
 def read_memory_stats(run_dir: str) -> dict:
     """Count the run's memory events from the engine's journal + the done/failed ledgers.
 
-    `requeued` counts distinct BOOKS that spent their single retry (a book can be
-    journalled twice: once when requeued, once when the retry also failed);
+    `requeued` counts distinct BOOKS that were retried (a book is journalled once
+    per retry, and again when the last retry also failed);
     `succeeded`/`failed` split them by the marker the run actually ended with, so the
     two always add up to `requeued` for a finished run.
     """
@@ -417,10 +417,12 @@ def read_memory_stats(run_dir: str) -> dict:
     try:
         from link_books import count_memory_events, read_memory_journal
     except ImportError:
-        return {"requeued": 0, "succeeded": 0, "failed": 0, "recycled_for_heavy": 0}
+        return {"requeued": 0, "succeeded": 0, "failed": 0, "recycled_for_heavy": 0,
+                "governor_stopped": 0, "governor_killed": 0}
 
     requeued, seen = [], set()
-    for event in read_memory_journal(run_dir):
+    journal = read_memory_journal(run_dir)
+    for event in journal:
         if event.get("event") != "requeued-after-memoryerror":
             continue
         cid = event.get("claim_id")
@@ -439,7 +441,20 @@ def read_memory_stats(run_dir: str) -> dict:
         "succeeded": len(succeeded),
         "failed": len(failed),
         "recycled_for_heavy": count_memory_events(run_dir, "recycled-for-heavy"),
+        # Books the pool memory governor stopped (abort) and workers it killed.
+        "governor_stopped": sum(1 for event in journal
+                                if event.get("asked_by_governor") is True),
+        "governor_killed": sum(1 for event in journal
+                               if event.get("event") == "killed-by-memory-governor"),
     }
+
+
+def format_governor_summary(*, stopped: int, killed: int) -> str | None:
+    """One closing line when the pool memory governor acted, else None."""
+    if stopped <= 0 and killed <= 0:
+        return None
+    return (f"memory governor: stopped {stopped} book attempt(s), "
+            f"killed {killed} worker(s) to keep the host alive")
 
 
 def read_failed_notes(run_dir: str) -> dict[tuple[str, str], str]:
@@ -1697,6 +1712,10 @@ def _run_engine(args, only_books_path, progress_seconds=60.0, stats=None):
         )
         if line is not None:
             _log(line)
+        governor = format_governor_summary(
+            stopped=stats["governor_stopped"], killed=stats["governor_killed"])
+        if governor is not None:
+            _log(governor)
 
     run_error = None
     try:

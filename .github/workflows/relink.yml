@@ -1051,6 +1051,10 @@ jobs:
             export LINKER_HEAVY_RSS_CAP_BYTES=5000000000
             export LINKER_WORKER_ADDRESS_SPACE_BYTES=14000000000
             export LINKER_HEAVY_WORKER_ADDRESS_SPACE_BYTES=26000000000
+            # Pool-wide guard (link_books.PoolMemoryGovernor): MemAvailable floors that
+            # keep the VM - and the Windows host under it - alive (36112302819).
+            export LINKER_POOL_MEMORY_SOFT_FLOOR_BYTES=10000000000
+            export LINKER_POOL_MEMORY_HARD_FLOOR_BYTES=6000000000
             export MALLOC_ARENA_MAX=2
             export OMP_NUM_THREADS=1
             export OPENBLAS_NUM_THREADS=1
@@ -1075,7 +1079,10 @@ jobs:
           # outside the worker-count branch prevents a recovery from silently
           # dropping the already-validated migration and demanding a full relink.
           [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
-          "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
+          # The pool's children share one seed anyway; recording it makes a bad run replayable.
+          ENGINE_HASH_SEED="$(python3 -c 'import secrets; print(secrets.randbelow(2**32))')"
+          echo "engine PYTHONHASHSEED=$ENGINE_HASH_SEED"
+          PYTHONHASHSEED="$ENGINE_HASH_SEED" "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
 
       - name: Upload local performance diagnostics
         if: always() && inputs.target == 'local'
