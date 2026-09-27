@@ -557,6 +557,15 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count('if [ "$HANDOFF_PUBLISHED" = true ]; then'), 2)
         self.assertEqual(workflow.count('rm -rf "$preserved"'), 2)
         self.assertEqual(workflow.count("unpublished payload retained for recovery:"), 2)
+        # The local batch checkpoint outlives an unshipped payload; stale ones are swept.
+        self.assertIn(
+            "BATCH_CHECKPOINT_SHIPPED: ${{ steps.publish_handoff.outcome == 'success' }}", workflow
+        )
+        self.assertIn(
+            'if [ "$BATCH_CHECKPOINT_SHIPPED" = true ]; then ARGS+=(--drop-batch-checkpoint); fi',
+            workflow,
+        )
+        self.assertIn("--max-age-days 14)", workflow)
 
         # Nothing adopts the preserved directory automatically: the artifact store is
         # still restored from a PUBLISHED release, so a payload kept here can never be

@@ -1,6 +1,8 @@
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,6 +119,71 @@ class LocalNerCacheCleanupTest(unittest.TestCase):
                 cleanup_local_ner_cache.main()
             self.assertFalse((root / "raw-ner" / request).exists())
             self.assertTrue((root / "raw-ner" / sibling).is_dir())
+
+    @staticmethod
+    def run_cleanup(root, request, *extra):
+        argv = ["cleanup_local_ner_cache.py", "--cache-root", str(root), "--request-id", request, *extra]
+        with mock.patch.object(sys, "argv", argv):
+            cleanup_local_ner_cache.main()
+
+    @staticmethod
+    def age(path, days):
+        stamp = time.time() - days * 86400
+        for dirpath, dirnames, filenames in os.walk(path, topdown=False):
+            for name in filenames + dirnames:
+                os.utime(os.path.join(dirpath, name), (stamp, stamp), follow_symlinks=False)
+        os.utime(path, (stamp, stamp), follow_symlinks=False)
+
+    def test_batch_checkpoint_survives_until_the_payload_shipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request, sibling = "a" * 64, "b" * 64
+            for name in (request, sibling):
+                (root / name / "source-1-1").mkdir(parents=True)
+                (root / f".save-{name}.lock").touch()
+            self.run_cleanup(root, request)
+            self.assertTrue((root / request / "source-1-1").is_dir())
+            self.run_cleanup(root, request, "--drop-batch-checkpoint")
+            self.assertFalse((root / request).exists())
+            self.assertFalse((root / f".save-{request}.lock").exists())
+            self.assertTrue((root / sibling / "source-1-1").is_dir())
+            self.assertTrue((root / f".save-{sibling}.lock").exists())
+
+    def test_sweep_removes_only_other_requests_idle_past_the_cutoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            current, stale, fresh, orphan, linked = (c * 64 for c in "abcde")
+            for parent in (root, root / "raw-ner"):
+                for name in (current, stale, fresh):
+                    (parent / name / "source-1-1").mkdir(parents=True)
+                    (parent / name / "source-1-1" / "manifest.json").write_text("{}")
+            for name in (current, stale, fresh, orphan):
+                (root / f".save-{name}.lock").touch()
+            (root / "notes").mkdir()
+            outside = root / "outside"
+            (outside / "keep").mkdir(parents=True)
+            (root / linked).symlink_to(outside, target_is_directory=True)
+            for entry in [*root.iterdir(), *(root / "raw-ner").iterdir()]:
+                if entry.name != "raw-ner":
+                    self.age(entry, 30)
+            # A fresh file deep inside keeps an otherwise old checkpoint.
+            (root / fresh / "source-1-1" / "manifest.json").touch()
+            (root / "raw-ner" / fresh / "source-1-1" / "manifest.json").touch()
+
+            self.run_cleanup(root, current, "--max-age-days", "14")
+
+            for parent in (root, root / "raw-ner"):
+                self.assertFalse((parent / stale).exists())
+                self.assertTrue((parent / fresh).is_dir())
+            self.assertFalse((root / "raw-ner" / current).exists())
+            self.assertTrue((root / current).is_dir())
+            self.assertTrue((root / f".save-{current}.lock").exists())
+            self.assertTrue((root / f".save-{fresh}.lock").exists())
+            self.assertFalse((root / f".save-{stale}.lock").exists())
+            self.assertFalse((root / f".save-{orphan}.lock").exists())
+            self.assertTrue((root / "notes").is_dir())
+            self.assertTrue((root / linked).is_symlink())
+            self.assertTrue((outside / "keep").is_dir())
 
 
 if __name__ == "__main__":

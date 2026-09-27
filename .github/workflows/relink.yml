@@ -1278,12 +1278,18 @@ jobs:
       # The workspace persists between runs on this self-hosted runner — without this,
       # every relink leaves ~10GB (snapshot + its .zst) parked on disk. Everything
       # removed here is re-fetched deterministically by the next run.
-      - name: Remove completed durable local raw-NER checkpoint
+      # Nothing else prunes the local checkpoint cache (10 GB of dead ones by 2026-09-27).
+      # The batch checkpoint goes only once the payload shipped; other requests'
+      # checkpoints go after 14 idle days.
+      - name: Remove completed durable local checkpoints and sweep stale ones
         if: inputs.target == 'local' && steps.compute.outcome == 'success'
-        run: >-
-          python3 ci/cleanup_local_ner_cache.py
-          --cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT"
-          --request-id "${{ inputs.relink_request_id }}"
+        env:
+          BATCH_CHECKPOINT_SHIPPED: ${{ steps.publish_handoff.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          ARGS=(--cache-root "$LINKER_LOCAL_CHECKPOINT_CACHE_ROOT" --request-id "${{ inputs.relink_request_id }}" --max-age-days 14)
+          if [ "$BATCH_CHECKPOINT_SHIPPED" = true ]; then ARGS+=(--drop-batch-checkpoint); fi
+          python3 ci/cleanup_local_ner_cache.py "${ARGS[@]}"
 
       # The workspace copies still go — the next run's pack would clobber them anyway.
       # What must NOT go is ci/pack_and_publish.sh's content-addressed copy outside the
