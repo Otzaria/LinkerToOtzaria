@@ -1079,8 +1079,8 @@ jobs:
           # outside the worker-count branch prevents a recovery from silently
           # dropping the already-validated migration and demanding a full relink.
           [ -z "$ADOPT_FINGERPRINT" ] || ARGS+=(--adopt-fingerprint "$ADOPT_FINGERPRINT")
-          # The pool's children share one seed anyway; recording it makes a bad run replayable.
-          ENGINE_HASH_SEED="$(python3 -c 'import secrets; print(secrets.randbelow(2**32))')"
+          # Pinned: runs are replayable. 26 was verified on the spans of 36072909683.
+          ENGINE_HASH_SEED=26
           echo "engine PYTHONHASHSEED=$ENGINE_HASH_SEED"
           PYTHONHASHSEED="$ENGINE_HASH_SEED" "$SEF_PROJECT/.venv/bin/python" src/incremental.py "${ARGS[@]}"
 

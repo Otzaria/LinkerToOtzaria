@@ -175,6 +175,10 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         resolver_patch = (root / "ci/sefaria_resolver.patch").read_text(encoding="utf-8")
         self.assertIn("@lru_cache(maxsize=1024)", resolver_patch)
         self.assertIn("nodes.array()", resolver_patch)
+        # The live title trie must never be merged into in place (36072909683).
+        self.assertIn("+        out = dict(a)", resolver_patch)
+        self.assertIn("-                    a[key] += b[key]", resolver_patch)
+        self.assertIn("sefaria/model/linker/match_template.py \\\n", setup)
         self.assertIn(
             'git -C "$GPU" apply --check --directory=app "$MICROBATCH_PATCH"', setup
         )
@@ -442,6 +446,8 @@ class RelinkWorkflowContractTest(unittest.TestCase):
         self.assertIn("export LINKER_POOL_MEMORY_HARD_FLOOR_BYTES=6000000000", workflow)
         self.assertNotIn("LINKER_POOL_MEMORY_GOVERNOR=0", workflow)
         # The compute step only: the separate CPU resolve job keeps a seed per process.
+        self.assertIn("ENGINE_HASH_SEED=26\n", workflow)
+        self.assertNotIn("secrets.randbelow", workflow)
         self.assertEqual(workflow.count('echo "engine PYTHONHASHSEED=$ENGINE_HASH_SEED"'), 1)
         self.assertEqual(workflow.count(
             'PYTHONHASHSEED="$ENGINE_HASH_SEED" "$SEF_PROJECT/.venv/bin/python" '

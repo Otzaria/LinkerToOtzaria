@@ -138,11 +138,13 @@ SEFARIA_SOURCE_ID="$(source_identity "$SEF" "${SEFARIA_COMMIT:-}")"
 GPU_SOURCE_ID="$(source_identity "$GPU" "${GPU_SERVER_COMMIT:-}")"
 
 # Resolver fixes we maintain on top of the pin (see the patch header): upstream
-# crash guards plus a process-local materialized DH-query cache. Reset only the
-# managed patch targets before applying: reverse-check idempotence cannot migrate a
-# persistent checkout from an older version of this maintained patch.
+# crash guards, a process-local materialized DH-query cache and a non-mutating
+# title-trie merge. Reset only the managed patch targets before applying:
+# reverse-check idempotence cannot migrate a persistent checkout from an older
+# version of this maintained patch.
 PATCH="${LINKER_REPO:-$PWD}/ci/sefaria_resolver.patch"
 git -C "$SEF" checkout -- \
+  sefaria/model/linker/match_template.py \
   sefaria/model/linker/ref_resolver.py \
   sefaria/model/linker/referenceable_book_node.py \
   sefaria/model/text.py
