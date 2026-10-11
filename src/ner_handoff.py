@@ -428,7 +428,7 @@ class NerBundle:
             return linker.bulk_link(
                 [content for _, content, _ in batch],
                 book_context_refs=book_context_refs,
-                type_filter="citation",
+                type_filter="citation", with_failures=True,
             )
         finally:
             linker._ner = original

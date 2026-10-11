@@ -15,6 +15,11 @@
       "from": "dump=44e55916743983b8;engine_src=3e8ef0b395adff07;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=798d27b90645b03d;policy=drop;bavli=0",
       "to": "dump=44e55916743983b8;engine_src=9aef39ad28a5e160;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=798d27b90645b03d;policy=drop;bavli=0",
       "review": "PR #6 and PR #5 with the ibid checkpoint sidecar: the sidecar itself is output-neutral (an uninterrupted book sees the same history it always did; it only lets a recycled book resume instead of replaying), but the chain from the published lineage still carries PR #6's citation/ibid resolution and PR #5's line markers; run a full relink."
+    },
+    {
+      "from": "dump=44e55916743983b8;engine_src=3c529f8ff4f6bcd2;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0",
+      "to": "dump=44e55916743983b8;engine_src=b698671142331a8f;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0",
+      "review": "Otzaria/otzaria#2408: relative citations naming the citing tractate (\"לקמן גיטין דף כג:\") are recovered from failed resolutions; output-affecting, run a full relink."
     }
   ]
 }

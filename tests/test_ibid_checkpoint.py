@@ -86,7 +86,7 @@ class _Linker:
         self._ref_resolver = _Resolver()
         self.seen = []
 
-    def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+    def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
         self._ref_resolver.reset_ibid_history()
         self.seen.append([ref.normal() for ref in self._ref_resolver._ibid_history.last_refs])
         docs = []

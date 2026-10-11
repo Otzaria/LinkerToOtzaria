@@ -26,7 +26,7 @@ class _Linker:
     def __init__(self):
         self.calls = []
 
-    def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+    def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
         self.calls.append(list(texts))
         return [_Doc() for _ in texts]
 

@@ -2056,7 +2056,7 @@ def process_batch(
             docs = resolve(lambda: linker.bulk_link(
                 [content for _, content, _ in batch],
                 book_context_refs=context_objects,
-                type_filter="citation",
+                type_filter="citation", with_failures=True,
             ))
         if len(docs) != len(batch):  # a short reply would silently drop tail lines
             raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
@@ -2078,7 +2078,7 @@ def process_batch(
                 docs.append(resolve(lambda: linker.bulk_link(
                     [content],
                     book_context_refs=[context_objects[batch_offset]],
-                    type_filter="citation",
+                    type_filter="citation", with_failures=True,
                 )[0]))
             except Exception as le:
                 skipped_log(f"{bk.source_name}\t{bk.canonical_he_title}\t{li}\t{type(le).__name__}: {le}")
@@ -2101,10 +2101,15 @@ def process_batch(
         marker_end = leading_hebrew_numeral_marker_end(content)
         for rr in doc.resolved_refs:
             try:
-                ref = _pick_ref(rr, last_ref)
-                # A citation this book drops is not an antecedent for the next "שם".
-                last_ref = None
-                if ref is None:
+                # Failures are fetched only for relative recovery; they must not reset
+                # the "שם" antecedent.
+                failed = getattr(rr, "resolution_failed", False)
+                relative = has_raw_part_type(rr, "RELATIVE")
+                ref = None if failed else _pick_ref(rr, last_ref)
+                if not failed:
+                    # A citation this book drops is not an antecedent for the next "שם".
+                    last_ref = None
+                if ref is None and not relative:
                     continue
                 start, end = rr.raw_entity.span.range
                 # A parenthesized Hebrew number opening a line is its structural
@@ -2112,19 +2117,24 @@ def process_batch(
                 if end <= marker_end:
                     continue
                 anchor_text = content[start:end]
-                target_ref = ref.normal()
-                if is_implausible_citation_target(target_ref, anchor_text):
-                    continue
-                if has_raw_part_type(rr, "RELATIVE") and talmud_address_contradicts(
-                    target_ref, anchor_text
-                ):
-                    corrected = spelled_talmud_ref(target_ref, anchor_text, context_ref_factory)
-                    if corrected is None:
+                relative_direction = None
+                if ref is not None:
+                    target_ref = ref.normal()
+                    if is_implausible_citation_target(target_ref, anchor_text):
                         continue
-                    ref, target_ref = context_ref_factory(corrected), corrected
-                relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
-                if has_raw_part_type(rr, "RELATIVE") and relative_direction is None:
-                    continue
+                    if relative and talmud_address_contradicts(target_ref, anchor_text):
+                        corrected = spelled_talmud_ref(target_ref, anchor_text, context_ref_factory)
+                        if corrected is None:
+                            continue
+                        ref, target_ref = context_ref_factory(corrected), corrected
+                    relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
+                if relative and relative_direction is None:
+                    recovered = own_tractate_relative_ref(
+                        anchor_text, context_object, context_ref_factory)
+                    if recovered is None:
+                        continue
+                    ref, relative_direction = recovered
+                    target_ref = ref.normal()
                 last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2581,10 +2591,10 @@ def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str 
     context_type = getattr(getattr(rr, "context_type", None), "name", None)
     if context_type != "CURRENT_BOOK":
         return None
-    above = "לעיל" in anchor_text
-    below = "לקמן" in anchor_text or "להלן" in anchor_text
-    if above == below:
+    side = _relative_side(anchor_text)
+    if side is None:
         return None
+    above, below = side == "above", side == "below"
     has_named = has_raw_part_type(rr, "NAMED")
     has_numbered = has_raw_part_type(rr, "NUMBERED") or has_raw_part_type(rr, "RANGE")
     if not (has_named or has_numbered):
@@ -2600,6 +2610,14 @@ def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str 
             return None
         if below and not target_order > source_order:
             return None
+    return side
+
+
+def _relative_side(anchor_text: str) -> str | None:
+    above = "לעיל" in anchor_text
+    below = "לקמן" in anchor_text or "להלן" in anchor_text
+    if above == below:
+        return None
     return "above" if above else "below"
 
 
@@ -2608,7 +2626,7 @@ _GEMATRIA = {
     "י": 10, "כ": 20, "ך": 20, "ל": 30, "מ": 40, "ם": 40, "נ": 50, "ן": 50, "ס": 60,
     "ע": 70, "פ": 80, "ף": 80, "צ": 90, "ץ": 90, "ק": 100, "ר": 200, "ש": 300, "ת": 400,
 }
-# "טו, ב" / "טו,ב" / "ט״ו ע״ב" / "דף טו." — the daf token and its amud marker.
+# "טו, ב" / "טו,ב" / "ט״ו ע״ב" — the daf token and its amud marker.
 _DAF_COMMA_RE = re.compile(r"(\S+?)\s*,\s*([אב])(?![א-ת])")
 # A bare ``עא`` is a very common daf numeral (e.g. ``עבודה זרה עא, א``),
 # not an amud marker.  Require its customary geresh/gershayim so the comma
@@ -2677,16 +2695,68 @@ def spelled_talmud_ref(target_ref: str, anchor_text: str, ref_factory) -> str | 
     spelled = _spelled_addresses(anchor_text)
     if not target or len(spelled) != 1 or ref_factory is None:
         return None
-    token, side = spelled[0]
+    ref = _daf_ref(target.group(1), *spelled[0], ref_factory)
+    return ref.normal() if ref is not None else None
+
+
+def _daf_ref(tractate: str, token: str, side: str, ref_factory):
     letters = re.sub(r"[^א-ת]", "", token.split("דף")[-1])
     daf = _numeral(letters) or (_numeral(letters[1:]) if len(letters) > 1 else None)
     if daf is None:
         return None
-    tractate = target.group(1)
     try:
-        return ref_factory(f"{tractate} {daf}{'a' if side == 'א' else 'b'}").normal()
+        return ref_factory(f"{tractate} {daf}{'a' if side == 'א' else 'b'}")
     except Exception:
         return None
+
+
+# "כג." / "כ"ג:" — a daf whose amud is its trailing period/colon.  "ע"ב." and the
+# "ב." of "כג, ב." are amud markers of addresses _spelled_addresses already counts.
+_DAF_PUNCT_RE = re.compile(
+    r"(?<![^\s(])(?<!,\s)(?!ע[\"'״׳][אב])([א-ת][א-ת\"'״׳]*)([.:])")
+_PUNCT_SIDE = {".": "א", ":": "ב"}
+# "פ"ב." / "פ"ק." abbreviate פרק ב / פרק קמא, not a daf.
+_CHAPTER_ABBREVIATION_RE = re.compile(r"פ[\"'״׳]")
+
+
+def own_tractate_relative_ref(anchor_text: str, source_ref, ref_factory):
+    """The (Ref, direction) of "לקמן גיטין דף כג:" cited from within Gittin or its commentary.
+
+    Sefaria leaves a relative citation that names a tractate unresolved, since its
+    לקמן/לעיל part matches nothing once the title supplies the book. The address is
+    taken from the text only when the tractate is the source's own, the anchor spells
+    exactly one daf, and that daf lies on the stated side of the source's amud.
+    """
+    side_word = _relative_side(anchor_text)
+    if side_word is None or source_ref is None or ref_factory is None:
+        return None
+    if not source_ref.is_talmud() or not source_ref.sections:
+        return None
+    addresses = [(token, _PUNCT_SIDE[mark]) for token, mark in _DAF_PUNCT_RE.findall(anchor_text)
+                 if _numeral(re.sub(r"[^א-ת]", "", token))
+                 and not _CHAPTER_ABBREVIATION_RE.match(token)]
+    addresses += _spelled_addresses(anchor_text)
+    if len(addresses) != 1:
+        return None
+    # A commentary "X on <tractate>" is laid out by the tractate's own amudim.
+    own = source_ref.index.title
+    titles = [own] + [t for t in getattr(source_ref.index, "base_text_titles", None) or ()
+                      if own.endswith(f" on {t}")]
+    token, side = addresses[0]
+    # The daf must follow the title itself: "גיטין פרק ב." names a chapter, not daf ב.
+    named = [t for t in titles if (he := ref_factory(t).index.get_title("he")) and re.search(
+        rf"(?<![א-ת]){re.escape(he)}\s+(?:(?:דף|ד[׳'])\s*)?{re.escape(token)}", anchor_text)]
+    if len(named) != 1:
+        return None
+    target = _daf_ref(named[0], token, side, ref_factory)
+    if target is None:
+        return None
+    amud = target.sections[0]
+    if side_word == "above" and not amud < source_ref.sections[0]:
+        return None
+    if side_word == "below" and not amud > source_ref.toSections[0]:
+        return None
+    return target, side_word
 
 
 # Abbreviations the linker reads as a book name: מ״א (Magen Avraham) as I Kings and

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import unittest
 
@@ -76,6 +77,83 @@ class SpelledTalmudRefTest(unittest.TestCase):
         self.assertIsNone(self.rebuild("Eruvin 9b", "להלן עירובין שנ, ב"))
         self.assertIsNone(self.rebuild("Genesis 1:1", "לעיל ה, א"))
         self.assertIsNone(link_books.spelled_talmud_ref("Eruvin 9b", "להלן עירובין טו, ב", None))
+
+
+class TalmudRef:
+    """A Sefaria Ref stand-in for Talmud addresses: Gittin ends at 90b."""
+    HEBREW = {"Gittin": "גיטין", "Rashi on Gittin": "רש\"י על גיטין", "Berakhot": "ברכות",
+              "Bava Metzia": "בבא מציעא", "Rashi on Bava Metzia": "רש\"י על בבא מציעא"}
+    LAST_DAF = 90
+
+    def __init__(self, text):
+        match = re.fullmatch(r"(.+?)(?: (\d+)([ab])(?::\d+)*)?", text)
+        title, daf, amud = match.group(1), match.group(2), match.group(3)
+        if title not in self.HEBREW or (daf and not 2 <= int(daf) <= self.LAST_DAF):
+            raise ValueError(text)
+        self.text = text
+        base = [title[len("Rashi on "):]] if title.startswith("Rashi on ") else []
+        self.index = type("Index", (), {
+            "title": title, "base_text_titles": base,
+            "get_title": lambda _self, lang: self.HEBREW[title]})()
+        self.sections = [2 * int(daf) - (amud == "a")] if daf else []
+        self.toSections = self.sections
+
+    def normal(self):
+        return self.text
+
+    def is_talmud(self):
+        return bool(self.sections)
+
+
+class OwnTractateRelativeRefTest(unittest.TestCase):
+    """Rashi's own-tractate citations that Sefaria leaves unlinked (Otzaria/otzaria#2408)."""
+
+    def recover(self, anchor, source="Rashi on Gittin 3a:14:1"):
+        found = link_books.own_tractate_relative_ref(anchor, TalmudRef(source), TalmudRef)
+        return None if found is None else (found[0].normal(), found[1])
+
+    def test_the_reported_forms_link_to_the_spelled_daf(self):
+        for anchor, expected in [
+            ("לקמן גיטין דף כג:", ("Gittin 23b", "below")),
+            ("לקמן גיטין פו.", ("Gittin 86a", "below")),
+            ("לקמן גיטין ד' כג:", ("Gittin 23b", "below")),
+            ("לקמן גיטין כ\"ג:", ("Gittin 23b", "below")),
+            ("לקמן גיטין כג, ב.", ("Gittin 23b", "below")),
+            ("לקמן גיטין דף כג ע\"ב", ("Gittin 23b", "below")),
+            ("לקמן גיטין דף כג: ע\"ש.", ("Gittin 23b", "below")),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertEqual(self.recover(anchor), expected)
+        self.assertEqual(
+            self.recover("לעיל גיטין דף ג.", source="Rashi on Gittin 5a:2:1"), ("Gittin 3a", "above"))
+        self.assertEqual(self.recover("לקמן גיטין דף כג:", source="Gittin 3a:14"),
+                         ("Gittin 23b", "below"))
+        self.assertEqual(
+            self.recover("לעיל גיטין דף ג.", source="Rashi on Gittin 3b:1:1"), ("Gittin 3a", "above"))
+        self.assertEqual(
+            self.recover("לקמן בבא מציעא דף כג:", source="Rashi on Bava Metzia 3a:1:1"),
+            ("Bava Metzia 23b", "below"))
+
+    def test_the_wrong_side_or_the_same_amud_is_dropped(self):
+        self.assertIsNone(self.recover("לעיל גיטין דף כג:"))
+        self.assertIsNone(self.recover("לקמן גיטין דף ג.", source="Rashi on Gittin 5a:2:1"))
+        self.assertIsNone(self.recover("לקמן גיטין דף ג.", source="Rashi on Gittin 3a:2:1"))
+        self.assertIsNone(self.recover("לעיל גיטין דף ג.", source="Rashi on Gittin 3a:2:1"))
+
+    def test_another_tractate_or_an_unclear_address_is_dropped(self):
+        for anchor in [
+            "לקמן ברכות דף כג:",
+            "לקמן גיטין דף כג: ודף כד.",
+            "לקמן גיטין דף צה.",
+            "לעיל גיטין פרק ב.",
+            "לעיל גיטין פ\"ב.",
+            "לקמן גיטין פ\"ב.",
+            "לקמן דף כג:",
+            "גיטין דף כג:",
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.recover(anchor, source="Rashi on Gittin 30a:1:1"
+                                               if "לעיל" in anchor else "Rashi on Gittin 3a:14:1"))
 
 
 class IbidCandidateTest(unittest.TestCase):

@@ -51,7 +51,7 @@ class WorkerMemoryTest(unittest.TestCase):
             resolved_refs = []
 
         class Linker:
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 return [Doc() for _ in texts]
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,7 +189,7 @@ class WorkerMemoryTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.calls.append((list(texts), list(book_context_refs or []), type_filter))
                 return [Doc() for _ in texts]
 
@@ -261,7 +261,7 @@ class WorkerMemoryTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.calls.append((list(texts), list(book_context_refs), type_filter))
                 return [Doc() for _ in texts]
 
@@ -317,7 +317,7 @@ class WorkerMemoryTest(unittest.TestCase):
                 self._ref_resolver = Resolver()
                 self.seen = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self._ref_resolver.reset_ibid_history()
                 self.seen.append([ref.normal() for ref in self._ref_resolver._ibid_history.last_refs])
                 self._ref_resolver._ibid_history.last_refs = Ref(texts[0])
@@ -445,7 +445,7 @@ class WorkerMemoryTest(unittest.TestCase):
             resolved_refs = [RR()]
 
         class Linker:
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.contexts = book_context_refs
                 return [Doc()]
 
@@ -462,6 +462,47 @@ class WorkerMemoryTest(unittest.TestCase):
         self.assertEqual(records[0].context_ref, "Book 2")
         self.assertEqual(records[0].relative_direction, "below")
         self.assertEqual(records[0].target_ref, "Book 3")
+
+    def test_unresolved_own_tractate_relative_citation_is_recovered(self):
+        """Sefaria returns "לקמן גיטין דף כג:" as a failure (Otzaria/otzaria#2408)."""
+        from test_citation_plausibility import TalmudRef
+
+        Kind = lambda name: type("Kind", (), {"name": name})()  # noqa: E731
+
+        def failed(start, end, parts=("RELATIVE", "NAMED", "NUMBERED")):
+            return type("RR", (), {
+                "is_ambiguous": False, "ref": None, "context_type": None,
+                "resolution_failed": True,
+                "raw_entity": type("Raw", (), {
+                    "span": type("Span", (), {"range": (start, end)})(),
+                    "raw_ref_parts": [type("Part", (), {"type": Kind(p)})() for p in parts],
+                })(),
+            })()
+
+        content = "עיין (לקמן גיטין דף כג:) ו(לקמן ברכות דף כג:)"
+        own = content.index("לקמן גיטין")
+        other = content.index("לקמן ברכות")
+
+        class Linker:
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None,
+                          with_failures=False):
+                self.with_failures = with_failures
+                return [type("Doc", (), {"resolved_refs": [
+                    failed(own, own + len("לקמן גיטין דף כג:")),
+                    failed(other, other + len("לקמן ברכות דף כג:")),
+                ]})()]
+
+        linker = Linker()
+        records, _ = link_books.process_batch(
+            linker, link_books.BookKey("Sefaria", "רש\"י על גיטין"),
+            [(7, content, "Rashi on Gittin 3a:14:1")], lambda _line: None,
+            context_ref_factory=TalmudRef,
+        )
+        self.assertTrue(linker.with_failures)
+        self.assertEqual(
+            [(r.start, r.target_ref, r.relative_direction, r.context_ref) for r in records],
+            [(own, "Gittin 23b", "below", "Rashi on Gittin 3a:14:1")],
+        )
 
 
 if __name__ == "__main__":
