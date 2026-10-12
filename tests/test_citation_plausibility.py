@@ -80,20 +80,28 @@ class SpelledTalmudRefTest(unittest.TestCase):
 
 
 class TalmudRef:
-    """A Sefaria Ref stand-in for Talmud addresses: Gittin ends at 90b."""
+    """A Sefaria Ref stand-in for Talmud addresses: Gittin ends at 90b, Shabbat at 157b."""
     HEBREW = {"Gittin": "גיטין", "Rashi on Gittin": "רש\"י על גיטין", "Berakhot": "ברכות",
-              "Bava Metzia": "בבא מציעא", "Rashi on Bava Metzia": "רש\"י על בבא מציעא"}
+              "Bava Metzia": "בבא מציעא", "Rashi on Bava Metzia": "רש\"י על בבא מציעא",
+              "Shabbat": "שבת", "Tosafot on Shabbat": "תוספות על שבת", "Rif Gittin": "רי\"ף גיטין",
+              "Hagahot HaBach on Rif Gittin": "הגהות הב\"ח על רי\"ף גיטין"}
     LAST_DAF = 90
+    LAST = {"Shabbat": 157, "Tosafot on Shabbat": 157}
 
     def __init__(self, text):
+        text = {he: en for en, he in self.HEBREW.items()}.get(text, text)
         match = re.fullmatch(r"(.+?)(?: (\d+)([ab])(?::\d+)*)?", text)
         title, daf, amud = match.group(1), match.group(2), match.group(3)
-        if title not in self.HEBREW or (daf and not 2 <= int(daf) <= self.LAST_DAF):
+        last = self.LAST.get(title, self.LAST_DAF)
+        if title not in self.HEBREW or (daf and not 2 <= int(daf) <= last):
             raise ValueError(text)
         self.text = text
-        base = [title[len("Rashi on "):]] if title.startswith("Rashi on ") else []
+        base = [title.split(" on ")[-1]] if " on " in title else []
+        dependent = {"dependence": "Commentary"} if base or title.startswith("Rif ") else {}
         self.index = type("Index", (), {
-            "title": title, "base_text_titles": base,
+            "title": title, "base_text_titles": base or (["Gittin"] if dependent else []),
+            "categories": ["Talmud", "Bavli"] + (["Rishonim on Talmud"] if dependent else [])
+            + ["Seder Nashim"], **dependent,
             "get_title": lambda _self, lang: self.HEBREW[title]})()
         self.sections = [2 * int(daf) - (amud == "a")] if daf else []
         self.toSections = self.sections
@@ -118,9 +126,9 @@ class OwnTractateRelativeRefTest(unittest.TestCase):
             ("לקמן גיטין פו.", ("Gittin 86a", "below")),
             ("לקמן גיטין ד' כג:", ("Gittin 23b", "below")),
             ("לקמן גיטין כ\"ג:", ("Gittin 23b", "below")),
-            ("לקמן גיטין כג, ב.", ("Gittin 23b", "below")),
+            ("(לקמן גיטין כג, ב)", ("Gittin 23b", "below")),
             ("לקמן גיטין דף כג ע\"ב", ("Gittin 23b", "below")),
-            ("לקמן גיטין דף כג: ע\"ש.", ("Gittin 23b", "below")),
+            ("ולקמן גיטין דף ד ע\"ב", ("Gittin 4b", "below")),
         ]:
             with self.subTest(anchor=anchor):
                 self.assertEqual(self.recover(anchor), expected)
@@ -150,10 +158,192 @@ class OwnTractateRelativeRefTest(unittest.TestCase):
             "לקמן גיטין פ\"ב.",
             "לקמן דף כג:",
             "גיטין דף כג:",
+            "לקמן גיטין כג, ב.",
+            "לקמן גיטין דף כג: ע\"ש.",
+            "(לקמן רי\"ף גיטין דף טז ע\"ב)",
+            "(לקמן רי\"ף גיטין דף כג.)",
+            "(לקמן גיטין יה:)",
+            "(לקמן גיטין דף הוא ע\"א)",
+            "(לקמן גיטין דבכג:)",
+            "(לקמן גיטין ד' ע\"ב)",
+            "(לקמן גיטין ע\"ב.)",
         ]:
             with self.subTest(anchor=anchor):
                 self.assertIsNone(self.recover(anchor, source="Rashi on Gittin 30a:1:1"
                                                if "לעיל" in anchor else "Rashi on Gittin 3a:14:1"))
+
+
+class UntitledRelativeRefTest(unittest.TestCase):
+    """"(לקמן יא:)" in a Shas commentary names a daf of its own tractate (Otzaria/otzaria#2408)."""
+
+    def recover(self, anchor, source="Tosafot on Shabbat 3a:1:1"):
+        found = link_books.untitled_relative_ref(anchor, TalmudRef(source), TalmudRef)
+        return None if found is None else (found[0].normal(), found[1])
+
+    def test_a_single_spelled_address_links_to_the_own_tractate(self):
+        for anchor, source, expected in [
+            ("(לקמן יא:)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 11b", "below")),
+            ("(לקמן דף סו.)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 66a", "below")),
+            ("(לקמן מז:)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 47b", "below")),
+            ("(לקמן צה ע\"ב)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 95b", "below")),
+            ("(לעיל ב,א)", "Tosafot on Shabbat 5a:1:1", ("Shabbat 2a", "above")),
+            ("(לעיל ד,א)", "Tosafot on Shabbat 5a:1:1", ("Shabbat 4a", "above")),
+            ("לקמן כג, ב", "Tosafot on Shabbat 3a:1:1", ("Shabbat 23b", "below")),
+            ("לקמן כ\"ג.", "Tosafot on Shabbat 3a:1:1", ("Shabbat 23a", "below")),
+            ("ולקמן ד' כג:", "Tosafot on Shabbat 3a:1:1", ("Shabbat 23b", "below")),
+            ("דלעיל דף ג ע\"א", "Tosafot on Shabbat 5a:1:1", ("Shabbat 3a", "above")),
+            ("להלן ז:", "Rashi on Gittin 3a:1:1", ("Gittin 7b", "below")),
+            ("לקמן יא:", "Shabbat 3a:2", ("Shabbat 11b", "below")),
+            ("(לקמן דף ד ע\"ב)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 4b", "below")),
+            ("(לקמן ד.)", "Tosafot on Shabbat 3a:1:1", ("Shabbat 4a", "below")),
+        ]:
+            with self.subTest(anchor=anchor, source=source):
+                self.assertEqual(self.recover(anchor, source), expected)
+
+    def test_a_lone_amud_is_the_other_side_of_the_source_daf(self):
+        self.assertEqual(self.recover("(לקמן ע\"ב)", "Tosafot on Shabbat 3a:1:1"),
+                         ("Shabbat 3b", "below"))
+        self.assertEqual(self.recover("(להלן ע\"ב)", "Shabbat 3a:2"), ("Shabbat 3b", "below"))
+        self.assertEqual(self.recover("(לעיל ע\"א)", "Tosafot on Shabbat 3b:1:1"),
+                         ("Shabbat 3a", "above"))
+        for anchor, source in [
+            ("(לקמן ע\"ב)", "Tosafot on Shabbat 3b:1:1"),
+            ("(לקמן ע\"א)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ע\"א)", "Tosafot on Shabbat 3b:1:1"),
+            ("(לעיל ע\"א)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לעיל ע\"ב)", "Tosafot on Shabbat 3b:1:1"),
+            ("(לעיל ע\"ב)", "Tosafot on Shabbat 4a:1:1"),
+            ("(לקמן ע\"ב.)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן דף ע\"ב)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ד' ע\"ב)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ד׳ ע״ב)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ד ע\"ב)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ד'.)", "Tosafot on Shabbat 3a:1:1"),
+        ]:
+            with self.subTest(anchor=anchor, source=source):
+                self.assertIsNone(self.recover(anchor, source))
+
+    def test_a_lone_amud_needs_a_source_on_one_amud(self):
+        source = TalmudRef("Tosafot on Shabbat 3b:1:1")
+        source.toSections = [source.sections[0] + 1]  # 3b-4a
+        self.assertIsNone(link_books.untitled_relative_ref("(לעיל ע\"א)", source, TalmudRef))
+
+    def test_the_wrong_side_the_same_amud_or_a_missing_daf_is_dropped(self):
+        for anchor, source in [
+            ("(לעיל יא:)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן ב.)", "Tosafot on Shabbat 5a:1:1"),
+            ("(לקמן ג.)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לעיל ג.)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן קס:)", "Tosafot on Shabbat 3a:1:1"),
+            ("(לקמן דף פנ:)", "Rashi on Gittin 3a:1:1"),
+        ]:
+            with self.subTest(anchor=anchor, source=source):
+                self.assertIsNone(self.recover(anchor, source))
+
+    def test_noise_and_unclear_anchors_stay_unlinked(self):
+        for anchor in [
+            "(לקמן קיב)",
+            "(לקמן כז)",
+            "(לקמן סי' נז)",
+            "(לעיל סי' קנח)",
+            "(לקמן ה\"ה)",
+            "(לקמן שם)",
+            "(לעיל בפרק הלוקח בהמה)",
+            "(לעיל ריש פירקין)",
+            "(לעיל דך לח:)",
+            "(לקמן דן קמא: ושם)",
+            "(לקמן ' ף קז: ושם)",
+            "(לקמן המצניע דף צא:)",
+            "(לעיל עמוד א)",
+            "(לקמן סד,סוע\"ב)",
+            "(לעיל . כט:)",
+            "(לקמן קמיב:)",
+            "(לקמן יא: ושם)",
+            "(לקמן יא: ודף יב.)",
+            "בגמרא לקמן (דף יג.",
+            "לקמן ו: ד\"ה ושמואל",
+            "לקמן פ\"ב.",
+            "(לקמן פנ:)",
+            "(לעיל יה.)",
+            "(לעיל ס\"ס.)",
+            "(לקמן <b>יא:</b>)",
+            "יא:",
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.recover(anchor, "Tosafot on Shabbat 30a:1:1"
+                                               if "לעיל" in anchor else "Tosafot on Shabbat 3a:1:1"))
+
+    def test_only_the_tractate_or_its_commentary_supplies_the_tractate(self):
+        self.assertIsNone(self.recover("(לקמן יא:)", "Rif Gittin 3a:1"))
+        self.assertIsNone(self.recover("(לקמן יא:)", "Hagahot HaBach on Rif Gittin 5a:1"))
+        for source in ("Rif Gittin 3a:1", "Hagahot HaBach on Rif Gittin 5a:1"):
+            self.assertIsNone(link_books.own_tractate_relative_ref(
+                "(לקמן גיטין דף כג:)", TalmudRef(source), TalmudRef))
+        self.assertIsNone(link_books.untitled_relative_ref("(לקמן יא:)", None, TalmudRef))
+        self.assertIsNone(link_books.untitled_relative_ref(
+            "(לקמן יא:)", TalmudRef("Tosafot on Shabbat 3a:1:1"), None))
+
+
+class TalmudPositionsTest(unittest.TestCase):
+    """A non-Sefaria "X על <tractate>" is placed by its own daf headings (Otzaria/otzaria#2408)."""
+
+    BOOK = link_books.BookKey("DictaToOtzaria", "חידושי הר\"ן על גיטין")
+
+    def positions(self, contents, book=BOOK):
+        lines = [(i, content, f"{book.canonical_he_title} {i + 1}")
+                 for i, content in enumerate(contents)]
+        found = link_books.talmud_positions(book, lines, TalmudRef)
+        return {i: ref.normal() for i, ref in found.items()}
+
+    def test_a_daf_heading_with_its_amud_places_the_lines_below_it(self):
+        self.assertEqual(self.positions([
+            "<h1>חידושי הר\"ן על גיטין</h1>",
+            "הקדמה",
+            "<h2>דף ד.</h2>",
+            "מתני'",
+            "<h2>דף ד:</h2>",
+            "גמ'",
+            "<h2>דף ה ע\"א</h2>",
+            "שם",
+            "<h2>דף ה עמוד ב</h2>",
+            "<h3>רש\"י</h3>",
+            "ד\"ה",
+        ]), {2: "Gittin 4a", 3: "Gittin 4a", 4: "Gittin 4b", 5: "Gittin 4b", 6: "Gittin 5a",
+             7: "Gittin 5a", 8: "Gittin 5b", 9: "Gittin 5b", 10: "Gittin 5b"})
+
+    def test_an_unclear_or_contradicted_heading_places_nothing(self):
+        self.assertEqual(self.positions([
+            "<h2>סימן א</h2>", "<h3>ב.</h3>", "טקסט",
+            "<h2>דף יד:</h2>", "<h3>צ' ע\"א</h3>", "טקסט", "<h3>רש\"י</h3>", "טקסט",
+            "<h2>דף ד</h2>", "טקסט",
+            "<h2>דף יה.</h2>", "טקסט",
+            "<h2>דף צה.</h2>", "טקסט",
+            "<h2>דף ו.</h2>", "<h3>דף ז.</h3>", "טקסט",
+            "<h2>פרק שני</h2>", "טקסט",
+            "<h2>דף ו - ז</h2>", "<h3>דף ו.</h3>", "טקסט",
+            "<h2>דף ז.</h2>", "<h3>ב</h3>", "טקסט",
+        ]), {3: "Gittin 14b", 6: "Gittin 14b", 7: "Gittin 14b", 14: "Gittin 6a",
+             22: "Gittin 7a", 23: "Gittin 7a", 24: "Gittin 7a"})
+
+    def test_only_a_non_sefaria_commentary_on_a_bavli_tractate_is_placed(self):
+        contents = ["<h2>דף ד.</h2>", "טקסט"]
+        self.assertEqual(self.positions(contents), {0: "Gittin 4a", 1: "Gittin 4a"})
+        for book in [
+            link_books.BookKey("Sefaria", "חידושי הר\"ן על גיטין"),
+            link_books.BookKey("KSK", "קובץ שיטות קמאי על גיטין"),
+            link_books.BookKey("DictaToOtzaria", "חידושים על רי\"ף גיטין"),
+            link_books.BookKey("DictaToOtzaria", "חידושים על בראשית"),
+            link_books.BookKey("DictaToOtzaria", "גיטין"),
+        ]:
+            with self.subTest(book=book):
+                self.assertEqual(self.positions(contents, book), {})
+        self.assertEqual(link_books.talmud_positions(
+            self.BOOK, [(0, "<h2>דף ד.</h2>", "x"), (1, "טקסט", "x")], None), {})
+        # Only the tractate's own title: Ref may also accept an alternate one.
+        alias = {"מסכת גיטין": "Gittin"}
+        self.assertEqual(link_books.talmud_positions(
+            link_books.BookKey("DictaToOtzaria", "חידושים על מסכת גיטין"),
+            [(0, "<h2>דף ד.</h2>", "x")], lambda text: TalmudRef(alias.get(text, text))), {})
 
 
 class IbidCandidateTest(unittest.TestCase):

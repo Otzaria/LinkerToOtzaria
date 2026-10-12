@@ -2013,11 +2013,13 @@ def process_book(
     records: list[LinkRecord] = []
     words = 0
     ibid_context = IbidContext() if requires_book_context(lines) else None
+    positions = talmud_positions(bk, lines, context_ref_factory)
     for batch_start, batch in transport_batches(lines):
         heartbeat()
         batch_records, batch_words = process_batch(
             linker, bk, batch, skipped_log, batch_start=batch_start, precomputed=precomputed,
             context_ref_factory=context_ref_factory, ibid_context=ibid_context,
+            talmud_positions=positions,
         )
         records.extend(batch_records)
         words += batch_words
@@ -2026,9 +2028,13 @@ def process_book(
 
 def process_batch(
     linker, bk, batch, skipped_log, *, batch_start=0, precomputed=None,
-    context_ref_factory=None, metrics=None, ibid_context=None,
+    context_ref_factory=None, metrics=None, ibid_context=None, talmud_positions=None,
 ):
-    """Link one transport batch, optionally continuing a book's ibid history."""
+    """Link one transport batch, optionally continuing a book's ibid history.
+
+    ``talmud_positions`` (from :func:`talmud_positions`) places lines whose own
+    context Sefaria cannot parse, for relative-citation recovery only.
+    """
     started = time.perf_counter()
     words = sum(len(content.split()) for _, content, _ in batch)
     context_objects = []
@@ -2128,14 +2134,23 @@ def process_batch(
                             continue
                         ref, target_ref = context_ref_factory(corrected), corrected
                     relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
+                recovered = None
                 if relative and relative_direction is None:
+                    position = context_object
+                    if bk.source_name != "Sefaria":
+                        # Its context ref only counts lines; Phase 2 also needs the record's own context.
+                        position = talmud_positions.get(line_index) if talmud_positions and context_ref else None
                     recovered = own_tractate_relative_ref(
-                        anchor_text, context_object, context_ref_factory)
+                        anchor_text, position, context_ref_factory
+                    ) or untitled_relative_ref(anchor_text, position, context_ref_factory)
                     if recovered is None:
                         continue
                     ref, relative_direction = recovered
                     target_ref = ref.normal()
-                last_ref = ref
+                # Text-rebuilt targets stay out of the "שם" history, so later ibid
+                # picks match a run without them.
+                if recovered is None:
+                    last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
@@ -2335,6 +2350,8 @@ def process_book_checkpointed(
     # exceeded the recycle cap replayed the same batches forever: relinks 35458432836
     # and 35477368314 both livelocked there and never finished.)
     ibid_resumable = stateful_ibid and context_ref_factory is not None
+    # From the whole book: a batch may start mid-daf, below its heading.
+    positions = talmud_positions(bk, lines, context_ref_factory)
     for i, batch in transport_batches(lines, ner_indices):
         total_words += sum(len(content.split()) for _, content, _ in batch)
         heartbeat()
@@ -2412,7 +2429,7 @@ def process_book_checkpointed(
             records, _ = process_batch(
                 linker, bk, batch, skipped_log, batch_start=i, precomputed=precomputed,
                 context_ref_factory=context_ref_factory, metrics=metrics,
-                ibid_context=ibid_context,
+                ibid_context=ibid_context, talmud_positions=positions,
             )
             write_started = time.perf_counter()
             refuse_to_commit_after_memory_trouble()
@@ -2704,51 +2721,240 @@ def _daf_ref(tractate: str, token: str, side: str, ref_factory):
     daf = _numeral(letters) or (_numeral(letters[1:]) if len(letters) > 1 else None)
     if daf is None:
         return None
+    return _amud_ref(tractate, daf, side, ref_factory)
+
+
+def _amud_ref(tractate: str, daf: int, side: str, ref_factory):
     try:
         return ref_factory(f"{tractate} {daf}{'a' if side == 'א' else 'b'}")
     except Exception:
         return None
 
 
-# "כג." / "כ"ג:" — a daf whose amud is its trailing period/colon.  "ע"ב." and the
-# "ב." of "כג, ב." are amud markers of addresses _spelled_addresses already counts.
-_DAF_PUNCT_RE = re.compile(
-    r"(?<![^\s(])(?<!,\s)(?!ע[\"'״׳][אב])([א-ת][א-ת\"'״׳]*)([.:])")
-_PUNCT_SIDE = {".": "א", ":": "ב"}
 # "פ"ב." / "פ"ק." abbreviate פרק ב / פרק קמא, not a daf.
 _CHAPTER_ABBREVIATION_RE = re.compile(r"פ[\"'״׳]")
+_RELATIVE_WORD = r"[וד]?(?:לקמן|לעיל|להלן)\s+"
+_UNTITLED_DAF = r"[א-ת]{1,3}|[א-ת]{1,2}[\"״][א-ת]|[א-ת]['׳]"
+# One daf address: "יא:", "דף כ"ג.", "ב,א" or "צה ע"ב".
+_DAF_ADDRESS = (
+    rf"(?P<prefix>דף\s+|ד['׳]\s*)?(?P<daf>{_UNTITLED_DAF})"
+    r"(?:(?P<mark>[.:])|\s*,\s*(?P<comma>[אב])|\s+ע[\"״](?P<amud>[אב]))")
+# The whole anchor: "לקמן יא:", "לעיל דף כ"ג.", "לעיל ב,א", "לקמן צה ע"ב", or "לקמן ע"ב".
+_UNTITLED_RELATIVE_RE = re.compile(
+    rf"{_RELATIVE_WORD}(?:{_DAF_ADDRESS}|ע[\"״](?P<only>[אב]))")
+_PUNCT_SIDE = {".": "א", ":": "ב"}
+
+
+def _bare_anchor(anchor_text: str) -> str:
+    return anchor_text.strip().strip("()").strip()
 
 
 def own_tractate_relative_ref(anchor_text: str, source_ref, ref_factory):
     """The (Ref, direction) of "לקמן גיטין דף כג:" cited from within Gittin or its commentary.
 
     Sefaria leaves a relative citation that names a tractate unresolved, since its
-    לקמן/לעיל part matches nothing once the title supplies the book. The address is
-    taken from the text only when the tractate is the source's own, the anchor spells
-    exactly one daf, and that daf lies on the stated side of the source's amud.
+    לקמן/לעיל part matches nothing once the title supplies the book. The whole anchor
+    must be the relative word, the source's own tractate and one daf address.
     """
-    side_word = _relative_side(anchor_text)
-    if side_word is None or source_ref is None or ref_factory is None:
+    if not _is_talmud_source(source_ref, ref_factory):
         return None
-    if not source_ref.is_talmud() or not source_ref.sections:
+    tractates = _own_tractates(source_ref, ref_factory)
+    if len(tractates) != 1:
         return None
-    addresses = [(token, _PUNCT_SIDE[mark]) for token, mark in _DAF_PUNCT_RE.findall(anchor_text)
-                 if _numeral(re.sub(r"[^א-ת]", "", token))
-                 and not _CHAPTER_ABBREVIATION_RE.match(token)]
-    addresses += _spelled_addresses(anchor_text)
-    if len(addresses) != 1:
+    he = ref_factory(tractates[0]).index.get_title("he")
+    if not he:
         return None
-    # A commentary "X on <tractate>" is laid out by the tractate's own amudim.
+    match = re.fullmatch(rf"{_RELATIVE_WORD}{re.escape(he)}\s+{_DAF_ADDRESS}",
+                         _bare_anchor(anchor_text))
+    if match is None:
+        return None
+    return _on_stated_side(_address_ref(match, tractates[0], ref_factory), source_ref,
+                           _relative_side(match.group()))
+
+
+def untitled_relative_ref(anchor_text: str, source_ref, ref_factory):
+    """The (Ref, direction) of "לקמן יא:" or "לעיל ע"א" cited from within a tractate or its commentary.
+
+    The tractate is the source's own: the tractate itself, or the one a commentary
+    "X on <tractate>" is on. A lone amud is the source's own daf. Anything beyond one
+    such address (a chapter, a section, "שם", a typo) is dropped.
+    """
+    match = _UNTITLED_RELATIVE_RE.fullmatch(_bare_anchor(anchor_text))
+    if match is None or not _is_talmud_source(source_ref, ref_factory):
+        return None
+    side_word = _relative_side(match.group())
+    tractates = _own_tractates(source_ref, ref_factory)
+    if len(tractates) != 1:
+        return None
+    if match["only"]:
+        amud = source_ref.sections[0]
+        # A source spanning amudim has no single own daf to take the other side of.
+        if source_ref.toSections[0] != amud:
+            return None
+        target = _amud_ref(tractates[0], (amud + 1) // 2, match["only"], ref_factory)
+        return _on_stated_side(target, source_ref, side_word)
+    return _on_stated_side(_address_ref(match, tractates[0], ref_factory), source_ref, side_word)
+
+
+def _address_ref(match, tractate: str, ref_factory):
+    daf = match["daf"]
+    letters = re.sub(r"[^א-ת]", "", daf)
+    # "ע"ב." may be amud b, not daf 72; "פ"ב." is a chapter; "פנ:" is a typo, not daf 130.
+    if (re.fullmatch(r"ע[\"״'׳][אב]", daf) or _CHAPTER_ABBREVIATION_RE.match(daf)
+            or not _is_canonical_numeral(letters)):
+        return None
+    # "ד' ע"ב" may be "דף ע"ב" as well as daf 4b.
+    if letters == "ד" and not (match["prefix"] or "").startswith("דף") and (
+            daf != "ד" or match["amud"]):
+        return None
+    side = _PUNCT_SIDE[match["mark"]] if match["mark"] else match["comma"] or match["amud"]
+    return _amud_ref(tractate, _numeral(letters), side, ref_factory)
+
+
+def _is_canonical_numeral(letters: str) -> bool:
+    value = _numeral(letters)
+    if value is None or value >= 400:
+        return False
+    hundreds, rest = divmod(value, 100)
+    tens, units = divmod(rest, 10)
+    spelled = {15: "טו", 16: "טז"}.get(rest, " יכלמנסעפצ"[tens] + " אבגדהוזחט"[units])
+    return letters == (" קרש"[hundreds] + spelled).replace(" ", "")
+
+
+def _is_talmud_source(source_ref, ref_factory) -> bool:
+    return (source_ref is not None and ref_factory is not None
+            and bool(source_ref.is_talmud()) and bool(source_ref.sections))
+
+
+def _own_tractates(source_ref, ref_factory) -> list[str]:
+    return (_commented_tractates(source_ref, ref_factory)
+            or _bavli_tractate_itself(source_ref.index))
+
+
+def _commented_tractates(source_ref, ref_factory) -> list[str]:
+    # A commentary "X on <tractate>" is laid out by the tractate's own amudim; one on
+    # Rif or Zohar is not.
     own = source_ref.index.title
-    titles = [own] + [t for t in getattr(source_ref.index, "base_text_titles", None) or ()
-                      if own.endswith(f" on {t}")]
-    token, side = addresses[0]
-    # The daf must follow the title itself: "גיטין פרק ב." names a chapter, not daf ב.
-    named = [t for t in titles if (he := ref_factory(t).index.get_title("he")) and re.search(
-        rf"(?<![א-ת]){re.escape(he)}\s+(?:(?:דף|ד[׳'])\s*)?{re.escape(token)}", anchor_text)]
-    if len(named) != 1:
+    return [t for t in getattr(source_ref.index, "base_text_titles", None) or ()
+            if own.endswith(f" on {t}") and _is_bavli_tractate_title(t, ref_factory)]
+
+
+def _is_bavli_tractate_title(title: str, ref_factory) -> bool:
+    try:
+        return bool(_bavli_tractate_itself(ref_factory(title).index))
+    except Exception:
+        return False
+
+
+def _bavli_tractate_itself(index) -> list[str]:
+    # Only a tractate (["Talmud", "Bavli", "Seder ..."]) qualifies; a work such as Rif
+    # is paged by its own dapim.
+    categories = list(getattr(index, "categories", None) or ())
+    if (categories[:2] == ["Talmud", "Bavli"] and len(categories) == 3
+            and categories[2].startswith("Seder ")
+            and getattr(index, "dependence", None) is None
+            and not getattr(index, "base_text_titles", None)):
+        return [index.title]
+    return []
+
+
+_HEADING_LINE_RE = re.compile(r"\s*<h([1-6])[^>]*>(.*?)</h\1>\s*", re.S)
+# A heading that spells an address: "דף כג:", "דף כג ע"ב", "דף כג עמוד ב", "צ' ע"א".
+_HEADING_ADDRESS_RE = re.compile(
+    rf"(?P<prefix>דף\s+)?(?P<daf>{_UNTITLED_DAF})"
+    r"(?:\s*(?P<mark>[.:])|\s+ע[\"״'׳](?P<amud>[אב])|\s+עמוד\s+(?P<amud_word>[אב]))?")
+_HEADING_AMUD_RE = re.compile(r"(?:ע[\"״'׳]|עמוד\s+)(?P<amud>[אב])")
+
+
+def talmud_positions(bk, lines, ref_factory) -> dict:
+    """The Bavli amud of each line of a non-Sefaria "X על <tractate>", from its daf headings.
+
+    Sefaria cannot parse such a book's own context ref, so a relative daf citation in
+    it has no position. A line is placed by the nearest "דף ..." heading above it only
+    when that heading spells one amud and no other heading in its stack disagrees.
+    """
+    # KSK quotes other rishonim, whose "לקמן" often means their own tractate.
+    if bk.source_name in ("Sefaria", "KSK") or ref_factory is None:
+        return {}
+    tractate = _commented_bavli_tractate(bk.canonical_he_title, ref_factory)
+    if tractate is None:
+        return {}
+    refs = {}
+
+    def amud_ref(address):
+        if address not in refs:
+            refs[address] = _amud_ref(tractate, address[0], address[1], ref_factory)
+        return refs[address]
+
+    positions = {}
+    stack = {}
+    ref = None
+    for line_index, content, _context_ref in lines:
+        heading = _HEADING_LINE_RE.fullmatch(content or "")
+        if heading:
+            level = int(heading.group(1))
+            stack = {lvl: text for lvl, text in stack.items() if lvl < level}
+            stack[level] = re.sub(r"\s+", " ", _HTML_TAG_RE.sub("", heading.group(2))).strip()
+            address = _stack_address(stack)
+            ref = amud_ref(address) if address is not None else None
+        if ref is not None:
+            positions[line_index] = ref
+    return positions
+
+
+def _commented_bavli_tractate(title: str, ref_factory):
+    parts = (title or "").split(" על ")
+    found = set()
+    for i in range(1, len(parts)):
+        he = " על ".join(parts[i:])
+        try:
+            ref = ref_factory(he)
+        except Exception:
+            continue
+        if not ref.sections and ref.index.get_title("he") == he:
+            found.update(_bavli_tractate_itself(ref.index))
+    return found.pop() if len(found) == 1 else None
+
+
+def _stack_address(stack):
+    """The (daf, amud) of the innermost "דף" heading, or None on any doubt."""
+    daf_levels = [lvl for lvl, text in stack.items() if text.startswith("דף")]
+    if not daf_levels:
         return None
-    target = _daf_ref(named[0], token, side, ref_factory)
+    nearest = max(daf_levels)
+    address = _heading_address(stack[nearest], canonical=True)
+    if address is None or address[1] is None:
+        return None
+    for lvl, text in stack.items():
+        if lvl == nearest:
+            continue
+        other = _heading_address(text, canonical=False)
+        if other is None:
+            amud_only = _HEADING_AMUD_RE.fullmatch(text)
+            other = (address[0], amud_only["amud"]) if amud_only else None
+        # Any other "דף" heading must spell this same amud; others only when they spell one.
+        if (other is None and text.startswith("דף")) or (other is not None and other != address):
+            return None
+    return address
+
+
+def _heading_address(text: str, *, canonical: bool):
+    match = _HEADING_ADDRESS_RE.fullmatch(text)
+    if match is None:
+        return None
+    letters = re.sub(r"[^א-ת]", "", match["daf"])
+    valid = _is_canonical_numeral(letters) if canonical else _numeral(letters) is not None
+    if not valid:
+        return None
+    amud = (_PUNCT_SIDE[match["mark"]] if match["mark"]
+            else match["amud"] or match["amud_word"])
+    # A bare "א" is a section number; only "דף א" or "א." spells a daf.
+    if amud is None and not match["prefix"]:
+        return None
+    return _numeral(letters), amud
+
+
+def _on_stated_side(target, source_ref, side_word: str):
     if target is None:
         return None
     amud = target.sections[0]

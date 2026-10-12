@@ -13,6 +13,7 @@ from line_baseline import (  # noqa: E402
     compute_line_delta,
     indices_from_ranges,
     line_fingerprint,
+    placed_by_daf_headings,
     plan_changed_books,
     validate_baseline_identity,
 )
@@ -132,6 +133,35 @@ class LineBaselineTest(unittest.TestCase):
                 baseline_identity_valid=True,
             )
             self.assertEqual((reused, ner), (0, 3))
+
+    def test_book_placed_by_daf_headings_is_never_reused_by_line(self):
+        # Deleting "דף ג:" leaves the citation line unchanged but unplaced.
+        key = ("DictaToOtzaria", "חידושים על גיטין")
+        book = BookKey(*key)
+        self.assertTrue(placed_by_daf_headings(book))
+        self.assertFalse(placed_by_daf_headings(BookKey("Sefaria", "רש\"י על גיטין")))
+        self.assertFalse(placed_by_daf_headings(self.BOOK))
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            (repo / "artifacts").mkdir()
+            old_snapshot = repo / "old.db"
+            snapshot(old_snapshot, [
+                (*key, 0, "<h2>דף ג:</h2>"), (*key, 1, "(לקמן ד.)"), (*key, 2, "ג")])
+            baseline_hashes = {key: "1" * 16}
+            build_line_baseline(
+                str(old_snapshot), str(repo / "line-baseline"),
+                current_hashes=baseline_hashes, snapshot_sha256="2" * 64,
+                engine_fingerprint="engine-v1", artifacts_root=str(repo / "artifacts"),
+            )
+            new_snapshot = repo / "new.db"
+            snapshot(new_snapshot, [
+                (*key, 0, "<h2>פרק ב</h2>"), (*key, 1, "(לקמן ד.)"), (*key, 2, "ג")])
+            plans, reused, ner = plan_changed_books(
+                str(new_snapshot), [book], baseline_root=str(repo / "line-baseline"),
+                baseline_hashes=baseline_hashes, baseline_identity_valid=True,
+            )
+            self.assertEqual((reused, ner), (0, 3))
+            self.assertEqual(plans[key].reuse, ())
 
     def test_checkpointed_merge_rewrites_only_unmatched_line(self):
         with tempfile.TemporaryDirectory() as temporary:

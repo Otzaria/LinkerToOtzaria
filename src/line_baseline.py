@@ -345,6 +345,15 @@ def full_ner_delta(current_rows: list[tuple[int, str, str]]) -> LineDelta:
     )
 
 
+def placed_by_daf_headings(book: BookKey) -> bool:
+    """Whether link_books.talmud_positions may place this book's lines by its daf headings.
+
+    Editing or deleting such a heading changes the lines below it, which a per-line
+    plan cannot see in the old rows, so these books are always resolved whole.
+    """
+    return book.source_name != "Sefaria" and " על " in (book.canonical_he_title or "")
+
+
 def requires_book_context(current_rows: list[tuple[int, str, str]]) -> bool:
     """Whether resolving this book needs preceding-line citation history.
 
@@ -432,7 +441,8 @@ def plan_changed_books(
             current_rows = _read_book_rows(connection, book)
             key = (book.source_name, book.canonical_he_title)
             delta = None
-            if baseline_identity_valid and key in baseline_hashes:
+            if (baseline_identity_valid and key in baseline_hashes
+                    and not placed_by_daf_headings(book)):
                 try:
                     old_rows, artifact_sha256 = _load_book_baseline(
                         baseline_root, book, baseline_hashes[key]
