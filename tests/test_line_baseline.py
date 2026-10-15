@@ -13,6 +13,7 @@ from line_baseline import (  # noqa: E402
     compute_line_delta,
     indices_from_ranges,
     line_fingerprint,
+    placed_by_daf_headings,
     plan_changed_books,
     validate_baseline_identity,
 )
@@ -132,6 +133,71 @@ class LineBaselineTest(unittest.TestCase):
                 baseline_identity_valid=True,
             )
             self.assertEqual((reused, ner), (0, 3))
+
+    def test_book_placed_by_daf_headings_is_never_reused_by_line(self):
+        # Deleting "דף ג:" leaves the citation line unchanged but unplaced.
+        key = ("DictaToOtzaria", "חידושים על גיטין")
+        book = BookKey(*key)
+        self.assertTrue(placed_by_daf_headings(book))
+        self.assertFalse(placed_by_daf_headings(BookKey("Sefaria", "רש\"י על גיטין")))
+        self.assertFalse(placed_by_daf_headings(self.BOOK))
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            (repo / "artifacts").mkdir()
+            old_snapshot = repo / "old.db"
+            snapshot(old_snapshot, [
+                (*key, 0, "<h2>דף ג:</h2>"), (*key, 1, "(לקמן ד.)"), (*key, 2, "ג")])
+            baseline_hashes = {key: "1" * 16}
+            build_line_baseline(
+                str(old_snapshot), str(repo / "line-baseline"),
+                current_hashes=baseline_hashes, snapshot_sha256="2" * 64,
+                engine_fingerprint="engine-v1", artifacts_root=str(repo / "artifacts"),
+            )
+            new_snapshot = repo / "new.db"
+            snapshot(new_snapshot, [
+                (*key, 0, "<h2>פרק ב</h2>"), (*key, 1, "(לקמן ד.)"), (*key, 2, "ג")])
+            plans, reused, ner = plan_changed_books(
+                str(new_snapshot), [book], baseline_root=str(repo / "line-baseline"),
+                baseline_hashes=baseline_hashes, baseline_identity_valid=True,
+            )
+            self.assertEqual((reused, ner), (0, 3))
+            self.assertEqual(plans[key].reuse, ())
+
+    def test_daf_heading_gate_only_covers_bavli_commentaries(self):
+        for title in ["חידושים על גיטין", "חידושים על בבא מציעא",
+                      "חידושים על ראש השנה", "הערות על חברותא על נדה"]:
+            with self.subTest(title=title):
+                self.assertTrue(placed_by_daf_headings(BookKey("MoreBooks", title)))
+
+    def test_books_outside_daf_heading_recovery_keep_line_reuse(self):
+        for key in [
+            ("KSK", "קובץ שיטות קמאי על גיטין"),
+            ("MoreBooks", "דור המלקטים על אורח חיים"),
+            ("MoreBooks", "חידושים על בראשית"),
+            ("MoreBooks", "חידושים על רי\"ף גיטין"),
+            ("DictaToOtzaria", "גליוני השס על ירושלמי בבא קמא"),
+        ]:
+            with self.subTest(book=key), tempfile.TemporaryDirectory() as temporary:
+                book = BookKey(*key)
+                self.assertFalse(placed_by_daf_headings(book))
+                repo = Path(temporary)
+                (repo / "artifacts").mkdir()
+                old_snapshot = repo / "old.db"
+                snapshot(old_snapshot, [(*key, 0, "א"), (*key, 1, "ב"), (*key, 2, "ג")])
+                baseline_hashes = {key: "1" * 16}
+                build_line_baseline(
+                    str(old_snapshot), str(repo / "line-baseline"),
+                    current_hashes=baseline_hashes, snapshot_sha256="2" * 64,
+                    engine_fingerprint="engine-v1", artifacts_root=str(repo / "artifacts"),
+                )
+                new_snapshot = repo / "new.db"
+                snapshot(new_snapshot, [(*key, 0, "א"), (*key, 1, "חדש"), (*key, 2, "ג")])
+                plans, reused, ner = plan_changed_books(
+                    str(new_snapshot), [book], baseline_root=str(repo / "line-baseline"),
+                    baseline_hashes=baseline_hashes, baseline_identity_valid=True,
+                )
+                self.assertEqual((reused, ner), (2, 1))
+                self.assertEqual(plans[key].reuse, ((0, 0), (2, 2)))
 
     def test_checkpointed_merge_rewrites_only_unmatched_line(self):
         with tempfile.TemporaryDirectory() as temporary:

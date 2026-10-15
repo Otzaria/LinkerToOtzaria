@@ -53,7 +53,7 @@ class _Linker:
     def __init__(self, docs):
         self._docs = docs
 
-    def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+    def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
         return self._docs
 
 

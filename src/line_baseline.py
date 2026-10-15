@@ -35,6 +35,15 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 # deliberately broad: a needless full-book pass costs time; a stale ibid target is
 # a silent wrong link.  The linker is still free to reject ordinary uses of the word.
 _IBID_TOKEN_RE = re.compile(r"(?<![א-ת])שם(?![א-ת])")
+# Canonical Hebrew Bavli tractate titles; the planner must not import Sefaria.
+# The resolver shares this gate and still validates the actual index metadata.
+_BAVLI_HE_TITLES = frozenset({
+    "ברכות", "שבת", "עירובין", "פסחים", "ראש השנה", "יומא", "סוכה", "ביצה",
+    "תענית", "מגילה", "מועד קטן", "חגיגה", "יבמות", "כתובות", "נדרים", "נזיר",
+    "סוטה", "גיטין", "קידושין", "בבא קמא", "בבא מציעא", "בבא בתרא", "סנהדרין",
+    "מכות", "שבועות", "עבודה זרה", "הוריות", "זבחים", "מנחות", "חולין", "בכורות",
+    "ערכין", "תמורה", "כריתות", "מעילה", "תמיד", "נדה",
+})
 
 
 @dataclass(frozen=True)
@@ -345,6 +354,18 @@ def full_ner_delta(current_rows: list[tuple[int, str, str]]) -> LineDelta:
     )
 
 
+def placed_by_daf_headings(book: BookKey) -> bool:
+    """Whether link_books.talmud_positions may place this book's lines by its daf headings.
+
+    Editing or deleting such a heading changes the lines below it, which a per-line
+    plan cannot see in the old rows, so these books are always resolved whole.
+    """
+    if book.source_name in ("Sefaria", "KSK"):
+        return False
+    _commentary, separator, tractate = (book.canonical_he_title or "").rpartition(" על ")
+    return bool(separator) and tractate in _BAVLI_HE_TITLES
+
+
 def requires_book_context(current_rows: list[tuple[int, str, str]]) -> bool:
     """Whether resolving this book needs preceding-line citation history.
 
@@ -432,7 +453,8 @@ def plan_changed_books(
             current_rows = _read_book_rows(connection, book)
             key = (book.source_name, book.canonical_he_title)
             delta = None
-            if baseline_identity_valid and key in baseline_hashes:
+            if (baseline_identity_valid and key in baseline_hashes
+                    and not placed_by_daf_headings(book)):
                 try:
                     old_rows, artifact_sha256 = _load_book_baseline(
                         baseline_root, book, baseline_hashes[key]

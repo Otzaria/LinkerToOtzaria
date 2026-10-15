@@ -437,7 +437,7 @@ class CommitGateTest(unittest.TestCase):
         ibid = self.ibid
 
         class Swallowing(ibid._Linker):
-            def bulk_link(inner, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(inner, texts, book_context_refs=None, type_filter=None, **_):
                 inner._ref_resolver.reset_ibid_history()
                 docs = []
                 for text in texts:

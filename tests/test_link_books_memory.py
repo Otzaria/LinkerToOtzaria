@@ -51,7 +51,7 @@ class WorkerMemoryTest(unittest.TestCase):
             resolved_refs = []
 
         class Linker:
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 return [Doc() for _ in texts]
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,7 +189,7 @@ class WorkerMemoryTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.calls.append((list(texts), list(book_context_refs or []), type_filter))
                 return [Doc() for _ in texts]
 
@@ -261,7 +261,7 @@ class WorkerMemoryTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.calls.append((list(texts), list(book_context_refs), type_filter))
                 return [Doc() for _ in texts]
 
@@ -317,7 +317,7 @@ class WorkerMemoryTest(unittest.TestCase):
                 self._ref_resolver = Resolver()
                 self.seen = []
 
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self._ref_resolver.reset_ibid_history()
                 self.seen.append([ref.normal() for ref in self._ref_resolver._ibid_history.last_refs])
                 self._ref_resolver._ibid_history.last_refs = Ref(texts[0])
@@ -445,7 +445,7 @@ class WorkerMemoryTest(unittest.TestCase):
             resolved_refs = [RR()]
 
         class Linker:
-            def bulk_link(self, texts, book_context_refs=None, type_filter=None):
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
                 self.contexts = book_context_refs
                 return [Doc()]
 
@@ -462,6 +462,174 @@ class WorkerMemoryTest(unittest.TestCase):
         self.assertEqual(records[0].context_ref, "Book 2")
         self.assertEqual(records[0].relative_direction, "below")
         self.assertEqual(records[0].target_ref, "Book 3")
+
+    def test_unresolved_own_tractate_relative_citation_is_recovered(self):
+        """Sefaria returns "לקמן גיטין דף כג:" as a failure (Otzaria/otzaria#2408)."""
+        from test_citation_plausibility import TalmudRef
+
+        Kind = lambda name: type("Kind", (), {"name": name})()  # noqa: E731
+
+        def failed(start, end, parts=("RELATIVE", "NAMED", "NUMBERED")):
+            return type("RR", (), {
+                "is_ambiguous": False, "ref": None, "context_type": None,
+                "resolution_failed": True,
+                "raw_entity": type("Raw", (), {
+                    "span": type("Span", (), {"range": (start, end)})(),
+                    "raw_ref_parts": [type("Part", (), {"type": Kind(p)})() for p in parts],
+                })(),
+            })()
+
+        content = "עיין (לקמן גיטין דף כג:) ו(לקמן ברכות דף כג:)"
+        own = content.index("לקמן גיטין")
+        other = content.index("לקמן ברכות")
+
+        class Linker:
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None,
+                          with_failures=False):
+                self.with_failures = with_failures
+                return [type("Doc", (), {"resolved_refs": [
+                    failed(own, own + len("לקמן גיטין דף כג:")),
+                    failed(other, other + len("לקמן ברכות דף כג:")),
+                ]})()]
+
+        linker = Linker()
+        records, _ = link_books.process_batch(
+            linker, link_books.BookKey("Sefaria", "רש\"י על גיטין"),
+            [(7, content, "Rashi on Gittin 3a:14:1")], lambda _line: None,
+            context_ref_factory=TalmudRef,
+        )
+        self.assertTrue(linker.with_failures)
+        self.assertEqual(
+            [(r.start, r.target_ref, r.relative_direction, r.context_ref) for r in records],
+            [(own, "Gittin 23b", "below", "Rashi on Gittin 3a:14:1")],
+        )
+
+    def test_unresolved_relative_citations_are_recovered_outside_ibid_history(self):
+        """Tosafot's "(לקמן יא:)" fails in Sefaria; recovering it must not move "שם"."""
+        from test_citation_plausibility import TalmudRef
+
+        Kind = lambda name: type("Kind", (), {"name": name})()  # noqa: E731
+
+        def failed(start, end):
+            return type("RR", (), {
+                "is_ambiguous": False, "ref": None, "context_type": None,
+                "resolution_failed": True,
+                "raw_entity": type("Raw", (), {
+                    "span": type("Span", (), {"range": (start, end)})(),
+                    "raw_ref_parts": [type("Part", (), {"type": Kind(p)})()
+                                      for p in ("RELATIVE", "NUMBERED")],
+                })(),
+            })()
+
+        content = "עיין (לקמן יא:) ו(לקמן שם) ו(לעיל ע\"ב) ו(לקמן שבת דף כג:)"
+        spans = [(content.index(a), content.index(a) + len(a))
+                 for a in ("(לקמן יא:)", "(לקמן שם)", "(לעיל ע\"ב)", "(לקמן שבת דף כג:)")]
+
+        class Linker:
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
+                return [type("Doc", (), {"resolved_refs": [failed(*s) for s in spans]})()]
+
+        previous = TalmudRef("Shabbat 2a")
+        ibid = type("Ibid", (), {"last_emitted_ref": previous,
+                                 "resolve": lambda _self, _linker, invoke: invoke()})()
+        records, _ = link_books.process_batch(
+            Linker(), link_books.BookKey("Sefaria", "תוספות על שבת"),
+            [(7, content, "Tosafot on Shabbat 3a:1:1")], lambda _line: None,
+            context_ref_factory=TalmudRef, ibid_context=ibid,
+        )
+        self.assertEqual(
+            [(r.start, r.target_ref, r.relative_direction, r.context_ref) for r in records],
+            [(spans[0][0], "Shabbat 11b", "below", "Tosafot on Shabbat 3a:1:1"),
+             (spans[3][0], "Shabbat 23b", "below", "Tosafot on Shabbat 3a:1:1")],
+        )
+        self.assertIs(ibid.last_emitted_ref, previous)
+
+    def test_a_non_sefaria_talmud_commentary_recovers_by_its_daf_heading(self):
+        """"(לקמן ד.)" in a Dicta "X על גיטין" line under "דף ג:" links to Gittin 4a."""
+        from test_citation_plausibility import TalmudRef
+
+        Kind = lambda name: type("Kind", (), {"name": name})()  # noqa: E731
+        content = "עיין (לקמן ד.) ובבראשית"
+        span = (content.index("(לקמן ד.)"), content.index("(לקמן ד.)") + len("(לקמן ד.)"))
+        failed = type("RR", (), {
+            "is_ambiguous": False, "ref": None, "context_type": None,
+            "resolution_failed": True,
+            "raw_entity": type("Raw", (), {
+                "span": type("Span", (), {"range": span})(),
+                "raw_ref_parts": [type("Part", (), {"type": Kind(p)})()
+                                  for p in ("RELATIVE", "NUMBERED")],
+            })(),
+        })()
+
+        class Linker:
+            def __init__(self):
+                self.contexts = []
+
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
+                self.contexts.append(list(book_context_refs))
+                return [type("Doc", (), {"resolved_refs": [failed]})() for _ in texts]
+
+        book = link_books.BookKey("DictaToOtzaria", "חידושי הר\"ן על גיטין")
+        lines = [(0, "<h2>דף ג:</h2>", "חידושי הר\"ן על גיטין 1"),
+                 (1, content, "חידושי הר\"ן על גיטין 2")]
+        positions = link_books.talmud_positions(book, lines, TalmudRef)
+
+        def run(talmud_positions):
+            linker = Linker()
+            previous = TalmudRef("Gittin 2a")
+            ibid = type("Ibid", (), {"last_emitted_ref": previous,
+                                     "resolve": lambda _self, _linker, invoke: invoke()})()
+            records, _ = link_books.process_batch(
+                linker, book, lines[1:], lambda _line: None, context_ref_factory=TalmudRef,
+                ibid_context=ibid, talmud_positions=talmud_positions,
+            )
+            self.assertEqual(linker.contexts, [[None]])
+            self.assertIs(ibid.last_emitted_ref, previous)
+            return [(r.start, r.end, r.target_ref, r.relative_direction, r.context_ref)
+                    for r in records]
+
+        self.assertEqual(run(None), [])
+        self.assertEqual(run(positions), [
+            (*span, "Gittin 4a", "below", "חידושי הר\"ן על גיטין 2")])
+        # Without its own context the record would be malformed for Phase 2.
+        lines[1] = (1, content, "")
+        self.assertEqual(run(positions), [])
+        # A context Sefaria happens to parse never outranks the book's daf headings.
+        lines[1] = (1, content, "Gittin 3a:1")
+        records, _ = link_books.process_batch(
+            Linker(), book, lines[1:], lambda _line: None, context_ref_factory=TalmudRef,
+            talmud_positions={},
+        )
+        self.assertEqual(records, [])
+
+    def test_book_drivers_pass_whole_book_talmud_positions_to_every_batch(self):
+        from test_citation_plausibility import TalmudRef
+
+        book = link_books.BookKey("DictaToOtzaria", "חידושי הר\"ן על גיטין")
+        lines = [(0, "<h2>דף ג:</h2>", "c0"), (1, "שורה א", "c1"), (2, "שורה ב", "c2")]
+        seen = []
+
+        def fake_process(_linker, _bk, batch, *_args, talmud_positions=None, **_kwargs):
+            seen.append((batch[0][0], {i: r.normal() for i, r in talmud_positions.items()}))
+            return [], 0
+
+        expected = {0: "Gittin 3b", 1: "Gittin 3b", 2: "Gittin 3b"}
+        with mock.patch.object(link_books, "BATCH_LINES", 1), \
+                mock.patch.object(link_books, "process_batch", side_effect=fake_process):
+            link_books.process_book(None, book, lines, lambda _l: None, lambda: None,
+                                    context_ref_factory=TalmudRef)
+            self.assertEqual(seen, [(1, expected), (2, expected)])
+            seen.clear()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(link_books, "RSS_CAP", 1e12), \
+                    mock.patch.object(link_books, "worker_memory_bytes", return_value=1e9):
+                link_books.process_book_checkpointed(
+                    None, book, lines, lambda _l: None, lambda: None,
+                    os.path.join(tmp, "cp"), os.path.join(tmp, "out.jsonl"),
+                    lambda _rss, _b: self.fail("unexpected recycle"),
+                    ner_indices={2}, reuse=[(1, 1), (0, 0)], context_ref_factory=TalmudRef,
+                )
+            self.assertEqual(seen, [(2, expected)])
 
 
 if __name__ == "__main__":
