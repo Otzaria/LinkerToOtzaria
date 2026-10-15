@@ -35,6 +35,15 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 # deliberately broad: a needless full-book pass costs time; a stale ibid target is
 # a silent wrong link.  The linker is still free to reject ordinary uses of the word.
 _IBID_TOKEN_RE = re.compile(r"(?<![א-ת])שם(?![א-ת])")
+# Canonical Hebrew Bavli tractate titles; the planner must not import Sefaria.
+# The resolver shares this gate and still validates the actual index metadata.
+_BAVLI_HE_TITLES = frozenset({
+    "ברכות", "שבת", "עירובין", "פסחים", "ראש השנה", "יומא", "סוכה", "ביצה",
+    "תענית", "מגילה", "מועד קטן", "חגיגה", "יבמות", "כתובות", "נדרים", "נזיר",
+    "סוטה", "גיטין", "קידושין", "בבא קמא", "בבא מציעא", "בבא בתרא", "סנהדרין",
+    "מכות", "שבועות", "עבודה זרה", "הוריות", "זבחים", "מנחות", "חולין", "בכורות",
+    "ערכין", "תמורה", "כריתות", "מעילה", "תמיד", "נדה",
+})
 
 
 @dataclass(frozen=True)
@@ -351,7 +360,10 @@ def placed_by_daf_headings(book: BookKey) -> bool:
     Editing or deleting such a heading changes the lines below it, which a per-line
     plan cannot see in the old rows, so these books are always resolved whole.
     """
-    return book.source_name != "Sefaria" and " על " in (book.canonical_he_title or "")
+    if book.source_name in ("Sefaria", "KSK"):
+        return False
+    _commentary, separator, tractate = (book.canonical_he_title or "").rpartition(" על ")
+    return bool(separator) and tractate in _BAVLI_HE_TITLES
 
 
 def requires_book_context(current_rows: list[tuple[int, str, str]]) -> bool:

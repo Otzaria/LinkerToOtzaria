@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from linker_artifact import (  # noqa: E402
     BookKey, LinkRecord, book_key_to_relpath, content_hash, remove_artifact, write_artifact,
 )
-from line_baseline import indices_from_ranges, requires_book_context  # noqa: E402
+from line_baseline import indices_from_ranges, placed_by_daf_headings, requires_book_context  # noqa: E402
 
 # Lines per bulk NER call. This is transport granularity: the explicit ibid context
 # below keeps citation history continuous across these boundaries. Tunable per host:
@@ -2874,7 +2874,7 @@ def talmud_positions(bk, lines, ref_factory) -> dict:
     when that heading spells one amud and no other heading in its stack disagrees.
     """
     # KSK quotes other rishonim, whose "לקמן" often means their own tractate.
-    if bk.source_name in ("Sefaria", "KSK") or ref_factory is None:
+    if not placed_by_daf_headings(bk) or ref_factory is None:
         return {}
     tractate = _commented_bavli_tractate(bk.canonical_he_title, ref_factory)
     if tractate is None:
