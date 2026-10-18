@@ -129,15 +129,38 @@ class AmudMarkedDafTest(unittest.TestCase):
         self.assertEqual(self.mark("Gittin 51", "כמבואר בגיטין דף נ\"א:, דמ\"מ", "גיטין דף נ\"א"),
                          ("Gittin 51b", "גיטין דף נ\"א:"))
 
+    def test_spaces_and_tags_before_the_colon_preserve_the_original_anchor(self):
+        for gap in (" ", "\t", "\u00a0", "</small>", " </small> <b> "):
+            anchor = "גיטין דף נא"
+            with self.subTest(gap=gap):
+                self.assertEqual(self.mark("Gittin 51", f"({anchor}{gap}: ושם)", anchor),
+                                 ("Gittin 51b", f"{anchor}{gap}:"))
+
+    def test_html_already_inside_the_anchor_does_not_hide_the_number(self):
+        anchor = 'גיטין דף <small title="עמוד">נא</small>'
+        self.assertEqual(self.mark("Gittin 51", f"({anchor} : ושם)", anchor),
+                         ("Gittin 51b", anchor + " :"))
+
     def test_a_period_is_not_trusted(self):
         # "(X דף כג. ובY דף כד)" uses "." as a list separator.
-        self.assertIsNone(self.mark("Bava Kamma 93", "(ב\"ק דף צג. ושם)", "ב\"ק דף צג"))
+        for gap in ("", " ", "</small>"):
+            with self.subTest(gap=gap):
+                self.assertIsNone(self.mark("Bava Kamma 93", f"(ב\"ק דף צג{gap}. ושם)", "ב\"ק דף צג"))
 
     def test_a_line_final_colon_closes_the_paragraph(self):
-        self.assertIsNone(self.mark("Gittin 51", "רש\"י בגיטין דף נא: <br/> ", "גיטין דף נא"))
+        for gap in ("", " ", "</small>", " </small> <b> "):
+            with self.subTest(gap=gap):
+                self.assertIsNone(self.mark("Gittin 51", f"רש\"י בגיטין דף נא{gap}: <br/> ", "גיטין דף נא"))
 
     def test_the_token_before_the_mark_must_spell_the_daf(self):
-        self.assertIsNone(self.mark("Gittin 51", "וכן בגיטין שם: ושם", "גיטין שם"))
+        for gap in ("", " ", "</small>"):
+            with self.subTest(gap=gap):
+                self.assertIsNone(self.mark("Gittin 51", f"וכן בגיטין שם{gap}: ושם", "גיטין שם"))
+                self.assertIsNone(self.mark("Gittin 51", f"וכן בגיטין דף נב{gap}: ושם", "גיטין דף נב"))
+
+    def test_intervening_text_is_not_skipped_to_find_a_colon(self):
+        self.assertIsNone(self.mark("Gittin 51", "גיטין דף נא ועוד: ושם", "גיטין דף נא"))
+        self.assertIsNone(self.mark("Gittin 51", "גיטין דף נא</small> ועוד: ושם", "גיטין דף נא"))
 
     def test_unmarked_or_non_talmud_targets_are_kept(self):
         self.assertIsNone(self.mark("Bava Kamma 93", "(בבא קמא דף צג) גבי", "בבא קמא דף צג"))
@@ -231,6 +254,29 @@ def _batch(content, rr, linker, **patches):
     return [(r.target_ref, content[r.start:r.end]) for r in records]
 
 
+class ResolvedAmudAnchorTest(unittest.TestCase):
+    def test_a_spaced_or_tagged_mark_keeps_original_utf16_offsets_and_hash(self):
+        for prefix in ("ועיין ", "😀 ועיין "):
+            for gap in (" ", "</small>"):
+                with self.subTest(prefix=prefix, gap=gap):
+                    content = f"{prefix}ב\"מ דף מד{gap}: ושם"
+                    start, end = content.index('ב"מ'), content.index("מד") + 2
+                    rr = types.SimpleNamespace(
+                        resolution_failed=False, is_ambiguous=False, context_type=None,
+                        ref=_Amudim("Bava Metzia 44"), raw_entity=_raw(content, start, end, []))
+                    linker = types.SimpleNamespace(bulk_link=lambda *_a, **_k: [
+                        types.SimpleNamespace(resolved_refs=[rr])])
+                    records = link_books.process_batch(
+                        linker, link_books.BookKey("MoreBooks", "ספר"), [(0, content, None)],
+                        lambda _line: None, context_ref_factory=_Amudim)[0]
+                    self.assertEqual(len(records), 1)
+                    record = records[0]
+                    self.assertEqual(record.target_ref, "Bava Metzia 44b")
+                    self.assertEqual(record.start, len(content[:start].encode("utf-16-le")) // 2)
+                    self.assertEqual(record.end, len(content[:content.index(":") + 1].encode("utf-16-le")) // 2)
+                    self.assertEqual(record.source_hash, link_books.content_hash(content))
+
+
 class ChapterLedAmudTest(unittest.TestCase):
     """A chapter-led citation is where its daf and its named chapter meet."""
 
@@ -253,8 +299,11 @@ class ChapterLedAmudTest(unittest.TestCase):
                 self.assertEqual(self.records(content, _CHAPTER_3), [])
 
     def test_an_amud_inside_the_named_chapter_is_kept(self):
-        content = "ועיין בפרק הזהב דבבא מציעא (דף מד: ושם)"
-        self.assertEqual(self.records(content, _CHAPTER_4), [("Bava Metzia 44b", self.anchor(content) + ":")])
+        for gap in ("", " ", "</small>", " </small> <b> "):
+            content = f"ועיין בפרק הזהב דבבא מציעא (דף מד{gap}: ושם)"
+            with self.subTest(gap=gap):
+                self.assertEqual(self.records(content, _CHAPTER_4),
+                                 [("Bava Metzia 44b", self.anchor(content) + gap + ":")])
         for content in ("ועיין בפרק שלישי דבבא מציעא דף מד. ושם", "ועיין בפרק שלישי דבבא מציעא דף מד ע\"א"):
             with self.subTest(content=content):
                 self.assertEqual(self.records(content, _CHAPTER_3), [("Bava Metzia 44a", self.anchor(content))])
@@ -304,10 +353,10 @@ class ParenthesizedChapterTest(unittest.TestCase):
         # Authors use some chapter names for other chapters than Sefaria ("דיני ממונות בתרא").
         self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33"),
                          [("Bava Metzia 33", "ב\"מ דף לג")])
-        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"),
-                         [("Bava Metzia 44b", "ב\"מ דף מד:")])
-        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד</small>: ושם)", "NAMED", "Bava Metzia 44"),
-                         [("Bava Metzia 44", "ב\"מ דף מד")])
+        for gap in ("", " ", "</small>", " </small> <b> "):
+            with self.subTest(gap=gap):
+                self.assertEqual(self.records(f"ועיין בפרק המפקיד (ב\"מ דף מד{gap}: ושם)", "NAMED", "Bava Metzia 44"),
+                                 [("Bava Metzia 44b", f"ב\"מ דף מד{gap}:")])
 
     def test_an_address_in_its_chapter_keeps_the_amud(self):
         self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"),

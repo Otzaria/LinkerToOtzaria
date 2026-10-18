@@ -2804,7 +2804,7 @@ def chapter_led_citation(linker, rr, context_ref):
 
 
 # A mark after a daf, past spaces and tags ("מד</small>:"): "." for amud a, ":" or "ע"ב" for amud b.
-_AMUD_AFTER_RE = re.compile(r'^(?:\s|<[^>]*>)*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
+_AMUD_AFTER_RE = re.compile(r'(?:\s|<[^>]*>)*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
 
 
 def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
@@ -2821,7 +2821,7 @@ def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
               if amud is not None and any(chapter.overlaps(amud) for chapter in chapters)]
     if len(inside) != 1:
         return ref
-    written = _AMUD_AFTER_RE.match(content[end:])
+    written = _AMUD_AFTER_RE.match(content, end)
     if written is not None:
         side = written["side"] or ("א" if written["mark"] == "." else "ב")
         if side != inside[0]:
@@ -2833,23 +2833,28 @@ _WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")
 
 
 def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
-    """(Ref, end) of amud b when a whole-daf anchor is cut right before its ":".
+    """(Ref, end) of amud b after a whole-daf anchor, past spaces and HTML tags.
 
     The NER cuts "נא:" before the mark when "ושם" follows (Otzaria/otzaria#2490). Only ":"
     mid-line is an amud mark: "." also separates list items, and a line-final ":" ends it.
+    The returned end includes the mark in the original content, preserving its offsets.
     """
-    if ref_factory is None or end >= len(content) or content[end] != ":":
+    if ref_factory is None or end >= len(content):
         return None
-    if not _HTML_TAG_RE.sub("", content[end + 1:]).strip():
+    written = _AMUD_AFTER_RE.match(content, end)
+    if written is None or written["mark"] != ":":
+        return None
+    marked_end = written.end()
+    if not _HTML_TAG_RE.sub("", content[marked_end:]).strip():
         return None
     match = _WHOLE_DAF_RE.match(ref.normal())
     if match is None or not ref.is_talmud():
         return None
-    tokens = content[start:end].split()
+    tokens = _HTML_TAG_RE.sub("", content[start:end]).split()
     if not tokens or int(match.group(2)) not in _hebrew_number(tokens[-1]):
         return None
     marked = _amud_ref(match.group(1), int(match.group(2)), "ב", ref_factory)
-    return None if marked is None else (marked, end + 1)
+    return None if marked is None else (marked, marked_end)
 
 
 def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str | None:
