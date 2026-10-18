@@ -17,7 +17,9 @@ Run (from the Sefaria-Project dir, its venv, with the NER server up):
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
+import itertools
 import os
 import re
 import resource
@@ -2115,9 +2117,22 @@ def process_batch(
                 if not failed:
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
+                start, end = rr.raw_entity.span.range
+                regrouped = None
+                chapters = ()
+                chapter_led = False
+                if failed:
+                    regrouped = parenthesized_address(linker, rr, content, context_object)
+                    if regrouped is not None:
+                        ref, (start, end), chapters = regrouped
+                    else:
+                        regrouped = chapter_led_citation(linker, rr, context_object)
+                        if regrouped is not None:
+                            ref, chapters = regrouped
+                            chapter_led = True
+                    relative = relative and regrouped is None
                 if ref is None and not relative:
                     continue
-                start, end = rr.raw_entity.span.range
                 # A parenthesized Hebrew number opening a line is its structural
                 # marker, not a citation (for example "(נח)" as Parashat Noach).
                 if end <= marker_end:
@@ -2125,6 +2140,20 @@ def process_batch(
                 anchor_text = content[start:end]
                 relative_direction = None
                 if ref is not None:
+                    marked = amud_marked_daf(ref, content, start, end, context_ref_factory)
+                    # The citation is where its daf and its named chapter meet. Only a
+                    # chapter-led citation needs that; a parenthesized address stands alone.
+                    if chapters and marked is None:
+                        narrowed = chapter_amud(ref, chapters, content, end, context_ref_factory)
+                        if narrowed is not None:
+                            ref = narrowed
+                        elif chapter_led:
+                            continue
+                    elif chapters and chapter_led and not any(c.overlaps(marked[0]) for c in chapters):
+                        continue
+                    if marked is not None:
+                        ref, end = marked
+                        anchor_text = content[start:end]
                     target_ref = ref.normal()
                     if is_implausible_citation_target(target_ref, anchor_text):
                         continue
@@ -2149,7 +2178,7 @@ def process_batch(
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
-                if recovered is None:
+                if recovered is None and regrouped is None:
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2590,6 +2619,242 @@ def _pick_ref(rr, last_ref=None):
 def has_raw_part_type(rr, type_name: str) -> bool:
     parts = getattr(getattr(rr, "raw_entity", None), "raw_ref_parts", ())
     return any(getattr(getattr(part, "type", None), "name", None) == type_name for part in parts)
+
+
+_PAREN_ADDRESS_TYPES = {"NAMED", "NUMBERED", "DH"}
+# A chapter locator: "בפרק X", "בפ' X", "בריש X", "בסוף X", "בס"פ X", "ר"פ X".
+_CHAPTER_LEAD_RE = re.compile(r"^ו?[במ]?(?:פרק|פ['׳]|ריש|סוף|ס[\"״]פ|ר[\"״]פ|רפ[\"״]|ספ[\"״])(?![א-ת])")
+
+
+def _locates_only(part) -> bool:
+    # A commentator or book named before "(" is the work cited, so it must not be dropped.
+    return part.type.name == "RELATIVE" or (
+        part.type.name == "NAMED" and bool(_CHAPTER_LEAD_RE.match(_HTML_TAG_RE.sub("", part.text).strip())))
+
+
+def parenthesized_address_parts(raw_entity, content: str) -> int | None:
+    """Index of the first part inside the citation's one "(", or None.
+
+    The parts before it must only locate the address ("בריש מרובה", "בפרק דלקמן"),
+    and those inside must spell a title and an address on their own ("ב״ק דף סג:").
+    """
+    raw_start, raw_end = raw_entity.span.range
+    text = content[raw_start:raw_end]
+    if text.count("(") != 1 or ")" in text:
+        return None
+    paren = text.index("(")
+    parts = list(raw_entity.raw_ref_parts)
+    first = next((i for i, part in enumerate(parts) if part.span.range[0] > paren), None)
+    if not first or any(part.span.range[1] > paren for part in parts[:first]):
+        return None
+    address = [part.type.name for part in parts[first:]]
+    if not all(_locates_only(part) for part in parts[:first]) or not set(address) <= _PAREN_ADDRESS_TYPES:
+        return None
+    if "NAMED" not in address or "NUMBERED" not in address:
+        return None
+    return first
+
+
+def parenthesized_address(linker, rr, content: str, context_ref):
+    """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
+
+    The NER joins a chapter phrase the resolver cannot read to an explicit address in
+    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). The chapters the
+    phrase names that overlap it may narrow it, but never drop it: authors use some
+    chapter names for other chapters than Sefaria ("דיני ממונות בתרא" for "זה בורר").
+    """
+    raw = rr.raw_entity
+    first = parenthesized_address_parts(raw, content)
+    if first is None:
+        return None
+    from sefaria.model.linker.ref_part import RawRef
+
+    try:
+        span = raw.subspan(slice(first, None))
+    except AssertionError:  # Sefaria's own guard for part/token misalignment
+        return None
+    parts = [part.realign_to_new_raw_ref(raw.span, span) for part in raw.raw_ref_parts[first:]]
+    resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, parts))
+    if resolved is None or resolved.is_ambiguous or resolved.ref is None:
+        return None
+    if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
+        return None
+    raw_start, raw_end = raw.span.range
+    text = content[raw_start:raw_end]
+    lead = text[raw.raw_ref_parts[0].span.range[0]:text.index("(")]
+    chapters = tuple(c for c in named_chapters(lead, resolved.ref) if c.overlaps(resolved.ref))
+    return resolved.ref, span.range, chapters
+
+
+def chapter_led_splits(raw_entity) -> list[tuple[str, int, int]]:
+    """(lead text, title part index, title start) for each chapter-then-title reading.
+
+    The title is a NAMED part, or its tail from a word opening with "ד" ("בפרק שני
+    דכתובות"); an address of NUMBERED/DH parts must follow it.
+    """
+    parts = list(raw_entity.raw_ref_parts)
+    if any(part.type.name not in _PAREN_ADDRESS_TYPES for part in parts):
+        return []
+    splits = []
+    for i, part in enumerate(parts):
+        address = [p.type.name for p in parts[i + 1:]]
+        if part.type.name != "NAMED" or "NUMBERED" not in address or not set(address) <= {"NUMBERED", "DH"}:
+            continue
+        part_start = part.span.range[0]
+        starts = [part_start] if i else []
+        starts += [part_start + m.end() - 1 for m in re.finditer(r"\sד", part.text)]
+        for title_start in starts:
+            lead = raw_entity.span.text[parts[0].span.range[0]:title_start].strip()
+            if lead:
+                splits.append((lead, i, title_start))
+    return splits
+
+
+# Words that place a citation within its chapter: "בריש", "סוף", "שלהי".
+_CHAPTER_EDGE_RE = re.compile(r"^ו?[במ]?(?:ריש|סוף|שלהי) ")
+_LEAD_PREFIXES = ("", "ו", "ב", "מ", "ד", "ל", "וב", "ומ")
+
+
+def _plain_quotes(text: str) -> str:
+    return " ".join(_HTML_TAG_RE.sub(" ", text).replace("״", '"').replace("׳", "'").split())
+
+
+def chapter_lead_names(lead: str) -> set[str]:
+    """The chapter designations a citation's lead text can spell exactly."""
+    lead = _plain_quotes(lead)
+    leads = {lead, _CHAPTER_EDGE_RE.sub("", lead)}
+    return {l[len(p):] for l in leads for p in _LEAD_PREFIXES if l.startswith(p) and len(l) > len(p)}
+
+
+def chapter_names(match_templates, term_titles) -> frozenset[str]:
+    """Every spelling of one chapter node from Sefaria's own term titles.
+
+    "פרק"+"שני" also yields "פ"ב", "רפ"ב" and "ספ"ב", which the ordinal term
+    spells with the chapter word already in it.
+    """
+    names = set()
+    for template in match_templates:
+        slugs = template["term_slugs"]
+        titles = [[_plain_quotes(t) for t in term_titles(slug)] for slug in slugs]
+        names.update(" ".join(combo) for combo in itertools.product(*titles))
+        if len(slugs) == 2 and slugs[0] == "perek":
+            names.update(t for t in titles[1] if re.match(r'^[רס]?פ"', t))
+    return frozenset(names)
+
+
+@functools.lru_cache(maxsize=None)
+def _book_chapters(index_title: str) -> tuple:
+    from sefaria.model import Ref, library
+    from sefaria.model.schema import NonUniqueTerm
+
+    def term_titles(slug):
+        term = NonUniqueTerm.init(slug)
+        return term.get_titles("he") if term else []
+
+    structs = getattr(library.get_index(index_title), "alt_structs", None) or {}
+    # A grouping node (Sippurei Maasiyot's "נוספים") has no range of its own.
+    return tuple(
+        (Ref(node["wholeRef"]), chapter_names(node.get("match_templates", []), term_titles))
+        for node in structs.get("Chapters", {}).get("nodes", []) if "wholeRef" in node
+    )
+
+
+def named_chapters(lead: str, ref) -> tuple:
+    """The chapters of ref's book that a citation's lead text names."""
+    names = chapter_lead_names(lead)
+    return tuple(whole for whole, spelled in _book_chapters(ref.index.title) if names & spelled)
+
+
+def chapter_led_citation(linker, rr, context_ref):
+    """(Ref, named chapters) of a failed "פרק X דמסכת דף N" citation, or None.
+
+    Sefaria reads a chapter only after the title ("כתובות פרק שני דף יח"), so a chapter
+    before it fails the whole citation. The title and address resolve alone, and the
+    chapter named must contain the result (Otzaria/otzaria#2490).
+    """
+    raw = rr.raw_entity
+    splits = chapter_led_splits(raw)
+    if not splits:
+        return None
+    from sefaria.model.linker.ref_part import RawRef
+
+    parts = raw.raw_ref_parts
+    raw_start = raw.span.range[0]
+    end = parts[-1].span.range[1]
+    found = {}
+    for lead, i, title_start in splits:
+        span = raw.span.doc.subspan(slice(raw_start + title_start, raw_start + end))
+        title = parts[i].clone(span=raw.span.subspan(slice(title_start, parts[i].span.range[1])))
+        address = [p.realign_to_new_raw_ref(raw.span, span) for p in [title, *parts[i + 1:]]]
+        resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, address))
+        if resolved is None:
+            continue
+        for candidate in resolved.resolved_raw_refs if resolved.is_ambiguous else [resolved]:
+            ref = candidate.ref
+            if ref is None or getattr(getattr(candidate, "context_type", None), "name", None):
+                continue
+            chapters = named_chapters(lead, ref)
+            if any(chapter.overlaps(ref) for chapter in chapters):
+                known = found.setdefault(ref.normal(), (ref, []))[1]
+                known.extend(c for c in chapters if all(c.normal() != k.normal() for k in known))
+    if len(found) != 1:
+        return None
+    ref, chapters = next(iter(found.values()))
+    return ref, tuple(chapters)
+
+
+# A mark after a daf, past spaces and tags ("מד</small>:"): "." for amud a, ":" or "ע"ב" for amud b.
+_AMUD_AFTER_RE = re.compile(r'(?:\s|<[^>]*>)*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
+
+
+def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
+    """The one amud of a whole daf inside its named chapters, or None when the text marks the other.
+
+    "רפ"ג דערכין (דף י"ג)" is 13b, where chapter 3 opens; "דף יז." before a chapter that
+    opens on 17b contradicts it.
+    """
+    match = _WHOLE_DAF_RE.match(ref.normal())
+    if match is None or ref_factory is None or not ref.is_talmud():
+        return ref
+    amudim = {side: _amud_ref(match.group(1), int(match.group(2)), side, ref_factory) for side in "אב"}
+    inside = [side for side, amud in amudim.items()
+              if amud is not None and any(chapter.overlaps(amud) for chapter in chapters)]
+    if len(inside) != 1:
+        return ref
+    written = _AMUD_AFTER_RE.match(content, end)
+    if written is not None:
+        side = written["side"] or ("א" if written["mark"] == "." else "ב")
+        if side != inside[0]:
+            return None
+    return amudim[inside[0]]
+
+
+_WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")
+
+
+def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
+    """(Ref, end) of amud b after a whole-daf anchor, past spaces and HTML tags.
+
+    The NER cuts "נא:" before the mark when "ושם" follows (Otzaria/otzaria#2490). Only ":"
+    mid-line is an amud mark: "." also separates list items, and a line-final ":" ends it.
+    The returned end includes the mark in the original content, preserving its offsets.
+    """
+    if ref_factory is None or end >= len(content):
+        return None
+    written = _AMUD_AFTER_RE.match(content, end)
+    if written is None or written["mark"] != ":":
+        return None
+    marked_end = written.end()
+    if not _HTML_TAG_RE.sub("", content[marked_end:]).strip():
+        return None
+    match = _WHOLE_DAF_RE.match(ref.normal())
+    if match is None or not ref.is_talmud():
+        return None
+    tokens = _HTML_TAG_RE.sub("", content[start:end]).split()
+    if not tokens or int(match.group(2)) not in _hebrew_number(tokens[-1]):
+        return None
+    marked = _amud_ref(match.group(1), int(match.group(2)), "ב", ref_factory)
+    return None if marked is None else (marked, marked_end)
 
 
 def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str | None:
