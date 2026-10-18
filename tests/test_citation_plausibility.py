@@ -390,6 +390,81 @@ class IbidCandidateTest(unittest.TestCase):
             self.rr([self.Ref("Genesis", [30, 14, 2]), self.Ref("Genesis", [29, 14, 2])]), last))
 
 
+class TanakhRef:
+    """A Sefaria Ref stand-in for "<Hebrew title> <chapter> [<verse>]"; Psalms 18 has 51 verses."""
+    TITLES = {"תהלים": "Psalms", "דברים": "Deuteronomy", "שה\"ש": "Song of Songs",
+              "מלכים א": "I Kings"}
+    primary_category = "Tanakh"
+
+    def __init__(self, text):
+        # Sefaria reads the longest title first: "מלכים א יח" is I Kings 18.
+        title, numbers = re.fullmatch(r"(.+)((?: [א-ת]{1,3}){1,2})", text).groups()
+        if title not in self.TITLES:
+            title, numbers = re.fullmatch(r"(.+?)((?: [א-ת]{1,3}){1,2})", text).groups()
+        values = [link_books._numeral(n) for n in numbers.split()]
+        if title not in self.TITLES or None in values:
+            raise ValueError(text)
+        # Like Sefaria's Ref, a verse past the end of the chapter parses but is empty.
+        self.empty = values[:1] == [18] and values[-1] > 51
+        self.sections = values
+        self.text = f"{self.TITLES[title]} {':'.join(map(str, values))}"
+
+    def is_empty(self):
+        return self.empty
+
+    def normal(self):
+        return self.text
+
+
+class GereshNumeralRefTest(unittest.TestCase):
+    """Cases from "שבע נתיבות התורה", which Sefaria leaves unresolved (otzaria book 6129)."""
+
+    def rebuild(self, anchor, ref_factory=TanakhRef):
+        ref = link_books.geresh_numeral_ref(anchor, ref_factory)
+        return ref.normal() if ref is not None else None
+
+    def test_a_geresh_after_a_multi_letter_number_is_read(self):
+        for anchor, target in [
+            ("(תהלים יח' לא')", "Psalms 18:31"),
+            ("תהלים קיט' קסה'", "Psalms 119:165"),
+            ("(דברים י' טז')", "Deuteronomy 10:16"),
+            ("(שה\"ש ח' יג')", "Song of Songs 8:13"),
+            ("(תהלים יח׳ לא׳)", "Psalms 18:31"),
+            ("(תהלים יח', לא')", "Psalms 18:31"),
+            ("(תהלים מה')", "Psalms 45"),
+            ("(תהלים יח’ לא’)", "Psalms 18:31"),
+            ("(מלכים א' יח')", "I Kings 18"),
+            ("(מלכים א' יח' לא')", "I Kings 18:31"),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertEqual(self.rebuild(anchor), target)
+
+    def test_anchors_sefaria_already_reads_are_left_to_it(self):
+        for anchor in ("(דברים ל' ו')", "(תהלים יח לא)", "(תהלים י\"ח ל\"א)"):
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.rebuild(anchor))
+
+    def test_unclear_or_impossible_anchors_stay_unlinked(self):
+        for anchor in (
+            "(שם כו')",              # no title for Ref to read
+            "(תהלים יח' עג')",       # past the end of the chapter
+            "(תהלים חי' לא')",       # not a canonical number
+            "(תהלים יח' לא' ב')",    # more than a chapter and a verse
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.rebuild(anchor))
+        self.assertIsNone(self.rebuild("(תהלים יח' לא')", None))
+
+    def test_only_a_tanakh_ref_with_the_spelled_sections_is_kept(self):
+        """"(שבת יח')" is read as an amud and "(שבת יב' ב')" as a Mishnah: neither is linked."""
+        talmud = type("Ref", (), {"primary_category": "Talmud", "sections": [35],
+                                  "is_empty": lambda _self: False})()
+        mishnah = type("Ref", (), {"primary_category": "Mishnah", "sections": [12, 2],
+                                   "is_empty": lambda _self: False})()
+        self.assertIsNone(self.rebuild("(שבת יח')", lambda text: talmud))
+        self.assertIsNone(self.rebuild("(שבת יב' ב')", lambda text: mishnah))
+
+
 class AbbreviationMisreadTest(unittest.TestCase):
     def test_magen_avraham_and_page_numbers_are_dropped(self):
         self.assertTrue(link_books.is_abbreviation_misread("I Kings", "מ\"א"))

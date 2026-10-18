@@ -544,6 +544,42 @@ class WorkerMemoryTest(unittest.TestCase):
         )
         self.assertIs(ibid.last_emitted_ref, previous)
 
+    def test_unresolved_geresh_numbers_are_recovered_outside_ibid_history(self):
+        """"(תהלים יח' לא')" fails in Sefaria; it links, while other failures stay dropped."""
+        from test_citation_plausibility import TanakhRef
+
+        def failed(start, end):
+            return type("RR", (), {
+                "is_ambiguous": False, "ref": None, "context_type": None,
+                "resolution_failed": True,
+                "raw_entity": type("Raw", (), {
+                    "span": type("Span", (), {"range": (start, end)})(),
+                    "raw_ref_parts": [],
+                })(),
+            })()
+
+        anchors = ("(תהלים יח' לא')", "(שם כו')", "(תהלים יח לא)")
+        content = "אמרת יי צרופה " + " ".join(anchors)
+        spans = [(content.index(a), content.index(a) + len(a)) for a in anchors]
+
+        class Linker:
+            def bulk_link(self, texts, book_context_refs=None, type_filter=None, **_):
+                return [type("Doc", (), {"resolved_refs": [failed(*s) for s in spans]})()]
+
+        previous = TanakhRef("דברים ל ו")
+        ibid = type("Ibid", (), {"last_emitted_ref": previous,
+                                 "resolve": lambda _self, _linker, invoke: invoke()})()
+        records, _ = link_books.process_batch(
+            Linker(), link_books.BookKey("OnYourWayToOtzaria", "שבע נתיבות התורה"),
+            [(4, content, "שבע נתיבות התורה 5")], lambda _line: None,
+            context_ref_factory=TanakhRef, ibid_context=ibid,
+        )
+        self.assertEqual(
+            [(r.start, r.end, r.target_ref, r.relative_direction, r.context_ref) for r in records],
+            [(*spans[0], "Psalms 18:31", None, None)],
+        )
+        self.assertIs(ibid.last_emitted_ref, previous)
+
     def test_a_non_sefaria_talmud_commentary_recovers_by_its_daf_heading(self):
         """"(לקמן ד.)" in a Dicta "X על גיטין" line under "דף ג:" links to Gittin 4a."""
         from test_citation_plausibility import TalmudRef

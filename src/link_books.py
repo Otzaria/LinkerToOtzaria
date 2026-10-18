@@ -2109,8 +2109,8 @@ def process_batch(
         marker_end = leading_hebrew_numeral_marker_end(content)
         for rr in doc.resolved_refs:
             try:
-                # Failures are fetched only for relative recovery; they must not reset
-                # the "שם" antecedent.
+                # Failures are fetched only for recovery from the text; they must not
+                # reset the "שם" antecedent.
                 failed = getattr(rr, "resolution_failed", False)
                 relative = has_raw_part_type(rr, "RELATIVE")
                 ref = None if failed else _pick_ref(rr, last_ref)
@@ -2118,6 +2118,7 @@ def process_batch(
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
                 start, end = rr.raw_entity.span.range
+                spelled = None
                 regrouped = None
                 chapters = ()
                 chapter_led = False
@@ -2131,6 +2132,9 @@ def process_batch(
                             ref, chapters = regrouped
                             chapter_led = True
                     relative = relative and regrouped is None
+                    if ref is None and not relative:
+                        spelled = geresh_numeral_ref(content[start:end], context_ref_factory)
+                        ref = spelled
                 if ref is None and not relative:
                     continue
                 # A parenthesized Hebrew number opening a line is its structural
@@ -2178,7 +2182,7 @@ def process_batch(
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
-                if recovered is None and regrouped is None:
+                if recovered is None and regrouped is None and spelled is None:
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -3074,6 +3078,44 @@ def _address_ref(match, tractate: str, ref_factory):
         return None
     side = _PUNCT_SIDE[match["mark"]] if match["mark"] else match["comma"] or match["amud"]
     return _amud_ref(tractate, _numeral(letters), side, ref_factory)
+
+
+# "(תהלים יח' לא')": a title, then a chapter and an optional verse.
+_GERESH = "'׳‘’"
+_GERESH_CITATION = (r"(?P<title>[א-ת][א-ת\"״{g} ]*{lazy})\s+(?P<chapter>[א-ת]{{1,3}}[{g}]?)"
+                    r"(?:\s*,?\s+(?P<verse>[א-ת]{{1,3}}[{g}]?))?")
+# The greedy reading keeps "מלכים א'" whole when "א'" is not a chapter.
+_GERESH_CITATION_RES = [re.compile(_GERESH_CITATION.format(g=_GERESH, lazy=lazy))
+                        for lazy in ("?", "")]
+_MULTI_LETTER_GERESH_RE = re.compile(rf"[א-ת]{{2,3}}[{_GERESH}]")
+
+
+def geresh_numeral_ref(anchor_text: str, ref_factory):
+    """The Ref of "תהלים יח' לא'", whose geresh after a multi-letter number fails Sefaria.
+
+    Sefaria reads a geresh only after a single letter. Only a whole anchor of a Tanakh
+    title and canonical numbers is rebuilt, into a Ref with exactly those sections.
+    """
+    if ref_factory is None:
+        return None
+    for regex in _GERESH_CITATION_RES:
+        match = regex.fullmatch(_bare_anchor(anchor_text))
+        tokens = [token for token in (match["chapter"], match["verse"]) if token] if match else []
+        if not any(_MULTI_LETTER_GERESH_RE.fullmatch(token) for token in tokens):
+            continue
+        letters = [token.rstrip(_GERESH) for token in tokens]
+        if not all(_is_canonical_numeral(token) for token in letters):
+            continue
+        try:
+            title = re.sub(rf"(?<= [א-ת])[{_GERESH}]$", "", match["title"].strip())
+            ref = ref_factory(" ".join([title, *letters]))
+        except Exception:
+            continue
+        # A Talmud title would read "יב' ב'" as a Mishnah; Ref never checks the verse exists.
+        if (ref.primary_category == "Tanakh" and not ref.is_empty()
+                and list(ref.sections) == [_numeral(token) for token in letters]):
+            return ref
+    return None
 
 
 def _is_canonical_numeral(letters: str) -> bool:
