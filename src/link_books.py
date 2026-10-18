@@ -2118,15 +2118,16 @@ def process_batch(
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
                 start, end = rr.raw_entity.span.range
-                regrouped = chapter = None
+                regrouped = None
+                chapters = ()
                 if failed:
                     regrouped = parenthesized_address(linker, rr, content, context_object)
                     if regrouped is not None:
-                        ref, (start, end) = regrouped
+                        ref, (start, end), chapters = regrouped
                     else:
                         regrouped = chapter_led_citation(linker, rr, context_object)
                         if regrouped is not None:
-                            ref, chapter = regrouped
+                            ref, chapters = regrouped
                     relative = relative and regrouped is None
                 if ref is None and not relative:
                     continue
@@ -2138,10 +2139,15 @@ def process_batch(
                 relative_direction = None
                 if ref is not None:
                     marked = amud_marked_daf(ref, content, start, end, context_ref_factory)
-                    if marked is not None:
-                        # The written amud outside its named chapter contradicts the citation.
-                        if chapter is not None and not chapter.overlaps(marked[0]):
+                    if chapters:
+                        # The citation is where its daf and its named chapter meet.
+                        if marked is not None and not any(c.overlaps(marked[0]) for c in chapters):
                             continue
+                        if marked is None:
+                            ref = chapter_amud(ref, chapters, content, end, context_ref_factory)
+                            if ref is None:
+                                continue
+                    if marked is not None:
                         ref, end = marked
                         anchor_text = content[start:end]
                     target_ref = ref.normal()
@@ -2646,10 +2652,11 @@ def parenthesized_address_parts(raw_entity, content: str) -> int | None:
 
 
 def parenthesized_address(linker, rr, content: str, context_ref):
-    """(Ref, (start, end)) of a failed citation's parenthesized address, resolved alone.
+    """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
 
     The NER joins a chapter phrase the resolver cannot read to an explicit address in
-    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490).
+    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). A phrase naming
+    chapters of the result's book must name one that contains it.
     """
     raw = rr.raw_entity
     first = parenthesized_address_parts(raw, content)
@@ -2667,7 +2674,12 @@ def parenthesized_address(linker, rr, content: str, context_ref):
         return None
     if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
         return None
-    return resolved.ref, span.range
+    raw_start, raw_end = raw.span.range
+    text = content[raw_start:raw_end]
+    chapters = named_chapters(text[raw.raw_ref_parts[0].span.range[0]:text.index("(")], resolved.ref)
+    if chapters and not any(chapter.overlaps(resolved.ref) for chapter in chapters):
+        return None
+    return resolved.ref, span.range, chapters
 
 
 def chapter_led_splits(raw_entity) -> list[tuple[str, int, int]]:
@@ -2736,14 +2748,21 @@ def _book_chapters(index_title: str) -> tuple:
         return term.get_titles("he") if term else []
 
     structs = getattr(library.get_index(index_title), "alt_structs", None) or {}
+    # A grouping node (Sippurei Maasiyot's "נוספים") has no range of its own.
     return tuple(
         (Ref(node["wholeRef"]), chapter_names(node.get("match_templates", []), term_titles))
-        for node in structs.get("Chapters", {}).get("nodes", [])
+        for node in structs.get("Chapters", {}).get("nodes", []) if "wholeRef" in node
     )
 
 
+def named_chapters(lead: str, ref) -> tuple:
+    """The chapters of ref's book that a citation's lead text names."""
+    names = chapter_lead_names(lead)
+    return tuple(whole for whole, spelled in _book_chapters(ref.index.title) if names & spelled)
+
+
 def chapter_led_citation(linker, rr, context_ref):
-    """(Ref, chapter Ref) of a failed "פרק X דמסכת דף N" citation, or None.
+    """(Ref, named chapters) of a failed "פרק X דמסכת דף N" citation, or None.
 
     Sefaria reads a chapter only after the title ("כתובות פרק שני דף יח"), so a chapter
     before it fails the whole citation. The title and address resolve alone, and the
@@ -2760,7 +2779,6 @@ def chapter_led_citation(linker, rr, context_ref):
     end = parts[-1].span.range[1]
     found = {}
     for lead, i, title_start in splits:
-        names = chapter_lead_names(lead)
         span = raw.span.doc.subspan(slice(raw_start + title_start, raw_start + end))
         title = parts[i].clone(span=raw.span.subspan(slice(title_start, parts[i].span.range[1])))
         address = [p.realign_to_new_raw_ref(raw.span, span) for p in [title, *parts[i + 1:]]]
@@ -2771,11 +2789,40 @@ def chapter_led_citation(linker, rr, context_ref):
             ref = candidate.ref
             if ref is None or getattr(getattr(candidate, "context_type", None), "name", None):
                 continue
-            chapter = next((whole for whole, spelled in _book_chapters(ref.index.title)
-                            if names & spelled and whole.overlaps(ref)), None)
-            if chapter is not None:
-                found[ref.normal()] = (ref, chapter)
-    return next(iter(found.values())) if len(found) == 1 else None
+            chapters = named_chapters(lead, ref)
+            if any(chapter.overlaps(ref) for chapter in chapters):
+                known = found.setdefault(ref.normal(), (ref, []))[1]
+                known.extend(c for c in chapters if all(c.normal() != k.normal() for k in known))
+    if len(found) != 1:
+        return None
+    ref, chapters = next(iter(found.values()))
+    return ref, tuple(chapters)
+
+
+# A mark right after a daf: "." for amud a, ":" or "ע"ב" for amud b.
+_AMUD_AFTER_RE = re.compile(r'^(?:(?P<mark>[.:])|\s*ע["״](?P<side>[אב]))')
+
+
+def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
+    """The one amud of a whole daf inside its named chapters, or None when the text marks the other.
+
+    "רפ"ג דערכין (דף י"ג)" is 13b, where chapter 3 opens; "דף יז." before a chapter that
+    opens on 17b contradicts it.
+    """
+    match = _WHOLE_DAF_RE.match(ref.normal())
+    if match is None or ref_factory is None or not ref.is_talmud():
+        return ref
+    amudim = {side: _amud_ref(match.group(1), int(match.group(2)), side, ref_factory) for side in "אב"}
+    inside = [side for side, amud in amudim.items()
+              if amud is not None and any(chapter.overlaps(amud) for chapter in chapters)]
+    if len(inside) != 1:
+        return ref
+    written = _AMUD_AFTER_RE.match(content[end:])
+    if written is not None:
+        side = written["side"] or ("א" if written["mark"] == "." else "ב")
+        if side != inside[0]:
+            return None
+    return amudim[inside[0]]
 
 
 _WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")

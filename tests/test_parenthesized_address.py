@@ -196,9 +196,11 @@ class ChapterNamesTest(unittest.TestCase):
 
 
 class _Amudim:
-    """A Ref stand-in: Bava Metzia chapter 3 ends at 44a, chapter 4 starts there."""
+    """A Ref stand-in: Bava Metzia chapter 3 (המפקיד) ends at 44a, chapter 4 (הזהב) opens there."""
     SPANS = {"Bava Metzia 44": {"44a", "44b"}, "Bava Metzia 44a": {"44a"}, "Bava Metzia 44b": {"44b"},
+             "Bava Metzia 33": {"33a", "33b"}, "Bava Metzia 33a": {"33a"}, "Bava Metzia 33b": {"33b"},
              "Bava Metzia 33b-44a": {"33b", "44a"}, "Bava Metzia 44a-60b": {"44a", "44b", "60b"}}
+    index = types.SimpleNamespace(title="Bava Metzia")
 
     def __init__(self, text):
         if text not in self.SPANS:
@@ -215,38 +217,122 @@ class _Amudim:
         return bool(self.SPANS[self.text] & self.SPANS[other.text])
 
 
+_CHAPTER_3, _CHAPTER_4 = _Amudim("Bava Metzia 33b-44a"), _Amudim("Bava Metzia 44a-60b")
+_BAVA_METZIA = ((_CHAPTER_3, frozenset({"פרק המפקיד", "המפקיד", "פרק שלישי"})),
+                (_CHAPTER_4, frozenset({"פרק הזהב", "הזהב", "פרק רביעי"})))
+
+
+def _batch(content, rr, linker, **patches):
+    linker.bulk_link = lambda *_a, **_k: [types.SimpleNamespace(resolved_refs=[rr])]
+    with mock.patch.multiple(link_books, _book_chapters=lambda _title: _BAVA_METZIA, **patches):
+        records = link_books.process_batch(linker, link_books.BookKey("MoreBooks", "ספר"),
+                                           [(0, content, None)], lambda _line: None,
+                                           context_ref_factory=_Amudim)[0]
+    return [(r.target_ref, content[r.start:r.end]) for r in records]
+
+
 class ChapterLedAmudTest(unittest.TestCase):
-    """The amud written after a chapter-led citation must agree with that chapter."""
+    """A chapter-led citation is where its daf and its named chapter meet."""
 
     def records(self, content, chapter, target="Bava Metzia 44"):
         start = content.index("בפרק")
         end = content.index("מד") + 2
         rr = types.SimpleNamespace(resolution_failed=True, raw_entity=_raw(content, start, end, []))
-        found = None if chapter is None else (_Amudim(target), _Amudim(chapter))
-        linker = types.SimpleNamespace(bulk_link=lambda *_a, **_k: [types.SimpleNamespace(resolved_refs=[rr])])
-        with mock.patch.object(link_books, "parenthesized_address", return_value=None), \
-                mock.patch.object(link_books, "chapter_led_citation", return_value=found):
-            records = link_books.process_batch(linker, link_books.BookKey("MoreBooks", "ספר"),
-                                               [(0, content, None)], lambda _line: None,
-                                               context_ref_factory=_Amudim)[0]
-        return [(r.target_ref, content[r.start:r.end]) for r in records]
+        found = None if chapter is None else (_Amudim(target), (chapter,))
+        return _batch(content, rr, types.SimpleNamespace(), parenthesized_address=lambda *_: None,
+                      chapter_led_citation=lambda *_: found)
+
+    def anchor(self, content):
+        return content[content.index("בפרק"):content.index("מד") + 2]
 
     def test_an_amud_outside_the_named_chapter_drops_the_citation(self):
-        self.assertEqual(self.records("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", "Bava Metzia 33b-44a"), [])
+        for content in ("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", "ועיין בפרק שלישי דבבא מציעא (דף מד:",
+                        "ועיין בפרק שלישי דבבא מציעא דף מד ע\"ב ושם"):
+            with self.subTest(content=content):
+                self.assertEqual(self.records(content, _CHAPTER_3), [])
 
     def test_an_amud_inside_the_named_chapter_is_kept(self):
         content = "ועיין בפרק הזהב דבבא מציעא (דף מד: ושם)"
-        self.assertEqual(self.records(content, "Bava Metzia 44a-60b"),
-                         [("Bava Metzia 44b", "בפרק הזהב דבבא מציעא (דף מד:")])
-
-    def test_an_unmarked_or_line_final_daf_stays_whole(self):
-        for content in ("ועיין בפרק שלישי דבבא מציעא (דף מד) ושם", "ועיין בפרק שלישי דבבא מציעא (דף מד:"):
+        self.assertEqual(self.records(content, _CHAPTER_4), [("Bava Metzia 44b", self.anchor(content) + ":")])
+        for content in ("ועיין בפרק שלישי דבבא מציעא דף מד. ושם", "ועיין בפרק שלישי דבבא מציעא דף מד ע\"א"):
             with self.subTest(content=content):
-                self.assertEqual(self.records(content, "Bava Metzia 33b-44a"),
-                                 [("Bava Metzia 44", content[content.index("בפרק"):content.index("מד") + 2])])
+                self.assertEqual(self.records(content, _CHAPTER_3), [("Bava Metzia 44a", self.anchor(content))])
+
+    def test_an_unmarked_daf_narrows_to_the_amud_in_its_chapter(self):
+        content = "ועיין בפרק שלישי דבבא מציעא (דף מד) ושם"
+        self.assertEqual(self.records(content, _CHAPTER_3), [("Bava Metzia 44a", self.anchor(content))])
+
+    def test_a_daf_inside_its_chapter_stays_whole(self):
+        content = "ועיין בפרק הזהב דבבא מציעא (דף מד. ושם)"
+        self.assertEqual(self.records(content, _CHAPTER_4), [("Bava Metzia 44", self.anchor(content))])
 
     def test_no_chapter_reading_links_nothing(self):
         self.assertEqual(self.records("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", None), [])
+
+
+class _RealignedPart(_Part):
+    def realign_to_new_raw_ref(self, _old, _new):
+        return self
+
+
+class ParenthesizedChapterTest(unittest.TestCase):
+    """The chapter before a parenthesized address is checked like a chapter before its title."""
+
+    def records(self, content, lead_type, target):
+        start = content.index("בפרק")
+        daf = "מד" if "מד" in content else "לג"
+        end = content.index(daf) + 2
+        lead = content[start:content.index(" (")]
+        raw = _raw(content, start, end, [(lead_type, lead), ("NAMED", "ב\"מ"), ("NUMBERED", f"דף {daf}")])
+        raw.raw_ref_parts = [_RealignedPart(p.type.name, *p.span.range, p.text) for p in raw.raw_ref_parts]
+        first = raw.raw_ref_parts[1].span.range[0]
+        raw.subspan = lambda _parts: _Span(start + first, end)
+        raw.lang = "he"
+        rr = types.SimpleNamespace(resolution_failed=True, raw_entity=raw)
+        resolved = types.SimpleNamespace(is_ambiguous=False, ref=_Amudim(target), context_type=None)
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(resolve_raw_ref=lambda *_: resolved))
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.RawRef = lambda *args: args
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}):
+            return _batch(content, rr, linker, chapter_led_citation=lambda *_: None)
+
+    def test_an_address_outside_the_named_chapter_is_dropped(self):
+        self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33"), [])
+        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"), [])
+
+    def test_an_address_in_its_chapter_keeps_the_amud(self):
+        self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"),
+                         [("Bava Metzia 44b", "ב\"מ דף מד:")])
+        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד) ושם", "NAMED", "Bava Metzia 44"),
+                         [("Bava Metzia 44a", "ב\"מ דף מד")])
+
+    def test_a_lead_naming_no_chapter_of_the_book_is_not_checked(self):
+        self.assertEqual(self.records("ועיין בפרק דלקמן (ב\"מ דף לג ושם)", "RELATIVE", "Bava Metzia 33"),
+                         [("Bava Metzia 33", "ב\"מ דף לג")])
+
+
+class BookChaptersTest(unittest.TestCase):
+    def test_a_grouping_node_without_a_range_is_skipped(self):
+        nodes = [{"wholeRef": "Sippurei Maasiyot 1", "match_templates": [{"term_slugs": ["first"]}]},
+                 {"titles": [{"text": "נוספים"}], "nodes": []}]
+        index = types.SimpleNamespace(alt_structs={"Chapters": {"nodes": nodes}})
+        model = types.ModuleType("sefaria.model")
+        model.Ref = lambda text: text
+        model.library = types.SimpleNamespace(get_index=lambda _title: index)
+        schema = types.ModuleType("sefaria.model.schema")
+        schema.NonUniqueTerm = types.SimpleNamespace(init=lambda _slug: types.SimpleNamespace(
+            get_titles=lambda _lang: ["ראשון"]))
+        link_books._book_chapters.cache_clear()
+        try:
+            with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"), "sefaria.model": model,
+                                               "sefaria.model.schema": schema}):
+                self.assertEqual(link_books._book_chapters("Sippurei Maasiyot"),
+                                 (("Sippurei Maasiyot 1", frozenset({"ראשון"})),))
+        finally:
+            link_books._book_chapters.cache_clear()
 
 
 if __name__ == "__main__":
