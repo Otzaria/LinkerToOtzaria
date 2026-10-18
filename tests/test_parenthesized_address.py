@@ -15,8 +15,9 @@ import link_books  # noqa: E402
 
 
 class _Span:
-    def __init__(self, start, end):
+    def __init__(self, start, end, text=""):
         self.range = (start, end)
+        self.text = text
 
 
 class _Part:
@@ -35,7 +36,7 @@ def _raw(content, start, end, parts):
         at = text.index(part_text, cursor)
         found.append(_Part(type_name, at, at + len(part_text), part_text))
         cursor = at + len(part_text)
-    return types.SimpleNamespace(span=_Span(start, end), raw_ref_parts=found)
+    return types.SimpleNamespace(span=_Span(start, end, text), raw_ref_parts=found)
 
 
 class ParenthesizedAddressPartsTest(unittest.TestCase):
@@ -144,6 +145,53 @@ class AmudMarkedDafTest(unittest.TestCase):
 
     def test_a_missing_amud_is_not_invented(self):
         self.assertIsNone(self.mark("Bava Kamma 93", "(ב\"ק דף צג: ושם)", "ב\"ק דף צג"))
+
+
+class ChapterLedSplitsTest(unittest.TestCase):
+    """"בפרק שני דכתובות (דף יח:" names its tractate after the chapter (Otzaria/otzaria#2490)."""
+
+    def splits(self, citation, parts):
+        return [(lead, i) for lead, i, _ in link_books.chapter_led_splits(_raw(citation, 0, len(citation), parts))]
+
+    def test_a_chapter_fused_to_its_tractate_splits_at_the_dalet(self):
+        self.assertEqual(self.splits("בפרק שני דכתובות (דף יח", [("NAMED", "בפרק שני דכתובות"), ("NUMBERED", "דף יח")]),
+                         [("בפרק שני", 0)])
+
+    def test_a_separate_title_part_follows_the_lead(self):
+        self.assertEqual(self.splits("שלהי פ\"ק דסנהדרין <small> (דף ט\"ז", [
+            ("NAMED", "שלהי"), ("NUMBERED", "פ\"ק"), ("NAMED", "דסנהדרין"), ("NUMBERED", "דף ט\"ז")]),
+            [("שלהי פ\"ק", 2)])
+
+    def test_no_address_or_a_non_address_part_is_not_split(self):
+        self.assertEqual(self.splits("בפרק שני דכתובות", [("NAMED", "בפרק שני דכתובות")]), [])
+        self.assertEqual(self.splits("בפרק שני דכתובות (שם ד\"ה ובכולי", [
+            ("NAMED", "בפרק שני דכתובות"), ("IBID", "שם"), ("DH", "ד\"ה ובכולי")]), [])
+        self.assertEqual(self.splits("בפרק דלקמן דף יח", [("RELATIVE", "בפרק דלקמן"), ("NUMBERED", "דף יח")]), [])
+
+
+_TERMS = {
+    "perek": ["פרק", "ס\"פ", "ר\"פ", "פ'"],
+    "second": ["שני", "פ\"ב", "רפ\"ב", "ספ\"ב", "ב", "ב׳", "ב'"],
+    "chapter-214": ["האשה שנתארמלה"],
+}
+_SECOND = link_books.chapter_names([{"term_slugs": ["perek", "chapter-214"]}, {"term_slugs": ["perek", "second"]},
+                                    {"term_slugs": ["chapter-214"]}], _TERMS.__getitem__)
+
+
+class ChapterNamesTest(unittest.TestCase):
+    def named(self, lead):
+        return bool(link_books.chapter_lead_names(lead) & _SECOND)
+
+    def test_sefaria_spellings_with_prefixes_and_edges(self):
+        for lead in ("בפרק שני", "פ\"ב", "בפ״ב", "ברפ\"ב", "ובס\"פ ב'", "בריש פרק האשה שנתארמלה",
+                     "שלהי פ\"ב", "<b>בפרק</b> שני", "האשה שנתארמלה"):
+            with self.subTest(lead=lead):
+                self.assertTrue(self.named(lead))
+
+    def test_other_leads_name_no_chapter(self):
+        for lead in ("בפרק שלישי", "פ\"ק", "ב", "שני", "הירושלמי פרק שני", "רש\"י פ\"ב", "פרק האשה"):
+            with self.subTest(lead=lead):
+                self.assertFalse(self.named(lead))
 
 
 if __name__ == "__main__":
