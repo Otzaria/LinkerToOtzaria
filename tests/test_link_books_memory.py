@@ -558,8 +558,9 @@ class WorkerMemoryTest(unittest.TestCase):
                 })(),
             })()
 
-        anchors = ("(תהלים יח' לא')", "(שם כו')", "(תהלים יח לא)")
-        content = "אמרת יי צרופה " + " ".join(anchors)
+        anchors = ("(תהלים יח' לא')", '(תהלים י"ח לא\')', '(תהלים יח\' ל״א)',
+                   "(שם כו')", "(תהלים יח לא)")
+        content = "😀 אמרת יי צרופה " + " ".join(anchors)
         spans = [(content.index(a), content.index(a) + len(a)) for a in anchors]
 
         class Linker:
@@ -576,9 +577,50 @@ class WorkerMemoryTest(unittest.TestCase):
         )
         self.assertEqual(
             [(r.start, r.end, r.target_ref, r.relative_direction, r.context_ref) for r in records],
-            [(*spans[0], "Psalms 18:31", None, None)],
+            [(start + 1, end + 1, "Psalms 18:31", None, None) for start, end in spans[:3]],
         )
+        self.assertTrue(all(r.source_hash == link_books.content_hash(content) for r in records))
         self.assertIs(ibid.last_emitted_ref, previous)
+
+    def test_geresh_recovery_keeps_existing_successful_and_ambiguous_ibid_links(self):
+        """Adding the failed Psalms citation must not change either Deuteronomy link."""
+        from types import SimpleNamespace as NS
+        from test_citation_plausibility import TanakhRef
+
+        def ref(text):
+            result = TanakhRef(text)
+            result.index = NS(title="Deuteronomy")
+            return result
+
+        previous, continuation, other = [ref(text) for text in ("דברים ל ו", "דברים ל ז", "דברים כט ז")]
+        anchors = ("דברים ל ו", '(תהלים י"ח לא\')', "שם שם ז")
+        content = "עיין " + " ואז ".join(anchors)
+        spans = [(content.index(a), content.index(a) + len(a)) for a in anchors]
+        refs = [NS(
+            is_ambiguous=i == 2, resolution_failed=i == 1,
+            ref=previous if i == 0 else None, context_type=None,
+            resolved_raw_refs=[NS(ref=continuation), NS(ref=other)] if i == 2 else [],
+            raw_entity=NS(span=NS(range=span), raw_ref_parts=[
+                NS(type=NS(name="IBID" if i == 2 else "NAMED"))]),
+        ) for i, span in enumerate(spans)]
+        linker = NS(bulk_link=lambda *_args, **_kwargs: [NS(resolved_refs=refs)])
+
+        def run():
+            ibid = NS(last_emitted_ref=None, resolve=lambda _linker, invoke: invoke())
+            records, _ = link_books.process_batch(
+                linker, link_books.BookKey("test", "test"), [(0, content, None)],
+                lambda _line: None, context_ref_factory=TanakhRef, ibid_context=ibid,
+            )
+            return [r.to_dict() for r in records], ibid.last_emitted_ref
+
+        with mock.patch.object(link_books, "geresh_numeral_ref", return_value=None):
+            before, before_last = run()
+        after, after_last = run()
+        self.assertEqual(len(before), 2)
+        self.assertEqual(len(after), 3)
+        self.assertEqual(before, [r for r in after if r["target_ref"] != "Psalms 18:31"])
+        self.assertIs(before_last, continuation)
+        self.assertIs(after_last, continuation)
 
     def test_a_non_sefaria_talmud_commentary_recovers_by_its_daf_heading(self):
         """"(לקמן ד.)" in a Dicta "X על גיטין" line under "דף ג:" links to Gittin 4a."""

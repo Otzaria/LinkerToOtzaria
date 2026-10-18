@@ -444,6 +444,37 @@ class GereshNumeralRefTest(unittest.TestCase):
             with self.subTest(anchor=anchor):
                 self.assertIsNone(self.rebuild(anchor))
 
+    def test_a_standard_quoted_number_can_accompany_the_bad_geresh(self):
+        for geresh in link_books._GERESH:
+            for quotes in ('"', '״', '“', '”', "''"):
+                for anchor, target in (
+                    (f"(תהלים י{quotes}ח לא{geresh})", "Psalms 18:31"),
+                    (f"(תהלים יח{geresh} ל{quotes}א)", "Psalms 18:31"),
+                    (f"(מלכים א' י{quotes}ח לא{geresh})", "I Kings 18:31"),
+                    (f"(מלכים א' יח{geresh} ל{quotes}א)", "I Kings 18:31"),
+                    (f"(תהלים קי{quotes}ט קסה{geresh})", "Psalms 119:165"),
+                    (f"(תהלים קיט{geresh} קס{quotes}ה)", "Psalms 119:165"),
+                ):
+                    with self.subTest(anchor=anchor):
+                        self.assertEqual(self.rebuild(anchor), target)
+
+    def test_mixed_quotes_do_not_relax_canonical_numbers_or_anchor_boundaries(self):
+        for anchor in (
+            '(תהלים ח"י לא\')', '(תהלים יח\' א"ב)', '(תהלים יח\' ע"ג)',
+            '(תהלים י"ח לא\' ב\')', '(תהלים י"ח ל"א)',
+            '(תהלים יח" לא\')', '(תהלים י""ח לא\')',
+            '(שם י"ח לא\')', '(שבת י"ב כב\')',
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.rebuild(anchor))
+
+    def test_section_mismatch_does_not_query_text_availability(self):
+        from unittest.mock import Mock
+
+        ref = Mock(primary_category="Tanakh", sections=[18])
+        self.assertIsNone(self.rebuild('(תהלים י"ח לא\')', lambda _text: ref))
+        ref.is_empty.assert_not_called()
+
     def test_unclear_or_impossible_anchors_stay_unlinked(self):
         for anchor in (
             "(שם כו')",              # no title for Ref to read

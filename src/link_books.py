@@ -3082,10 +3082,13 @@ def _address_ref(match, tractate: str, ref_factory):
 
 # "(תהלים יח' לא')": a title, then a chapter and an optional verse.
 _GERESH = "'׳‘’"
-_GERESH_CITATION = (r"(?P<title>[א-ת][א-ת\"״{g} ]*{lazy})\s+(?P<chapter>[א-ת]{{1,3}}[{g}]?)"
-                    r"(?:\s*,?\s+(?P<verse>[א-ת]{{1,3}}[{g}]?))?")
+# The other number may use Sefaria's standard gershayim spelling, including two
+# apostrophes: "תהלים י\"ח לא'", "תהלים יח' ל״א", or "תהלים י''ח לא'".
+_GERESH_NUMERAL = rf"(?:[א-ת]{{1,3}}[{_GERESH}]?|[א-ת]{{1,2}}(?:[\"״“”]|'')[א-ת])"
+_GERESH_CITATION = (r"(?P<title>[א-ת][א-ת\"״{g} ]*{lazy})\s+(?P<chapter>{number})"
+                    r"(?:\s*,?\s+(?P<verse>{number}))?")
 # The greedy reading keeps "מלכים א'" whole when "א'" is not a chapter.
-_GERESH_CITATION_RES = [re.compile(_GERESH_CITATION.format(g=_GERESH, lazy=lazy))
+_GERESH_CITATION_RES = [re.compile(_GERESH_CITATION.format(g=_GERESH, number=_GERESH_NUMERAL, lazy=lazy))
                         for lazy in ("?", "")]
 _MULTI_LETTER_GERESH_RE = re.compile(rf"[א-ת]{{2,3}}[{_GERESH}]")
 
@@ -3096,14 +3099,15 @@ def geresh_numeral_ref(anchor_text: str, ref_factory):
     Sefaria reads a geresh only after a single letter. Only a whole anchor of a Tanakh
     title and canonical numbers is rebuilt, into a Ref with exactly those sections.
     """
-    if ref_factory is None:
+    if ref_factory is None or not _MULTI_LETTER_GERESH_RE.search(anchor_text):
         return None
+    anchor = _bare_anchor(anchor_text)
     for regex in _GERESH_CITATION_RES:
-        match = regex.fullmatch(_bare_anchor(anchor_text))
+        match = regex.fullmatch(anchor)
         tokens = [token for token in (match["chapter"], match["verse"]) if token] if match else []
         if not any(_MULTI_LETTER_GERESH_RE.fullmatch(token) for token in tokens):
             continue
-        letters = [token.rstrip(_GERESH) for token in tokens]
+        letters = [re.sub(r"[^א-ת]", "", token) for token in tokens]
         if not all(_is_canonical_numeral(token) for token in letters):
             continue
         try:
@@ -3112,8 +3116,9 @@ def geresh_numeral_ref(anchor_text: str, ref_factory):
         except Exception:
             continue
         # A Talmud title would read "יב' ב'" as a Mishnah; Ref never checks the verse exists.
-        if (ref.primary_category == "Tanakh" and not ref.is_empty()
-                and list(ref.sections) == [_numeral(token) for token in letters]):
+        if (ref.primary_category == "Tanakh"
+                and list(ref.sections) == [_numeral(token) for token in letters]
+                and not ref.is_empty()):
             return ref
     return None
 
