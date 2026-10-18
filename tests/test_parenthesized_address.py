@@ -2,6 +2,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 sys.modules.setdefault("resource", types.SimpleNamespace(
     getrusage=lambda *_: types.SimpleNamespace(ru_maxrss=0), RUSAGE_SELF=0,
@@ -192,6 +193,60 @@ class ChapterNamesTest(unittest.TestCase):
         for lead in ("בפרק שלישי", "פ\"ק", "ב", "שני", "הירושלמי פרק שני", "רש\"י פ\"ב", "פרק האשה"):
             with self.subTest(lead=lead):
                 self.assertFalse(self.named(lead))
+
+
+class _Amudim:
+    """A Ref stand-in: Bava Metzia chapter 3 ends at 44a, chapter 4 starts there."""
+    SPANS = {"Bava Metzia 44": {"44a", "44b"}, "Bava Metzia 44a": {"44a"}, "Bava Metzia 44b": {"44b"},
+             "Bava Metzia 33b-44a": {"33b", "44a"}, "Bava Metzia 44a-60b": {"44a", "44b", "60b"}}
+
+    def __init__(self, text):
+        if text not in self.SPANS:
+            raise ValueError(text)
+        self.text = text
+
+    def normal(self):
+        return self.text
+
+    def is_talmud(self):
+        return True
+
+    def overlaps(self, other):
+        return bool(self.SPANS[self.text] & self.SPANS[other.text])
+
+
+class ChapterLedAmudTest(unittest.TestCase):
+    """The amud written after a chapter-led citation must agree with that chapter."""
+
+    def records(self, content, chapter, target="Bava Metzia 44"):
+        start = content.index("בפרק")
+        end = content.index("מד") + 2
+        rr = types.SimpleNamespace(resolution_failed=True, raw_entity=_raw(content, start, end, []))
+        found = None if chapter is None else (_Amudim(target), _Amudim(chapter))
+        linker = types.SimpleNamespace(bulk_link=lambda *_a, **_k: [types.SimpleNamespace(resolved_refs=[rr])])
+        with mock.patch.object(link_books, "parenthesized_address", return_value=None), \
+                mock.patch.object(link_books, "chapter_led_citation", return_value=found):
+            records = link_books.process_batch(linker, link_books.BookKey("MoreBooks", "ספר"),
+                                               [(0, content, None)], lambda _line: None,
+                                               context_ref_factory=_Amudim)[0]
+        return [(r.target_ref, content[r.start:r.end]) for r in records]
+
+    def test_an_amud_outside_the_named_chapter_drops_the_citation(self):
+        self.assertEqual(self.records("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", "Bava Metzia 33b-44a"), [])
+
+    def test_an_amud_inside_the_named_chapter_is_kept(self):
+        content = "ועיין בפרק הזהב דבבא מציעא (דף מד: ושם)"
+        self.assertEqual(self.records(content, "Bava Metzia 44a-60b"),
+                         [("Bava Metzia 44b", "בפרק הזהב דבבא מציעא (דף מד:")])
+
+    def test_an_unmarked_or_line_final_daf_stays_whole(self):
+        for content in ("ועיין בפרק שלישי דבבא מציעא (דף מד) ושם", "ועיין בפרק שלישי דבבא מציעא (דף מד:"):
+            with self.subTest(content=content):
+                self.assertEqual(self.records(content, "Bava Metzia 33b-44a"),
+                                 [("Bava Metzia 44", content[content.index("בפרק"):content.index("מד") + 2])])
+
+    def test_no_chapter_reading_links_nothing(self):
+        self.assertEqual(self.records("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", None), [])
 
 
 if __name__ == "__main__":

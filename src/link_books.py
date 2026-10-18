@@ -2138,7 +2138,10 @@ def process_batch(
                 relative_direction = None
                 if ref is not None:
                     marked = amud_marked_daf(ref, content, start, end, context_ref_factory)
-                    if marked is not None and (chapter is None or chapter.overlaps(marked[0])):
+                    if marked is not None:
+                        # The written amud outside its named chapter contradicts the citation.
+                        if chapter is not None and not chapter.overlaps(marked[0]):
+                            continue
                         ref, end = marked
                         anchor_text = content[start:end]
                     target_ref = ref.normal()
