@@ -2120,6 +2120,7 @@ def process_batch(
                 start, end = rr.raw_entity.span.range
                 regrouped = None
                 chapters = ()
+                chapter_led = False
                 if failed:
                     regrouped = parenthesized_address(linker, rr, content, context_object)
                     if regrouped is not None:
@@ -2128,6 +2129,7 @@ def process_batch(
                         regrouped = chapter_led_citation(linker, rr, context_object)
                         if regrouped is not None:
                             ref, chapters = regrouped
+                            chapter_led = True
                     relative = relative and regrouped is None
                 if ref is None and not relative:
                     continue
@@ -2139,14 +2141,16 @@ def process_batch(
                 relative_direction = None
                 if ref is not None:
                     marked = amud_marked_daf(ref, content, start, end, context_ref_factory)
-                    if chapters:
-                        # The citation is where its daf and its named chapter meet.
-                        if marked is not None and not any(c.overlaps(marked[0]) for c in chapters):
+                    # The citation is where its daf and its named chapter meet. Only a
+                    # chapter-led citation needs that; a parenthesized address stands alone.
+                    if chapters and marked is None:
+                        narrowed = chapter_amud(ref, chapters, content, end, context_ref_factory)
+                        if narrowed is not None:
+                            ref = narrowed
+                        elif chapter_led:
                             continue
-                        if marked is None:
-                            ref = chapter_amud(ref, chapters, content, end, context_ref_factory)
-                            if ref is None:
-                                continue
+                    elif chapters and chapter_led and not any(c.overlaps(marked[0]) for c in chapters):
+                        continue
                     if marked is not None:
                         ref, end = marked
                         anchor_text = content[start:end]
@@ -2655,8 +2659,9 @@ def parenthesized_address(linker, rr, content: str, context_ref):
     """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
 
     The NER joins a chapter phrase the resolver cannot read to an explicit address in
-    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). A phrase naming
-    chapters of the result's book must name one that contains it.
+    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). The chapters the
+    phrase names that overlap it may narrow it, but never drop it: authors use some
+    chapter names for other chapters than Sefaria ("דיני ממונות בתרא" for "זה בורר").
     """
     raw = rr.raw_entity
     first = parenthesized_address_parts(raw, content)
@@ -2676,9 +2681,8 @@ def parenthesized_address(linker, rr, content: str, context_ref):
         return None
     raw_start, raw_end = raw.span.range
     text = content[raw_start:raw_end]
-    chapters = named_chapters(text[raw.raw_ref_parts[0].span.range[0]:text.index("(")], resolved.ref)
-    if chapters and not any(chapter.overlaps(resolved.ref) for chapter in chapters):
-        return None
+    lead = text[raw.raw_ref_parts[0].span.range[0]:text.index("(")]
+    chapters = tuple(c for c in named_chapters(lead, resolved.ref) if c.overlaps(resolved.ref))
     return resolved.ref, span.range, chapters
 
 
@@ -2799,8 +2803,8 @@ def chapter_led_citation(linker, rr, context_ref):
     return ref, tuple(chapters)
 
 
-# A mark right after a daf: "." for amud a, ":" or "ע"ב" for amud b.
-_AMUD_AFTER_RE = re.compile(r'^(?:(?P<mark>[.:])|\s*ע["״](?P<side>[אב]))')
+# A mark after a daf, past spaces and tags ("מד</small>:"): "." for amud a, ":" or "ע"ב" for amud b.
+_AMUD_AFTER_RE = re.compile(r'^(?:\s|<[^>]*>)*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
 
 
 def chapter_amud(ref, chapters, content: str, end: int, ref_factory):

@@ -247,7 +247,8 @@ class ChapterLedAmudTest(unittest.TestCase):
 
     def test_an_amud_outside_the_named_chapter_drops_the_citation(self):
         for content in ("ועיין בפרק שלישי דבבא מציעא (דף מד: ושם)", "ועיין בפרק שלישי דבבא מציעא (דף מד:",
-                        "ועיין בפרק שלישי דבבא מציעא דף מד ע\"ב ושם"):
+                        "ועיין בפרק שלישי דבבא מציעא דף מד ע\"ב ושם", "ועיין בפרק שלישי דבבא מציעא (דף מד</small>: ושם)",
+                        "ועיין בפרק שלישי דבבא מציעא דף מד : ושם"):
             with self.subTest(content=content):
                 self.assertEqual(self.records(content, _CHAPTER_3), [])
 
@@ -299,9 +300,14 @@ class ParenthesizedChapterTest(unittest.TestCase):
                                            "sefaria.model.linker.ref_part": ref_part}):
             return _batch(content, rr, linker, chapter_led_citation=lambda *_: None)
 
-    def test_an_address_outside_the_named_chapter_is_dropped(self):
-        self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33"), [])
-        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"), [])
+    def test_the_address_stands_when_the_chapter_disagrees(self):
+        # Authors use some chapter names for other chapters than Sefaria ("דיני ממונות בתרא").
+        self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33"),
+                         [("Bava Metzia 33", "ב\"מ דף לג")])
+        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"),
+                         [("Bava Metzia 44b", "ב\"מ דף מד:")])
+        self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד</small>: ושם)", "NAMED", "Bava Metzia 44"),
+                         [("Bava Metzia 44", "ב\"מ דף מד")])
 
     def test_an_address_in_its_chapter_keeps_the_amud(self):
         self.assertEqual(self.records("ועיין בפרק הזהב (ב\"מ דף מד: ושם)", "NAMED", "Bava Metzia 44"),
