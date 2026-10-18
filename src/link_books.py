@@ -2115,9 +2115,15 @@ def process_batch(
                 if not failed:
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
+                start, end = rr.raw_entity.span.range
+                parenthesized = None
+                if failed:
+                    parenthesized = parenthesized_address(linker, rr, content, context_object)
+                    if parenthesized is not None:
+                        ref, (start, end) = parenthesized
+                        relative = False
                 if ref is None and not relative:
                     continue
-                start, end = rr.raw_entity.span.range
                 # A parenthesized Hebrew number opening a line is its structural
                 # marker, not a citation (for example "(נח)" as Parashat Noach).
                 if end <= marker_end:
@@ -2125,6 +2131,10 @@ def process_batch(
                 anchor_text = content[start:end]
                 relative_direction = None
                 if ref is not None:
+                    marked = amud_marked_daf(ref, content, start, end, context_ref_factory)
+                    if marked is not None:
+                        ref, end = marked
+                        anchor_text = content[start:end]
                     target_ref = ref.normal()
                     if is_implausible_citation_target(target_ref, anchor_text):
                         continue
@@ -2149,7 +2159,7 @@ def process_batch(
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
-                if recovered is None:
+                if recovered is None and parenthesized is None:
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2590,6 +2600,88 @@ def _pick_ref(rr, last_ref=None):
 def has_raw_part_type(rr, type_name: str) -> bool:
     parts = getattr(getattr(rr, "raw_entity", None), "raw_ref_parts", ())
     return any(getattr(getattr(part, "type", None), "name", None) == type_name for part in parts)
+
+
+_PAREN_ADDRESS_TYPES = {"NAMED", "NUMBERED", "DH"}
+# A chapter locator: "בפרק X", "בפ' X", "בריש X", "בסוף X", "בס"פ X", "ר"פ X".
+_CHAPTER_LEAD_RE = re.compile(r"^ו?[במ]?(?:פרק|פ['׳]|ריש|סוף|ס[\"״]פ|ר[\"״]פ|רפ[\"״]|ספ[\"״])(?![א-ת])")
+
+
+def _locates_only(part) -> bool:
+    # A commentator or book named before "(" is the work cited, so it must not be dropped.
+    return part.type.name == "RELATIVE" or (
+        part.type.name == "NAMED" and bool(_CHAPTER_LEAD_RE.match(_HTML_TAG_RE.sub("", part.text).strip())))
+
+
+def parenthesized_address_parts(raw_entity, content: str) -> int | None:
+    """Index of the first part inside the citation's one "(", or None.
+
+    The parts before it must only locate the address ("בריש מרובה", "בפרק דלקמן"),
+    and those inside must spell a title and an address on their own ("ב״ק דף סג:").
+    """
+    raw_start, raw_end = raw_entity.span.range
+    text = content[raw_start:raw_end]
+    if text.count("(") != 1 or ")" in text:
+        return None
+    paren = text.index("(")
+    parts = list(raw_entity.raw_ref_parts)
+    first = next((i for i, part in enumerate(parts) if part.span.range[0] > paren), None)
+    if not first or any(part.span.range[1] > paren for part in parts[:first]):
+        return None
+    address = [part.type.name for part in parts[first:]]
+    if not all(_locates_only(part) for part in parts[:first]) or not set(address) <= _PAREN_ADDRESS_TYPES:
+        return None
+    if "NAMED" not in address or "NUMBERED" not in address:
+        return None
+    return first
+
+
+def parenthesized_address(linker, rr, content: str, context_ref):
+    """(Ref, (start, end)) of a failed citation's parenthesized address, resolved alone.
+
+    The NER joins a chapter phrase the resolver cannot read to an explicit address in
+    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490).
+    """
+    raw = rr.raw_entity
+    first = parenthesized_address_parts(raw, content)
+    if first is None:
+        return None
+    from sefaria.model.linker.ref_part import RawRef
+
+    try:
+        span = raw.subspan(slice(first, None))
+    except AssertionError:  # Sefaria's own guard for part/token misalignment
+        return None
+    parts = [part.realign_to_new_raw_ref(raw.span, span) for part in raw.raw_ref_parts[first:]]
+    resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, parts))
+    if resolved is None or resolved.is_ambiguous or resolved.ref is None:
+        return None
+    if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
+        return None
+    return resolved.ref, span.range
+
+
+_WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")
+
+
+def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
+    """(Ref, end) of amud b when a whole-daf anchor is cut right before its ":".
+
+    The NER cuts "נא:" before the mark when "ושם" follows (Otzaria/otzaria#2490). Only ":"
+    mid-line is an amud mark: "." also separates list items, and a line-final ":" ends it.
+    """
+    if ref_factory is None or end >= len(content) or content[end] != ":":
+        return None
+    if not _HTML_TAG_RE.sub("", content[end + 1:]).strip():
+        return None
+    match = _WHOLE_DAF_RE.match(ref.normal())
+    if match is None or not ref.is_talmud():
+        return None
+    tokens = content[start:end].split()
+    if not tokens or int(match.group(2)) not in _hebrew_number(tokens[-1]):
+        return None
+    marked = _amud_ref(match.group(1), int(match.group(2)), "ב", ref_factory)
+    return None if marked is None else (marked, end + 1)
 
 
 def relative_ref_direction(rr, target_ref, source_ref, anchor_text: str) -> str | None:
