@@ -2094,19 +2094,23 @@ def process_batch(
             return invoke()
         return ibid_context.resolve(linker, invoke)
 
+    def whole(docs):
+        # Inside the call, so the ibid history of a short reply is never kept.
+        if len(docs) != len(batch):  # a short reply would silently drop tail lines
+            raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
+        return docs
+
     try:
         if precomputed is not None:
-            docs = resolve(lambda: precomputed.resolve_batch(
+            docs = resolve(lambda: whole(precomputed.resolve_batch(
                 linker, bk, batch, batch_start, book_context_refs=context_objects,
-            ))
+            )))
         else:
-            docs = resolve(lambda: linker.bulk_link(
+            docs = resolve(lambda: whole(linker.bulk_link(
                 [content for _, content, _ in batch],
                 book_context_refs=context_objects,
                 type_filter="citation", with_failures=True,
-            ))
-        if len(docs) != len(batch):  # a short reply would silently drop tail lines
-            raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
+            )))
     except Exception:
         if precomputed is None and not ner_alive():
             raise

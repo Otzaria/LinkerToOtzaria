@@ -188,6 +188,26 @@ class IbidLayoutTest(unittest.TestCase):
                             differences.append((case, batch_lines, recycle))
         self.assertEqual(differences, [])
 
+    def test_a_short_reply_replays_from_the_history_before_its_batch(self):
+        # Kept from the short reply, the batch's end history would feed line 0 a
+        # "שם" pointing forward at line 1.
+        class Short(_Linker):
+            def bulk_link(self, texts, **kwargs):
+                docs = super().bulk_link(texts, **kwargs)
+                return docs[:-1] if len(texts) > 1 else docs
+
+        lines = [(0, "מקור @", CONTEXT), (1, "מקור |Berakhot 2a", CONTEXT),
+                 (2, "מקור @", CONTEXT), (3, "מקור |Shabbat 3a", CONTEXT)]
+        with tempfile.TemporaryDirectory() as tmp:
+            whole = _link(tmp, "whole", lines, 100)
+            with mock.patch.object(link_books, "ner_alive", return_value=True), \
+                    mock.patch.object(sys.modules[__name__], "_Linker", Short):
+                for batch_lines in (2, 4):
+                    with self.subTest(batch_lines=batch_lines):
+                        self.assertEqual(_link(tmp, f"s{batch_lines}", lines, batch_lines), whole)
+        self.assertEqual(whole, [(1, 0, 2, "Berakhot 2a"), (2, 0, 2, "Berakhot 2a"),
+                                 (3, 0, 2, "Shabbat 3a")])
+
     def test_the_state_on_disk_holds_the_title_map(self):
         lines = [
             (0, "מקור |Berakhot 2a", CONTEXT),
