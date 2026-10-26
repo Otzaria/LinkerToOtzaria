@@ -330,7 +330,7 @@ class _RealignedPart(_Part):
 class ParenthesizedChapterTest(unittest.TestCase):
     """The chapter before a parenthesized address is checked like a chapter before its title."""
 
-    def records(self, content, lead_type, target):
+    def records(self, content, lead_type, target, history=()):
         start = content.index("בפרק")
         daf = "מד" if "מד" in content else "לג"
         end = content.index(daf) + 2
@@ -343,7 +343,12 @@ class ParenthesizedChapterTest(unittest.TestCase):
         rr = types.SimpleNamespace(resolution_failed=True, raw_entity=raw)
         resolved = types.SimpleNamespace(is_ambiguous=False, ref=_Amudim(target), context_type=None)
         resolver = _Resolver()
-        resolver.resolve_raw_ref = lambda *_: resolved
+        for normal in history:
+            resolver._ibid_history.last_refs = Ref(normal)
+        self.seen = []
+        resolver.resolve_raw_ref = lambda *_: self.seen.append(
+            [r.normal() for r in resolver._ibid_history.last_refs]) or resolved
+        self.resolver = resolver
         linker = types.SimpleNamespace(_ref_resolver=resolver)
         ref_part = types.ModuleType("sefaria.model.linker.ref_part")
         ref_part.RawRef = lambda *args: args
@@ -367,6 +372,15 @@ class ParenthesizedChapterTest(unittest.TestCase):
                          [("Bava Metzia 44b", "ב\"מ דף מד:")])
         self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד) ושם", "NAMED", "Bava Metzia 44"),
                          [("Bava Metzia 44a", "ב\"מ דף מד")])
+
+    def test_the_address_is_resolved_without_the_batch_history(self):
+        # By recovery time the history runs to the batch's end, past this line.
+        found = self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33",
+                             history=("Shabbat 3a", "Shabbat 4a"))
+        self.assertEqual(found, [("Bava Metzia 33", "ב\"מ דף לג")])
+        self.assertEqual(self.seen, [[]])
+        self.assertEqual([r.normal() for r in self.resolver._ibid_history.last_refs],
+                         ["Shabbat 3a", "Shabbat 4a"])
 
     def test_a_lead_naming_no_chapter_of_the_book_is_not_checked(self):
         self.assertEqual(self.records("ועיין בפרק דלקמן (ב\"מ דף לג ושם)", "RELATIVE", "Bava Metzia 33"),
@@ -393,6 +407,37 @@ class BookChaptersTest(unittest.TestCase):
         finally:
             link_books._book_chapters.cache_clear()
 
+
+class ChapterLedHistoryTest(unittest.TestCase):
+    def test_a_chapter_led_citation_is_resolved_without_the_batch_history(self):
+        resolver = _Resolver()
+        for normal in ("Shabbat 3a", "Shabbat 4a"):
+            resolver._ibid_history.last_refs = Ref(normal)
+        target = Ref("Ketubot 18a")
+        seen = []
+        resolver.resolve_raw_ref = lambda *_: seen.append(list(resolver._ibid_history.last_refs)) \
+            or types.SimpleNamespace(is_ambiguous=False, ref=target, context_type=None)
+        raw = mock.MagicMock()
+        raw.span.range = (0, 20)
+        raw.raw_ref_parts = [mock.MagicMock(), mock.MagicMock()]
+        for part, span in zip(raw.raw_ref_parts, ((0, 10), (11, 20))):
+            part.span.range = span
+        chapter = types.SimpleNamespace(overlaps=lambda _ref: True, normal=lambda: "Ketubot 2")
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.RawRef = lambda *args: args
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}), \
+                mock.patch.multiple(link_books, chapter_led_splits=lambda _raw: [("lead", 1, 11)],
+                                    named_chapters=lambda _lead, _ref: (chapter,)):
+            found = link_books.chapter_led_citation(
+                types.SimpleNamespace(_ref_resolver=resolver),
+                types.SimpleNamespace(raw_entity=raw), None)
+        self.assertEqual(found, (target, (chapter,)))
+        self.assertEqual(seen, [[]])
+        self.assertEqual([r.normal() for r in resolver._ibid_history.last_refs],
+                         ["Shabbat 3a", "Shabbat 4a"])
 
 
 class ResolveAloneTest(unittest.TestCase):
