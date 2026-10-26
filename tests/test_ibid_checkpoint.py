@@ -21,10 +21,11 @@ import link_books  # noqa: E402
 
 
 class Ref:
-    """Just enough of a Sefaria Ref: a normal form that round-trips."""
+    """Just enough of a Sefaria Ref: a normal form that round-trips, and its book."""
 
     def __init__(self, normal):
         self._normal = normal
+        self.index = type("Index", (), {"title": normal.split(" ")[0]})()
 
     def normal(self):
         return self._normal
@@ -36,26 +37,47 @@ class Ref:
         return f"Ref({self._normal!r})"
 
 
-class _History:
-    def __init__(self):
-        self._refs = []
+class IbidHistory:
+    """A copy of the pinned Sefaria IbidHistory (sefaria/model/linker/ref_resolver.py)."""
 
-    @property
-    def last_refs(self):
-        return self._refs
+    def __init__(self, last_n_titles: int = 3, last_n_refs: int = 3):
+        self.last_n_titles = last_n_titles
+        self.last_n_refs = last_n_refs
+        self._last_refs = []
+        self._last_titles = []
+        self._title_ref_map = {}
 
-    @last_refs.setter
-    def last_refs(self, ref):
-        self._refs.append(ref)
-        self._refs = self._refs[-3:]
+    def _get_last_refs(self):
+        return self._last_refs
+
+    def _set_last_match(self, oref):
+        self._last_refs += [oref]
+        title = oref.index.title
+        if title not in self._title_ref_map:
+            self._last_titles += [title]
+        self._title_ref_map[oref.index.title] = oref
+
+        # enforce last_n_titles
+        if len(self._last_titles) > self.last_n_titles:
+            oldest_title = self._last_titles.pop(0)
+            del self._title_ref_map[oldest_title]
+
+        # enforce last_n_refs
+        if len(self._last_refs) > self.last_n_refs:
+            self._last_refs.pop(0)
+
+    last_refs = property(_get_last_refs, _set_last_match)
+
+    def get_ref_by_title(self, title):
+        return self._title_ref_map.get(title, None)
 
 
 class _Resolver:
     def __init__(self):
-        self._ibid_history = _History()
+        self._ibid_history = IbidHistory()
 
     def reset_ibid_history(self):
-        self._ibid_history = _History()
+        self._ibid_history = IbidHistory()
 
 
 class _RawEntity:

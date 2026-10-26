@@ -298,8 +298,8 @@ def build_line_baseline(
 def ibid_seam_counts(rows, flags, seams) -> list[int] | None:
     """Entity lines before each transport seam of a whole-book stateful pass.
 
-    IbidContext carries only the last refs across a seam, not Sefaria's title map, so
-    a stateful book's links depend on these counts as well as on its entity lines.
+    Until ibid state schema 4 a seam dropped Sefaria's title map, so a stateful book's
+    links depended on these counts too; now matching them is only conservative.
     """
     if any(flag is None for flag in flags):
         return None
