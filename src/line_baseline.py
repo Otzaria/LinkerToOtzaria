@@ -25,7 +25,10 @@ from pathlib import Path
 from linker_artifact import BookKey
 from linker_artifact import book_key_to_relpath
 
+# The manifest stays at 2: SeforimLibrary's recovery check pins it.
 SCHEMA_VERSION = 2
+# Book files: 3 adds book_context, ibid_seams and a per-line NER-entity flag.
+BOOK_SCHEMA_VERSION = 3
 DIRECTORY_NAME = "line-baseline"
 _HEX16 = re.compile(r"[0-9a-f]{16}\Z")
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
@@ -59,6 +62,9 @@ class LineDelta:
     ner_ranges: tuple[tuple[int, int], ...]
     current_line_count: int
     prior_artifact_sha256: str | None = None
+    # Set on an ibid book planned as a context probe: the whole book, which the NER
+    # producer covers instead once any probed line carries an entity.
+    context_ranges: tuple[tuple[int, int], ...] | None = None
 
     @property
     def reused_line_count(self) -> int:
@@ -189,8 +195,13 @@ def build_line_baseline(
     snapshot_sha256: str,
     engine_fingerprint: str | None,
     artifacts_root: str,
+    book_state=None,
 ) -> int:
     """Rebuild the release-only line baseline from an accepted snapshot.
+
+    ``book_state(book, rows)`` returns the per-row NER-entity flags (``None`` when
+    unknown) and the ibid seams the book's artifact was linked under; without it
+    both are unknown.
 
     Rebuilding all books is deliberately simple and fail-closed.  It is linear in
     the snapshot (about the same work as the existing book-hash pass) and happens
@@ -232,16 +243,26 @@ def build_line_baseline(
                         digest.update(chunk)
                         link_records += chunk.count(b"\n")
                 artifact_sha256 = digest.hexdigest()
+            flags, seams = ([None] * len(rows), None) if book_state is None else book_state(book, rows)
+            flags = list(flags)
+            if len(flags) != len(rows) or any(
+                flag is not None and type(flag) is not bool for flag in flags
+            ):
+                raise RuntimeError(f"invalid line entity flags for {book!r}")
+            if seams is not None and not _valid_seams(seams):
+                raise RuntimeError(f"invalid ibid seams for {book!r}")
             _write_json_atomic(
                 _book_path(temporary, book),
                 {
-                    "schema_version": SCHEMA_VERSION,
+                    "schema_version": BOOK_SCHEMA_VERSION,
                     "book": book.to_dict(),
                     "book_hash": book_hash,
                     "artifact_sha256": artifact_sha256,
+                    "book_context": requires_book_context(rows),
+                    "ibid_seams": seams,
                     "lines": [
-                        [line_index, line_fingerprint(content, context_ref)]
-                        for line_index, content, context_ref in rows
+                        [line_index, line_fingerprint(content, context_ref), flag]
+                        for (line_index, content, context_ref), flag in zip(rows, flags)
                     ],
                 },
             )
@@ -274,6 +295,95 @@ def build_line_baseline(
     return link_records
 
 
+def ibid_seam_counts(rows, flags, seams) -> list[int] | None:
+    """Entity lines before each transport seam of a whole-book stateful pass.
+
+    IbidContext carries only the last refs across a seam, not Sefaria's title map, so
+    a stateful book's links depend on these counts as well as on its entity lines.
+    """
+    if any(flag is None for flag in flags):
+        return None
+    seam_lines = set(seams)
+    counts = set()
+    entities = 0
+    for (line_index, _, _), flag in zip(rows, flags):
+        # A seam before the first entity restores an empty history: a no-op.
+        if line_index in seam_lines and entities:
+            counts.add(entities)
+        entities += flag
+    return sorted(counts)
+
+
+def _valid_seams(value) -> bool:
+    return (
+        type(value) is list
+        and all(type(item) is int and item >= 0 for item in value)
+        and value == sorted(set(value))
+    )
+
+
+def next_book_state(
+    *,
+    baseline_root: str,
+    baseline_hashes: dict[tuple[str, str], str],
+    line_deltas: dict[tuple[str, str], LineDelta],
+    bundle,
+    ner_eligible,
+    batch_seams,
+):
+    """``book_state`` for build_line_baseline after a successful run.
+
+    Flags and seams describe the artifact: NER'd lines take the bundle's flag, reused
+    and unchanged lines keep theirs, an unchanged book keeps its seams and a relinked
+    stateful book gets those of its current layout.  Pass no hashes when the prior
+    line baseline is not valid for this engine.
+    """
+
+    def state(book: BookKey, rows):
+        # Only a book with book context is ever probed.
+        if not requires_book_context(rows):
+            return [None] * len(rows), None
+        key = (book.source_name, book.canonical_he_title)
+        delta = line_deltas.get(key)
+        if delta is None:
+            carried = {line_index: line_index for line_index, _, _ in rows}
+            sent: set[int] = set()
+            found = None
+        else:
+            carried = {new: old for old, new in delta.reuse}
+            escalated = bundle is not None and key in bundle.escalated
+            sent = indices_from_ranges(delta.context_ranges if escalated else delta.ner_ranges)
+            found = bundle.entity_lines(key) if bundle is not None else None
+        old = None
+        if carried and key in baseline_hashes:
+            try:
+                old = _load_book_baseline(baseline_root, book, baseline_hashes[key])
+            except RuntimeError:
+                old = None
+        flags = []
+        for line_index, content, _context_ref in rows:
+            if line_index in sent:
+                if found is None:
+                    flags.append(None)
+                elif line_index in found:
+                    flags.append(found[line_index])
+                elif not ner_eligible(content):
+                    flags.append(False)
+                else:
+                    raise RuntimeError(f"NER bundle lacks planned line {line_index} of {book!r}")
+            elif line_index in carried and old is not None:
+                flags.append(old.entities.get(carried[line_index]))
+            else:
+                flags.append(None)
+        if delta is None:
+            seams = old.ibid_seams if old is not None else None
+        else:
+            seams = ibid_seam_counts(rows, flags, batch_seams(rows))
+        return flags, seams
+
+    return state
+
+
 def validate_baseline_identity(
     root: str,
     *,
@@ -304,15 +414,39 @@ def validate_baseline_identity(
     )
 
 
+@dataclass(frozen=True)
+class BookBaseline:
+    """One prior book: line fingerprints, artifact digest and, from schema 3 on,
+    whether it was resolved with book context and which lines carried NER entities."""
+
+    lines: list[tuple[int, str]]
+    artifact_sha256: str | None
+    entities: dict[int, bool | None]
+    book_context: bool | None
+    ibid_seams: list[int] | None
+
+
+_BOOK_KEYS = {
+    2: {"schema_version", "book", "book_hash", "artifact_sha256", "lines"},
+    3: {
+        "schema_version", "book", "book_hash", "artifact_sha256", "book_context",
+        "ibid_seams", "lines",
+    },
+}
+
+
 def _load_book_baseline(
     root: str, book: BookKey, expected_book_hash: str
-) -> tuple[list[tuple[int, str]], str | None]:
+) -> BookBaseline:
     value = _load_json_strict(_book_path(root, book))
+    schema = value.get("schema_version") if type(value) is dict else None
     if (
-        type(value) is not dict
-        or set(value)
-        != {"schema_version", "book", "book_hash", "artifact_sha256", "lines"}
-        or value["schema_version"] != SCHEMA_VERSION
+        type(schema) is not int
+        or schema not in _BOOK_KEYS
+        or set(value) != _BOOK_KEYS[schema]
+        or (schema == 3 and type(value["book_context"]) is not bool)
+        or (schema == 3 and value["ibid_seams"] is not None
+            and not _valid_seams(value["ibid_seams"]))
         or value["book"] != book.to_dict()
         or value["book_hash"] != expected_book_hash
         or (
@@ -325,24 +459,34 @@ def _load_book_baseline(
         or type(value["lines"]) is not list
     ):
         raise RuntimeError(f"line baseline identity mismatch for {book!r}")
+    width = 3 if schema == 3 else 2
     result = []
+    entities = {}
     seen = set()
     for index, item in enumerate(value["lines"]):
         if (
             type(item) is not list
-            or len(item) != 2
+            or len(item) != width
             or type(item[0]) is not int
             or item[0] < 0
             or item[0] in seen
             or type(item[1]) is not str
             or not _HEX32.fullmatch(item[1])
+            or (width == 3 and item[2] is not None and type(item[2]) is not bool)
         ):
             raise RuntimeError(f"invalid line baseline row {index} for {book!r}")
         seen.add(item[0])
         result.append((item[0], item[1]))
+        entities[item[0]] = item[2] if width == 3 else None
     if [line_index for line_index, _ in result] != sorted(seen):
         raise RuntimeError(f"unsorted line baseline for {book!r}")
-    return result, value["artifact_sha256"]
+    return BookBaseline(
+        lines=result,
+        artifact_sha256=value["artifact_sha256"],
+        entities=entities,
+        book_context=value["book_context"] if schema == 3 else None,
+        ibid_seams=value["ibid_seams"] if schema == 3 else None,
+    )
 
 
 def full_ner_delta(current_rows: list[tuple[int, str, str]]) -> LineDelta:
@@ -382,6 +526,10 @@ def compute_line_delta(
     current_rows: list[tuple[int, str, str]],
     *,
     prior_artifact_sha256: str | None = None,
+    old_entities: dict[int, bool | None] | None = None,
+    old_book_context: bool | None = None,
+    old_ibid_seams: list[int] | None = None,
+    batch_seams=None,
 ) -> LineDelta:
     """Match identical lines one-to-one, preferring stable line indices.
 
@@ -389,8 +537,53 @@ def compute_line_delta(
     different Sefaria location must be re-resolved because לעיל/לקמן can change.
     """
     if requires_book_context(current_rows):
-        return full_ner_delta(current_rows)
+        return _context_probe_delta(
+            old_rows, current_rows, prior_artifact_sha256, old_entities, old_book_context,
+            old_ibid_seams, batch_seams,
+        ) or full_ner_delta(current_rows)
+    reuse, ner = _match_lines(old_rows, current_rows)
+    return _checked_delta(current_rows, reuse, ner, prior_artifact_sha256)
 
+
+def _context_probe_delta(
+    old_rows, current_rows, prior_artifact_sha256, old_entities, old_book_context,
+    old_ibid_seams, batch_seams,
+) -> LineDelta | None:
+    """Plan an ibid book as a context probe, or return None for a whole-book pass.
+
+    Only lines with a NER entity move ibid history, so if dropped old lines had none,
+    entity lines keep their order and the transport seams fall between the same entity
+    lines, unchanged lines keep their history — provided the new lines have no entity
+    either, which the NER producer checks.
+    """
+    if (old_book_context is not True or old_entities is None or old_ibid_seams is None
+            or batch_seams is None or not current_rows):
+        return None
+    if any(old_entities.get(line_index) is None for line_index, _ in old_rows):
+        return None
+    reuse, ner = _match_lines(old_rows, current_rows)
+    if not reuse:
+        return None
+    used_old = {old for old, _ in reuse}
+    if any(old_entities[line_index] for line_index, _ in old_rows if line_index not in used_old):
+        return None
+    carried = [old for old, _ in reuse if old_entities[old]]
+    if any(later <= earlier for earlier, later in zip(carried, carried[1:])):
+        return None
+    reused_from = {new: old for old, new in reuse}
+    current_flags = [
+        old_entities[reused_from[line_index]] if line_index in reused_from else False
+        for line_index, _, _ in current_rows
+    ]
+    if ibid_seam_counts(current_rows, current_flags, batch_seams(current_rows)) != old_ibid_seams:
+        return None
+    return _checked_delta(
+        current_rows, reuse, ner, prior_artifact_sha256,
+        context_ranges=coalesce_ranges(line_index for line_index, _, _ in current_rows),
+    )
+
+
+def _match_lines(old_rows, current_rows) -> tuple[list[tuple[int, int]], list[int]]:
     old_by_index = dict(old_rows)
     current = [
         (line_index, line_fingerprint(content, context_ref))
@@ -417,11 +610,18 @@ def compute_line_delta(
         else:
             ner.append(new_index)
     reuse.sort(key=lambda item: item[1])
+    return reuse, ner
+
+
+def _checked_delta(
+    current_rows, reuse, ner, prior_artifact_sha256, context_ranges=None,
+) -> LineDelta:
     delta = LineDelta(
         reuse=tuple(reuse),
         ner_ranges=coalesce_ranges(ner),
         current_line_count=len(current_rows),
         prior_artifact_sha256=prior_artifact_sha256,
+        context_ranges=context_ranges,
     )
     current_indices = {line_index for line_index, _, _ in current_rows}
     reused_destinations = {new for _, new in delta.reuse}
@@ -442,6 +642,7 @@ def plan_changed_books(
     baseline_root: str,
     baseline_hashes: dict[tuple[str, str], str],
     baseline_identity_valid: bool,
+    batch_seams=None,
 ) -> tuple[dict[tuple[str, str], LineDelta], int, int]:
     """Plan safe per-line reuse for changed books; fall back per book on any drift."""
     connection = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
@@ -456,13 +657,17 @@ def plan_changed_books(
             if (baseline_identity_valid and key in baseline_hashes
                     and not placed_by_daf_headings(book)):
                 try:
-                    old_rows, artifact_sha256 = _load_book_baseline(
+                    old = _load_book_baseline(
                         baseline_root, book, baseline_hashes[key]
                     )
                     delta = compute_line_delta(
-                        old_rows,
+                        old.lines,
                         current_rows,
-                        prior_artifact_sha256=artifact_sha256,
+                        prior_artifact_sha256=old.artifact_sha256,
+                        old_entities=old.entities,
+                        old_book_context=old.book_context,
+                        old_ibid_seams=old.ibid_seams,
+                        batch_seams=batch_seams,
                     )
                 except RuntimeError:
                     # The optimisation is optional.  A missing/corrupt/mismatched

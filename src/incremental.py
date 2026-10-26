@@ -53,6 +53,7 @@ from linker_artifact import (  # noqa: E402
 from line_baseline import (  # noqa: E402
     DIRECTORY_NAME as LINE_BASELINE_DIRECTORY,
     build_line_baseline,
+    next_book_state,
     plan_changed_books,
     validate_baseline_identity,
 )
@@ -726,9 +727,8 @@ def compute_incremental_plan(args) -> dict:
         elif stored_fingerprint is None:
             _log(f"baseline predates fingerprinting — ADOPTING {fingerprint!r} (no full relink)")
         elif getattr(args, "forbid_full_relink", False):
-            # Serial mode: a waiting DB build cannot absorb an ~11h full relink (it
-            # would time out mid-release). The engine change is deliberate — run the
-            # standalone relink first, then re-run the weekly build.
+            # Serial kaggle/server mode: their bounded jobs cannot absorb a full relink
+            # (target=local never passes this flag). Run the standalone relink first.
             raise RuntimeError(
                 "engine fingerprint changed "
                 f"({stored_fingerprint!r} -> {fingerprint!r}) but a full relink is "
@@ -758,12 +758,14 @@ def compute_incremental_plan(args) -> dict:
             book_count=len(baseline),
         )
     )
+    from link_books import transport_seams
     line_deltas, reused_lines, ner_lines = plan_changed_books(
         args.snapshot,
         changed,
         baseline_root=line_baseline_root,
         baseline_hashes=baseline,
         baseline_identity_valid=line_identity_valid,
+        batch_seams=transport_seams,
     )
     _log(f"snapshot: {len(current)} books | changed/new={len(changed)} removed={len(removed)}")
     if changed:
@@ -772,6 +774,13 @@ def compute_incremental_plan(args) -> dict:
             f"line plan ({mode}): reuse={reused_lines} NER={ner_lines} "
             f"({(100.0 * ner_lines / (reused_lines + ner_lines)) if reused_lines + ner_lines else 0:.3f}% GPU)"
         )
+        probes = [delta for delta in line_deltas.values() if delta.context_ranges is not None]
+        if probes:
+            _log(
+                f"context probes: {len(probes)} ibid book(s) send only "
+                f"{sum(delta.ner_line_count for delta in probes)} changed line(s) to NER; "
+                "a probed line with an entity re-covers its whole book"
+            )
     return {
         "current": current,
         "changed": changed,
@@ -779,7 +788,17 @@ def compute_incremental_plan(args) -> dict:
         "line_deltas": line_deltas,
         "engine_fingerprint": fingerprint,
         "stored_engine_fingerprint": stored_fingerprint,
+        "baseline": baseline,
+        "line_identity_valid": line_identity_valid,
     }
+
+
+def _ner_plan_ranges(delta) -> dict:
+    """The NER line plan of one book, with its whole-book escalation if it is a probe."""
+    ranges = {"ner_ranges": [[start, end] for start, end in delta.ner_ranges]}
+    if delta.context_ranges is not None:
+        ranges["context_ranges"] = [[start, end] for start, end in delta.context_ranges]
+    return ranges
 
 
 def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
@@ -799,12 +818,9 @@ def write_incremental_plan(args, output: str, relink_request_id: str) -> int:
         "changed": [
             {
                 **book.to_dict(),
-                "ner_ranges": [
-                    [start, end]
-                    for start, end in plan["line_deltas"][
-                        (book.source_name, book.canonical_he_title)
-                    ].ner_ranges
-                ],
+                **_ner_plan_ranges(
+                    plan["line_deltas"][(book.source_name, book.canonical_he_title)]
+                ),
             }
             for book in plan["changed"]
         ],
@@ -1017,12 +1033,7 @@ def run_incremental(args, summary: dict | None = None) -> int:
             {
                 **book.to_dict(),
                 "hash": current[(book.source_name, book.canonical_he_title)],
-                "ner_ranges": [
-                    [start, end]
-                    for start, end in line_deltas[
-                        (book.source_name, book.canonical_he_title)
-                    ].ner_ranges
-                ],
+                **_ner_plan_ranges(line_deltas[(book.source_name, book.canonical_he_title)]),
                 "reuse": [
                     [old_index, new_index]
                     for old_index, new_index in line_deltas[
@@ -1156,6 +1167,17 @@ def run_incremental(args, summary: dict | None = None) -> int:
     # 5. Advance baseline + lineage. Any failure never reaches here (raised above), so the
     #    baseline advances to exactly the snapshot hashes that were fully linked.
     snapshot_sha256 = sha256_of_file(args.snapshot)
+    bundle = None
+    if changed and getattr(args, "ner_bundle_dir", None):
+        from ner_handoff import NerBundle
+        bundle = NerBundle(
+            args.ner_bundle_dir,
+            request_id=args.relink_request_id,
+            snapshot_sha256=snapshot_sha256,
+            engine_fingerprint=args.engine_fingerprint,
+            changed_books=changed_books_payload,
+        )
+    from link_books import is_ner_eligible_line, transport_seams
     # Build the next exact reuse baseline before advancing the committed book clock.
     # A failure here leaves both clocks on the previous accepted release.
     links_total = build_line_baseline(
@@ -1165,6 +1187,14 @@ def run_incremental(args, summary: dict | None = None) -> int:
         snapshot_sha256=snapshot_sha256,
         engine_fingerprint=fingerprint,
         artifacts_root=artifacts_dir,
+        book_state=next_book_state(
+            baseline_root=os.path.join(repo, LINE_BASELINE_DIRECTORY),
+            baseline_hashes=plan["baseline"] if plan["line_identity_valid"] else {},
+            line_deltas=line_deltas,
+            bundle=bundle,
+            ner_eligible=is_ner_eligible_line,
+            batch_seams=transport_seams,
+        ),
     )
     write_snapshot_baseline(baseline_dir, dict(current), engine_fingerprint=fingerprint)
     write_meta(

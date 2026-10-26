@@ -100,9 +100,10 @@ def validate_plan(value: Any, *, request_id: str, snapshot_sha256: str, engine_f
         raise RuntimeError("NER plan changed must be an array")
     seen = set()
     for index, item in enumerate(value["changed"]):
-        if type(item) is not dict or set(item) != {
-            "source_name", "canonical_he_title", "ner_ranges",
-        }:
+        if type(item) is not dict or set(item) not in (
+            {"source_name", "canonical_he_title", "ner_ranges"},
+            {"source_name", "canonical_he_title", "ner_ranges", "context_ranges"},
+        ):
             raise RuntimeError(f"plan.changed[{index}] has an invalid shape")
         key = validate_book_key(
             {
@@ -114,6 +115,10 @@ def validate_plan(value: Any, *, request_id: str, snapshot_sha256: str, engine_f
         if key in seen:
             raise RuntimeError("NER plan changed contains a duplicate book")
         _validate_ner_ranges(item["ner_ranges"], f"plan.changed[{index}].ner_ranges")
+        if "context_ranges" in item:
+            validate_context_ranges(
+                item["ner_ranges"], item["context_ranges"], f"plan.changed[{index}]"
+            )
         seen.add(key)
     if type(value["removed"]) is not list:
         raise RuntimeError("NER plan removed must be an array")
@@ -137,6 +142,23 @@ def validate_plan(value: Any, *, request_id: str, snapshot_sha256: str, engine_f
             raise RuntimeError(f"plan.current_books[{index}] is duplicate or has an invalid hash")
         seen.add(key)
     return value
+
+
+def validate_context_ranges(
+    ner_ranges: Any, context_ranges: Any, where: str
+) -> tuple[tuple[int, int], ...]:
+    """A context probe escalates to a strict superset of its probed lines."""
+    probe = _validate_ner_ranges(ner_ranges, f"{where}.ner_ranges")
+    context = _validate_ner_ranges(context_ranges, f"{where}.context_ranges")
+    probe_lines = _range_indices(probe)
+    context_lines = _range_indices(context)
+    if not context_lines > probe_lines:
+        raise RuntimeError(f"{where}: context_ranges must strictly cover ner_ranges")
+    return context
+
+
+def _range_indices(ranges: tuple[tuple[int, int], ...]) -> set[int]:
+    return {index for start, end in ranges for index in range(start, end)}
 
 
 def _validate_ner_ranges(value: Any, where: str) -> tuple[tuple[int, int], ...]:
@@ -276,6 +298,7 @@ class NerBundle:
             raise RuntimeError("NER manifest character budget differs from resolver transport boundary")
         expected = []
         expected_ranges = {}
+        context_ranges = {}
         for index, item in enumerate(changed_books):
             if type(item) is not dict:
                 raise RuntimeError(f"changed_books[{index}] is not an object")
@@ -290,10 +313,16 @@ class NerBundle:
             expected_ranges[key] = _validate_ner_ranges(
                 item.get("ner_ranges"), f"changed_books[{index}].ner_ranges"
             )
+            if "context_ranges" in item:
+                context_ranges[key] = validate_context_ranges(
+                    item["ner_ranges"], item["context_ranges"], f"changed_books[{index}]"
+                )
         books = manifest["books"]
         if type(books) is not list:
             raise RuntimeError("NER manifest books must be an array")
         self.books: dict[tuple[str, str], dict] = {}
+        # Context probes whose producer covered the whole book instead.
+        self.escalated: set[tuple[str, str]] = set()
         for index, descriptor in enumerate(books):
             if type(descriptor) is not dict or set(descriptor) != {"book", "manifest_path", "size", "sha256"}:
                 raise RuntimeError(f"NER manifest book descriptor {index} has an invalid shape")
@@ -304,7 +333,15 @@ class NerBundle:
             path = self._below_root(relative)
             self._verify_descriptor(path, descriptor, f"manifest.books[{index}]")
             book_manifest = load_json_strict(path)
-            self._validate_book_manifest(book_manifest, key, expected_ranges.get(key))
+            if (
+                key in context_ranges
+                and type(book_manifest) is dict
+                and book_manifest.get("ner_ranges") == [list(item) for item in context_ranges[key]]
+            ):
+                self._validate_book_manifest(book_manifest, key, context_ranges[key])
+                self.escalated.add(key)
+            else:
+                self._validate_book_manifest(book_manifest, key, expected_ranges.get(key))
             if expected_book_hashes is not None and book_manifest["source_book_hash"] != expected_book_hashes.get(key):
                 raise RuntimeError(f"NER book manifest source hash differs from snapshot: {key!r}")
             self.books[key] = book_manifest
@@ -312,6 +349,39 @@ class NerBundle:
             raise RuntimeError("NER manifest book order/set differs from the resolver changed-book plan")
         self.batch_lines = manifest["batch_lines"]
         self.batch_chars = manifest["batch_chars"]
+
+    def entity_lines(self, key: tuple[str, str]) -> dict[int, bool]:
+        """Whether NER found any entity, per line of one book that was sent to NER.
+
+        Planned lines that are not NER-eligible are absent: they never reach NER.
+        """
+        book_manifest = self.books[key]
+        flags: dict[int, bool] = {}
+        for index, descriptor in enumerate(book_manifest["batches"]):
+            where = f"book_manifest.batches[{index}]"
+            path = self._below_root(safe_relative_path(descriptor["path"], f"{where}.path"))
+            self._verify_descriptor(path, descriptor, where)
+            value = load_json_strict(path)
+            lines = value.get("lines") if type(value) is dict else None
+            if type(lines) is not list:
+                raise RuntimeError(f"{where}: NER batch has no line array")
+            for line in lines:
+                result = line.get("result") if type(line) is dict else None
+                line_index = line.get("line_index") if type(line) is dict else None
+                if (
+                    type(line_index) is not int
+                    or line_index in flags
+                    or type(result) is not dict
+                    or type(result.get("entities")) is not list
+                ):
+                    raise RuntimeError(f"{where}: invalid NER line for {key!r}")
+                flags[line_index] = bool(result["entities"])
+        covered = _range_indices(_validate_ner_ranges(
+            book_manifest["ner_ranges"], "book_manifest.ner_ranges"
+        ))
+        if not set(flags) <= covered:
+            raise RuntimeError(f"NER bundle lines fall outside its line plan for {key!r}")
+        return flags
 
     def _below_root(self, relative: str) -> Path:
         path = (self.root / relative).resolve()

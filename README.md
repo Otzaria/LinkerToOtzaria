@@ -18,14 +18,17 @@ every time (via `resolveRefs`). Because Sefaria line ids are keyed on `REF:$heRe
 a Sefaria content update keeps the same line id → the link survives with **zero**
 delta churn. The expensive step (NER) runs only on **source lines** that are new or
 changed. An exact release-only line baseline reuses prior artifacts for identical
-lines, including lines that moved inside an edited book.
+lines, including lines that moved inside an edited book. A book with "שם" (ibid) is
+re-NERed by line only when the edit cannot move its ibid history: every changed line
+is free of NER entities, before and after, and the entity lines keep their order.
+Otherwise the whole book is linked again.
 
 ## Layout
 
 ```
 artifacts/<source_name>/<canonical_he_title>.jsonl   # one file per source book
 baseline/snapshot_hashes.json                        # per-book content hash of the snapshot last linked
-line-baseline/                                       # release-only exact line fingerprints + artifact digests
+line-baseline/                                       # release-only line fingerprints, NER-entity flags, artifact digests
 meta.json                                            # lineage of the last run
 schema/artifact.schema.json                          # JSON Schema for one record
 src/linker_artifact.py                               # THE format contract (shared code)
