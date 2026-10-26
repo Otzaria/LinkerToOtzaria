@@ -2698,6 +2698,21 @@ def parenthesized_address_parts(raw_entity, content: str) -> int | None:
     return first
 
 
+def resolve_alone(linker, context_ref, raw_ref):
+    """resolve_raw_ref with no ibid history.
+
+    A recovery runs after its whole batch, when the resolver's history already holds
+    the citations after this one, and up to where the transport batch happens to end.
+    """
+    resolver = IbidContext._resolver(linker)
+    kept = resolver._ibid_history
+    resolver.reset_ibid_history()
+    try:
+        return resolver.resolve_raw_ref(context_ref, raw_ref)
+    finally:
+        resolver._ibid_history = kept
+
+
 def parenthesized_address(linker, rr, content: str, context_ref):
     """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
 
@@ -2717,7 +2732,7 @@ def parenthesized_address(linker, rr, content: str, context_ref):
     except AssertionError:  # Sefaria's own guard for part/token misalignment
         return None
     parts = [part.realign_to_new_raw_ref(raw.span, span) for part in raw.raw_ref_parts[first:]]
-    resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, parts))
+    resolved = resolve_alone(linker, context_ref, RawRef(span, raw.lang, parts))
     if resolved is None or resolved.is_ambiguous or resolved.ref is None:
         return None
     if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
@@ -2829,7 +2844,7 @@ def chapter_led_citation(linker, rr, context_ref):
         span = raw.span.doc.subspan(slice(raw_start + title_start, raw_start + end))
         title = parts[i].clone(span=raw.span.subspan(slice(title_start, parts[i].span.range[1])))
         address = [p.realign_to_new_raw_ref(raw.span, span) for p in [title, *parts[i + 1:]]]
-        resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, address))
+        resolved = resolve_alone(linker, context_ref, RawRef(span, raw.lang, address))
         if resolved is None:
             continue
         for candidate in resolved.resolved_raw_refs if resolved.is_ambiguous else [resolved]:

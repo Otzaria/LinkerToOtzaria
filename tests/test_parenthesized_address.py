@@ -11,8 +11,10 @@ sys.modules.setdefault("resource", types.SimpleNamespace(
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import link_books  # noqa: E402
+from test_ibid_checkpoint import Ref, _Resolver  # noqa: E402
 
 
 class _Span:
@@ -340,7 +342,9 @@ class ParenthesizedChapterTest(unittest.TestCase):
         raw.lang = "he"
         rr = types.SimpleNamespace(resolution_failed=True, raw_entity=raw)
         resolved = types.SimpleNamespace(is_ambiguous=False, ref=_Amudim(target), context_type=None)
-        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(resolve_raw_ref=lambda *_: resolved))
+        resolver = _Resolver()
+        resolver.resolve_raw_ref = lambda *_: resolved
+        linker = types.SimpleNamespace(_ref_resolver=resolver)
         ref_part = types.ModuleType("sefaria.model.linker.ref_part")
         ref_part.RawRef = lambda *args: args
         with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
@@ -388,6 +392,44 @@ class BookChaptersTest(unittest.TestCase):
                                  (("Sippurei Maasiyot 1", frozenset({"ראשון"})),))
         finally:
             link_books._book_chapters.cache_clear()
+
+
+
+class ResolveAloneTest(unittest.TestCase):
+    """A recovery runs after its whole batch, when the history ends past its line."""
+
+    def test_it_resolves_without_the_batch_history_and_keeps_it(self):
+        resolver = _Resolver()
+        for normal in ("Berakhot 2a", "Shabbat 3a"):
+            resolver._ibid_history.last_refs = Ref(normal)
+        kept = resolver._ibid_history
+        seen = []
+        resolver.resolve_raw_ref = lambda context, raw: seen.append(
+            (context, raw, list(resolver._ibid_history.last_refs),
+             dict(resolver._ibid_history._title_ref_map))) or "resolved"
+        linker = types.SimpleNamespace(_ref_resolver=resolver)
+        self.assertEqual(link_books.resolve_alone(linker, "ctx", "raw"), "resolved")
+        self.assertEqual(seen, [("ctx", "raw", [], {})])
+        self.assertIs(resolver._ibid_history, kept)
+        self.assertEqual([r.normal() for r in kept.last_refs], ["Berakhot 2a", "Shabbat 3a"])
+
+    def test_the_history_comes_back_when_resolution_raises(self):
+        resolver = _Resolver()
+        kept = resolver._ibid_history
+
+        def boom(*_):
+            raise ValueError("resolver bug")
+
+        resolver.resolve_raw_ref = boom
+        with self.assertRaises(ValueError):
+            link_books.resolve_alone(types.SimpleNamespace(_ref_resolver=resolver), None, None)
+        self.assertIs(resolver._ibid_history, kept)
+
+    def test_a_linker_without_the_history_contract_fails_loudly(self):
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(
+            resolve_raw_ref=lambda *_: None))
+        with self.assertRaisesRegex(RuntimeError, "ibid-history contract"):
+            link_books.resolve_alone(linker, None, None)
 
 
 if __name__ == "__main__":
