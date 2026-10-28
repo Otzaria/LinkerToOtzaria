@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import link_books  # noqa: E402
 import precompute_ner  # noqa: E402
@@ -29,6 +30,7 @@ from line_baseline import (  # noqa: E402
 )
 from linker_artifact import BookKey, read_artifact  # noqa: E402
 from ner_handoff import NerBundle, validate_plan  # noqa: E402
+from test_ibid_checkpoint import IbidHistory  # noqa: E402
 
 BOOK = BookKey("Sefaria", "ספר בדיקה")
 KEY = (BOOK.source_name, BOOK.canonical_he_title)
@@ -305,39 +307,12 @@ class _Ref:
         return isinstance(other, _Ref) and other._normal == self._normal
 
 
-class _History:
-    """The pinned Sefaria IbidHistory: three refs, three titles and a title map."""
-
-    def __init__(self):
-        self._last_refs = []
-        self._last_titles = []
-        self._title_ref_map = {}
-
-    @property
-    def last_refs(self):
-        return self._last_refs
-
-    @last_refs.setter
-    def last_refs(self, ref):
-        self._last_refs += [ref]
-        if ref.index.title not in self._title_ref_map:
-            self._last_titles += [ref.index.title]
-        self._title_ref_map[ref.index.title] = ref
-        if len(self._last_titles) > 3:
-            del self._title_ref_map[self._last_titles.pop(0)]
-        if len(self._last_refs) > 3:
-            self._last_refs.pop(0)
-
-    def get_ref_by_title(self, title):
-        return self._title_ref_map.get(title)
-
-
 class _Resolver:
     def __init__(self):
-        self._ibid_history = _History()
+        self._ibid_history = IbidHistory()
 
     def reset_ibid_history(self):
-        self._ibid_history = _History()
+        self._ibid_history = IbidHistory()
 
 
 class _ResolvedRef:
@@ -392,7 +367,7 @@ def _link(directory, name, lines, *, prior=None, ner_indices=None, reuse=(), sta
     ] if out.exists() else []
 
 
-# The title map outlives the last three refs, but a seam keeps only those refs.
+# The title map outlives the last three refs; a seam must carry it too.
 TITLES = [
     (0, "טקסט רגיל", CONTEXT),
     (1, "מקור|Berakhot 2a", CONTEXT),
@@ -449,10 +424,13 @@ class ContextProbeEquivalenceTest(unittest.TestCase):
         self.assertEqual(probe, whole)
         self.assertIn((5, 0, 2, "Berakhot 2a"), whole)
 
-    def test_a_shifted_seam_that_drops_a_title_is_never_probed(self):
+    def test_a_shifted_seam_keeps_the_title_map(self):
+        # Before ibid state schema 4 the seam dropped Berakhot; the planner still
+        # refuses a shifted seam, now only conservatively.
         new = [(i - 1, c, ctx) for i, c, ctx in TITLES if i != 0]
         probe, whole = self.probe_and_whole(new, TITLES, TITLE_ENTITIES, plan=False)
-        self.assertNotEqual(probe, whole)
+        self.assertEqual(probe, whole)
+        self.assertIn((4, 0, 2, "Berakhot 2a"), whole)
 
     def test_a_new_citation_is_why_the_producer_escalates(self):
         probe, whole = self.probe_and_whole(_with_line(OLD, 1, "מחבר|Numbers 3:3"))

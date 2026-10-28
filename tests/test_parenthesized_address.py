@@ -11,8 +11,10 @@ sys.modules.setdefault("resource", types.SimpleNamespace(
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import link_books  # noqa: E402
+from test_ibid_checkpoint import Ref, _Resolver  # noqa: E402
 
 
 class _Span:
@@ -328,7 +330,7 @@ class _RealignedPart(_Part):
 class ParenthesizedChapterTest(unittest.TestCase):
     """The chapter before a parenthesized address is checked like a chapter before its title."""
 
-    def records(self, content, lead_type, target):
+    def records(self, content, lead_type, target, history=()):
         start = content.index("בפרק")
         daf = "מד" if "מד" in content else "לג"
         end = content.index(daf) + 2
@@ -340,7 +342,14 @@ class ParenthesizedChapterTest(unittest.TestCase):
         raw.lang = "he"
         rr = types.SimpleNamespace(resolution_failed=True, raw_entity=raw)
         resolved = types.SimpleNamespace(is_ambiguous=False, ref=_Amudim(target), context_type=None)
-        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(resolve_raw_ref=lambda *_: resolved))
+        resolver = _Resolver()
+        for normal in history:
+            resolver._ibid_history.last_refs = Ref(normal)
+        self.seen = []
+        resolver.resolve_raw_ref = lambda *_: self.seen.append(
+            [r.normal() for r in resolver._ibid_history.last_refs]) or resolved
+        self.resolver = resolver
+        linker = types.SimpleNamespace(_ref_resolver=resolver)
         ref_part = types.ModuleType("sefaria.model.linker.ref_part")
         ref_part.RawRef = lambda *args: args
         with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
@@ -363,6 +372,15 @@ class ParenthesizedChapterTest(unittest.TestCase):
                          [("Bava Metzia 44b", "ב\"מ דף מד:")])
         self.assertEqual(self.records("ועיין בפרק המפקיד (ב\"מ דף מד) ושם", "NAMED", "Bava Metzia 44"),
                          [("Bava Metzia 44a", "ב\"מ דף מד")])
+
+    def test_the_address_is_resolved_without_the_batch_history(self):
+        # By recovery time the history runs to the batch's end, past this line.
+        found = self.records("ועיין בפרק הזהב (ב\"מ דף לג ושם)", "NAMED", "Bava Metzia 33",
+                             history=("Shabbat 3a", "Shabbat 4a"))
+        self.assertEqual(found, [("Bava Metzia 33", "ב\"מ דף לג")])
+        self.assertEqual(self.seen, [[]])
+        self.assertEqual([r.normal() for r in self.resolver._ibid_history.last_refs],
+                         ["Shabbat 3a", "Shabbat 4a"])
 
     def test_a_lead_naming_no_chapter_of_the_book_is_not_checked(self):
         self.assertEqual(self.records("ועיין בפרק דלקמן (ב\"מ דף לג ושם)", "RELATIVE", "Bava Metzia 33"),
@@ -388,6 +406,75 @@ class BookChaptersTest(unittest.TestCase):
                                  (("Sippurei Maasiyot 1", frozenset({"ראשון"})),))
         finally:
             link_books._book_chapters.cache_clear()
+
+
+class ChapterLedHistoryTest(unittest.TestCase):
+    def test_a_chapter_led_citation_is_resolved_without_the_batch_history(self):
+        resolver = _Resolver()
+        for normal in ("Shabbat 3a", "Shabbat 4a"):
+            resolver._ibid_history.last_refs = Ref(normal)
+        target = Ref("Ketubot 18a")
+        seen = []
+        resolver.resolve_raw_ref = lambda *_: seen.append(list(resolver._ibid_history.last_refs)) \
+            or types.SimpleNamespace(is_ambiguous=False, ref=target, context_type=None)
+        raw = mock.MagicMock()
+        raw.span.range = (0, 20)
+        raw.raw_ref_parts = [mock.MagicMock(), mock.MagicMock()]
+        for part, span in zip(raw.raw_ref_parts, ((0, 10), (11, 20))):
+            part.span.range = span
+        chapter = types.SimpleNamespace(overlaps=lambda _ref: True, normal=lambda: "Ketubot 2")
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.RawRef = lambda *args: args
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}), \
+                mock.patch.multiple(link_books, chapter_led_splits=lambda _raw: [("lead", 1, 11)],
+                                    named_chapters=lambda _lead, _ref: (chapter,)):
+            found = link_books.chapter_led_citation(
+                types.SimpleNamespace(_ref_resolver=resolver),
+                types.SimpleNamespace(raw_entity=raw), None)
+        self.assertEqual(found, (target, (chapter,)))
+        self.assertEqual(seen, [[]])
+        self.assertEqual([r.normal() for r in resolver._ibid_history.last_refs],
+                         ["Shabbat 3a", "Shabbat 4a"])
+
+
+class ResolveAloneTest(unittest.TestCase):
+    """A recovery runs after its whole batch, when the history ends past its line."""
+
+    def test_it_resolves_without_the_batch_history_and_keeps_it(self):
+        resolver = _Resolver()
+        for normal in ("Berakhot 2a", "Shabbat 3a"):
+            resolver._ibid_history.last_refs = Ref(normal)
+        kept = resolver._ibid_history
+        seen = []
+        resolver.resolve_raw_ref = lambda context, raw: seen.append(
+            (context, raw, list(resolver._ibid_history.last_refs),
+             dict(resolver._ibid_history._title_ref_map))) or "resolved"
+        linker = types.SimpleNamespace(_ref_resolver=resolver)
+        self.assertEqual(link_books.resolve_alone(linker, "ctx", "raw"), "resolved")
+        self.assertEqual(seen, [("ctx", "raw", [], {})])
+        self.assertIs(resolver._ibid_history, kept)
+        self.assertEqual([r.normal() for r in kept.last_refs], ["Berakhot 2a", "Shabbat 3a"])
+
+    def test_the_history_comes_back_when_resolution_raises(self):
+        resolver = _Resolver()
+        kept = resolver._ibid_history
+
+        def boom(*_):
+            raise ValueError("resolver bug")
+
+        resolver.resolve_raw_ref = boom
+        with self.assertRaises(ValueError):
+            link_books.resolve_alone(types.SimpleNamespace(_ref_resolver=resolver), None, None)
+        self.assertIs(resolver._ibid_history, kept)
+
+    def test_a_linker_without_the_history_contract_fails_loudly(self):
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(
+            resolve_raw_ref=lambda *_: None))
+        with self.assertRaisesRegex(RuntimeError, "ibid-history contract"):
+            link_books.resolve_alone(linker, None, None)
 
 
 if __name__ == "__main__":

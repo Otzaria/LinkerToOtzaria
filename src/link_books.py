@@ -1890,6 +1890,11 @@ def _same_location(one, others) -> bool:
     return any(o.index.title.replace("Jerusalem Talmud ", "") == base for o in others)
 
 
+_IBID_HISTORY_FIELDS = (
+    "_last_refs", "_last_titles", "_title_ref_map", "last_n_refs", "last_n_titles",
+)
+
+
 class IbidContext:
     """Preserve Sefaria's ibid history across transport batches of one book.
 
@@ -1898,15 +1903,21 @@ class IbidContext:
     resets caused by a failed citation inside Sefaria still run normally.  This is
     deliberately pinned-private API use: fail loudly if the pinned linker no longer
     exposes the contract rather than silently making output batch-size dependent.
+
+    The whole IbidHistory crosses a seam: its last refs, and its titles in order with
+    the title map.  Replaying the refs alone rebuilt the map from them only, so a
+    title cited before them was lost at a seam (until schema 4).
     """
 
-    IBID_STATE_SCHEMA = 3
+    IBID_STATE_SCHEMA = 4
 
     def __init__(self):
         self.initialized = False
         # These are Sefaria Ref objects, not serialized data: the state lives only
-        # within this worker and has at most the resolver's three remembered refs.
+        # within this worker and is bounded by the resolver's three refs and titles.
         self.resolved_refs: tuple[object, ...] = ()
+        # (title, Ref) in IbidHistory._last_titles order: its title map, exactly.
+        self.title_refs: tuple[tuple[str, object], ...] = ()
         self.last_emitted_ref = None
 
     def state(self, book_key, batch_start: int, batch, shard_sha256: str) -> dict:
@@ -1929,6 +1940,7 @@ class IbidContext:
             "batch_extent": [len(batch), int(batch[-1][0])],
             "shard_sha256": shard_sha256,
             "resolved_refs": [ref.normal() for ref in self.resolved_refs],
+            "title_refs": [[title, ref.normal()] for title, ref in self.title_refs],
             "last_emitted_ref": (
                 None if self.last_emitted_ref is None else self.last_emitted_ref.normal()
             ),
@@ -1955,14 +1967,23 @@ class IbidContext:
         if state.get("shard_sha256") != shard_sha256:
             raise RuntimeError("ibid checkpoint state does not match its shard")
         refs = state.get("resolved_refs")
+        titles = state.get("title_refs")
         last = state.get("last_emitted_ref")
         if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
             raise RuntimeError("malformed ibid checkpoint refs")
+        if not isinstance(titles, list) or not all(
+            isinstance(pair, list) and len(pair) == 2
+            and all(isinstance(item, str) for item in pair)
+            for pair in titles
+        ) or len({title for title, _ in titles}) != len(titles):
+            raise RuntimeError("malformed ibid checkpoint title map")
         if last is not None and not isinstance(last, str):
             raise RuntimeError("malformed ibid checkpoint antecedent")
         resolved = tuple(ref_factory(normal) for normal in refs)
+        title_refs = tuple((title, ref_factory(normal)) for title, normal in titles)
         emitted = None if last is None else ref_factory(last)
         self.resolved_refs = resolved
+        self.title_refs = title_refs
         self.last_emitted_ref = emitted
         self.initialized = True
 
@@ -1972,7 +1993,7 @@ class IbidContext:
         history = getattr(resolver, "_ibid_history", None)
         if resolver is None or history is None or not callable(
             getattr(resolver, "reset_ibid_history", None)
-        ):
+        ) or not all(hasattr(history, name) for name in _IBID_HISTORY_FIELDS):
             raise RuntimeError(
                 "pinned Sefaria linker does not expose the ibid-history contract"
             )
@@ -1980,8 +2001,21 @@ class IbidContext:
 
     def _restore(self, resolver):
         resolver.reset_ibid_history()
-        for ref in self.resolved_refs:
-            resolver._ibid_history.last_refs = ref
+        history = resolver._ibid_history
+        if (len(self.resolved_refs) > history.last_n_refs
+                or len(self.title_refs) > history.last_n_titles):
+            raise RuntimeError("ibid history exceeds the pinned resolver's bounds")
+        history._last_refs = list(self.resolved_refs)
+        history._last_titles = [title for title, _ in self.title_refs]
+        history._title_ref_map = dict(self.title_refs)
+
+    def _capture(self, resolver):
+        history = resolver._ibid_history
+        titles = list(history._last_titles)
+        if len(set(titles)) != len(titles) or set(titles) != set(history._title_ref_map):
+            raise RuntimeError("pinned Sefaria ibid history broke its title-map invariant")
+        self.resolved_refs = tuple(history._last_refs)
+        self.title_refs = tuple((title, history._title_ref_map[title]) for title in titles)
 
     def resolve(self, linker, invoke):
         """Run one bulk call while retaining only its initial ibid history reset."""
@@ -2003,8 +2037,8 @@ class IbidContext:
             docs = invoke()
         finally:
             resolver.reset_ibid_history = original_reset
+        self._capture(resolver)
         self.initialized = True
-        self.resolved_refs = tuple(resolver._ibid_history.last_refs)
         return docs
 
 
@@ -2060,19 +2094,23 @@ def process_batch(
             return invoke()
         return ibid_context.resolve(linker, invoke)
 
+    def whole(docs):
+        # Inside the call, so the ibid history of a short reply is never kept.
+        if len(docs) != len(batch):  # a short reply would silently drop tail lines
+            raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
+        return docs
+
     try:
         if precomputed is not None:
-            docs = resolve(lambda: precomputed.resolve_batch(
+            docs = resolve(lambda: whole(precomputed.resolve_batch(
                 linker, bk, batch, batch_start, book_context_refs=context_objects,
-            ))
+            )))
         else:
-            docs = resolve(lambda: linker.bulk_link(
+            docs = resolve(lambda: whole(linker.bulk_link(
                 [content for _, content, _ in batch],
                 book_context_refs=context_objects,
                 type_filter="citation", with_failures=True,
-            ))
-        if len(docs) != len(batch):  # a short reply would silently drop tail lines
-            raise RuntimeError(f"bulk_link returned {len(docs)} docs for {len(batch)} lines")
+            )))
     except Exception:
         if precomputed is None and not ner_alive():
             raise
@@ -2379,7 +2417,7 @@ def process_book_checkpointed(
     cap = RSS_CAP if recycle_cap is None else float(recycle_cap)
     memory_at_start = worker_memory_bytes()
     # A shard alone is not a valid restart point for a stateful-ibid book: it holds
-    # records but not Sefaria's last-three-reference state, so batch N+1 would resume
+    # records but not Sefaria's ibid history, so batch N+1 would resume
     # with a different history and a different output.  Each shard therefore carries
     # that state beside it, and a resumed batch adopts it.  Only where the state is
     # missing or unreadable does the replay-from-here rule apply, and then every later
@@ -2664,6 +2702,21 @@ def parenthesized_address_parts(raw_entity, content: str) -> int | None:
     return first
 
 
+def resolve_alone(linker, context_ref, raw_ref):
+    """resolve_raw_ref with no ibid history.
+
+    A recovery runs after its whole batch, when the resolver's history already holds
+    the citations after this one, and up to where the transport batch happens to end.
+    """
+    resolver = IbidContext._resolver(linker)
+    kept = resolver._ibid_history
+    resolver.reset_ibid_history()
+    try:
+        return resolver.resolve_raw_ref(context_ref, raw_ref)
+    finally:
+        resolver._ibid_history = kept
+
+
 def parenthesized_address(linker, rr, content: str, context_ref):
     """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
 
@@ -2683,7 +2736,7 @@ def parenthesized_address(linker, rr, content: str, context_ref):
     except AssertionError:  # Sefaria's own guard for part/token misalignment
         return None
     parts = [part.realign_to_new_raw_ref(raw.span, span) for part in raw.raw_ref_parts[first:]]
-    resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, parts))
+    resolved = resolve_alone(linker, context_ref, RawRef(span, raw.lang, parts))
     if resolved is None or resolved.is_ambiguous or resolved.ref is None:
         return None
     if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
@@ -2795,7 +2848,7 @@ def chapter_led_citation(linker, rr, context_ref):
         span = raw.span.doc.subspan(slice(raw_start + title_start, raw_start + end))
         title = parts[i].clone(span=raw.span.subspan(slice(title_start, parts[i].span.range[1])))
         address = [p.realign_to_new_raw_ref(raw.span, span) for p in [title, *parts[i + 1:]]]
-        resolved = linker._ref_resolver.resolve_raw_ref(context_ref, RawRef(span, raw.lang, address))
+        resolved = resolve_alone(linker, context_ref, RawRef(span, raw.lang, address))
         if resolved is None:
             continue
         for candidate in resolved.resolved_raw_refs if resolved.is_ambiguous else [resolved]:
