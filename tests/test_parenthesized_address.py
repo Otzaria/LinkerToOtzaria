@@ -369,6 +369,141 @@ class ParenthesizedChapterTest(unittest.TestCase):
                          [("Bava Metzia 33", "ב\"מ דף לג")])
 
 
+_LEAF = object()
+
+
+class _Titles:
+    """A title-trie continuation: the works a key completes (none when it only opens titles)."""
+
+    def __init__(self, *works):
+        self.nodes = [types.SimpleNamespace(ref=lambda work=work: types.SimpleNamespace(index=work))
+                      for work in works]
+
+    def __contains__(self, key):
+        return key is _LEAF and bool(self.nodes)
+
+    def __getitem__(self, key):
+        assert key is _LEAF
+        return self.nodes
+
+
+def _work(title, category, base=()):
+    return types.SimpleNamespace(title=title, categories=[category], base_text_titles=list(base))
+
+
+_LEVITICUS = _work("Leviticus", "Tanakh")
+_NIDDAH = _work("Niddah", "Talmud")
+_TRIE = {
+    "בנדה": _Titles(_NIDDAH, _work("Mishnah Niddah", "Mishnah")),
+    "ירושלמי": _Titles(),
+    "רש\"י": _Titles(_work("Rashi on Leviticus", "Tanakh", ["Leviticus"])),
+    "ויקרא": _Titles(_LEVITICUS),
+    "בספר הישר": _Titles(_work("Sefer HaYashar", "Talmud")),
+    "בטור": _Titles(_work("Tur", "Halakhah")),
+    "ובתוספתא": _Titles(_work("Tosefta Niddah", "Tosefta")),
+}
+
+
+def _ref(normal, category):
+    index = types.SimpleNamespace(title=normal.rsplit(" ", 1)[0], categories=category, base_text_titles=[])
+    return types.SimpleNamespace(index=index, normal=lambda: normal, is_talmud=lambda: category[0] == "Talmud")
+
+
+class LeadNamesOtherWorksTest(unittest.TestCase):
+    """Words the NER joins before a parenthesized citation (Otzaria/otzaria#3453)."""
+
+    GENESIS = _ref("Genesis 1:5", ["Tanakh", "Torah"])
+    SANHEDRIN = _ref("Sanhedrin 24a", ["Talmud", "Bavli", "Seder Nezikin"])
+
+    def outside(self, lead, ref=None, chapters=()):
+        ref = ref or _ref("Leviticus 15:19", ["Tanakh", "Torah"])
+        raw = types.SimpleNamespace(raw_ref_parts=[_Part(kind, 0, len(text), text) for kind, text in lead])
+        trie = types.SimpleNamespace(get_continuations=lambda key, allow_partial: (_TRIE.get(key), None))
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(get_ref_part_title_trie=lambda: trie))
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.LEAF_TRIE_ENTRY = _LEAF
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}), \
+                mock.patch.object(link_books, "named_chapters", lambda _text, _ref: chapters):
+            return link_books.lead_names_other_works(linker, raw, len(lead), ref)
+
+    def test_a_plain_word_or_an_unrelated_title_is_dropped(self):
+        self.assertTrue(self.outside([("NAMED", "בְּנִדָּה")]))
+        self.assertTrue(self.outside([("NAMED", "<b>בנדה</b>")]))
+        self.assertTrue(self.outside([("NAMED", "שנאמר")]))
+        self.assertTrue(self.outside([("NAMED", "שנאמר"), ("NAMED", "בנדה")]))
+
+    def test_a_qualifier_or_a_related_work_keeps_the_drop(self):
+        for lead in ("ירושלמי", "רש\"י"):
+            with self.subTest(lead=lead):
+                self.assertFalse(self.outside([("NAMED", lead)]))
+        self.assertFalse(self.outside([("NAMED", "ובתוספתא")], _ref("Niddah 31a", ["Talmud", "Bavli", "Seder Tahorot"])))
+        self.assertFalse(self.outside([("NAMED", "שנאמר"), ("NAMED", "ירושלמי")]))
+
+    def test_a_work_of_the_same_category_needs_a_placing_chapter(self):
+        self.assertFalse(self.outside([("NAMED", "ויקרא")], self.GENESIS))
+        self.assertFalse(self.outside([("NAMED", "בספר הישר")], self.SANHEDRIN))
+        chapter = types.SimpleNamespace(overlaps=lambda _ref: True)
+        self.assertTrue(self.outside([("NAMED", "בספר הישר"), ("NUMBERED", "בפרק זה בורר")],
+                                     self.SANHEDRIN, chapters=(chapter,)))
+        elsewhere = types.SimpleNamespace(overlaps=lambda _ref: False)
+        self.assertFalse(self.outside([("NAMED", "בספר הישר"), ("NUMBERED", "בפרק זה בורר")],
+                                      self.SANHEDRIN, chapters=(elsewhere,)))
+        self.assertFalse(self.outside([("NUMBERED", "בפרק זה בורר")], self.SANHEDRIN))
+
+    def test_only_a_verse_or_a_bavli_daf_is_read_alone(self):
+        self.assertFalse(self.outside([("NAMED", "שנאמר")], _ref("Shulchan Arukh, Orach Chayim 128", ["Halakhah"])))
+        self.assertFalse(self.outside([("NAMED", "בטור")], _ref("Shulchan Arukh, Orach Chayim 128", ["Halakhah"])))
+        self.assertFalse(self.outside([("NAMED", "שנאמר")], _ref("Mishnah Niddah 2:1", ["Mishnah"])))
+
+    def test_a_number_ibid_or_relative_part_is_not_dropped(self):
+        for kind, text in (("NUMBERED", "טו"), ("IBID", "שם"), ("DH", "ד\"ה")):
+            with self.subTest(kind=kind):
+                self.assertFalse(self.outside([(kind, text)]))
+
+    def test_a_named_chapter_phrase_places_or_only_locates(self):
+        chapter = types.SimpleNamespace(overlaps=lambda _ref: True)
+        self.assertTrue(self.outside([("NAMED", "בספר הישר"), ("NAMED", "בפרק זה בורר")],
+                                     self.SANHEDRIN, chapters=(chapter,)))
+        self.assertFalse(self.outside([("NAMED", "בספר הישר"), ("NAMED", "בפרק זה בורר")], self.SANHEDRIN))
+        self.assertTrue(self.outside([("RELATIVE", "לקמן"), ("NAMED", "בנדה")]))
+
+
+class AbsorbedLeadTest(unittest.TestCase):
+    """"בנדה (ויקרא טו יט)" links its parenthesized verse (Otzaria/otzaria#3453)."""
+
+    def records(self, content, lead, lead_outside):
+        start = content.index(lead)
+        end = content.index("יט") + 2
+        raw = _raw(content, start, end, [("NAMED", lead), ("NAMED", "ויקרא"), ("NUMBERED", "טו"), ("NUMBERED", "יט")])
+        raw.raw_ref_parts = [_RealignedPart(p.type.name, *p.span.range, p.text) for p in raw.raw_ref_parts]
+        first = raw.raw_ref_parts[1].span.range[0]
+        raw.subspan = lambda _parts: _Span(start + first, end)
+        raw.lang = "he"
+        rr = types.SimpleNamespace(resolution_failed=True, raw_entity=raw)
+        resolved = types.SimpleNamespace(is_ambiguous=False, ref=_ref("Leviticus 15:19", ["Tanakh", "Torah"]),
+                                         context_type=None)
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(resolve_raw_ref=lambda *_: resolved))
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.RawRef = lambda *args: args
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}):
+            return _batch(content, rr, linker, chapter_led_citation=lambda *_: None,
+                          lead_names_other_works=lambda *_: lead_outside)
+
+    def test_the_parenthesized_verse_is_linked_alone(self):
+        content = "וכן בְּנִדָּה <small>(ויקרא טו יט)</small> אסורה"
+        self.assertEqual(self.records(content, "בְּנִדָּה", True), [("Leviticus 15:19", "ויקרא טו יט")])
+
+    def test_a_lead_that_may_qualify_the_title_keeps_the_drop(self):
+        content = "ועיין רש\"י (ויקרא טו יט) שם"
+        self.assertEqual(self.records(content, "רש\"י", False), [])
+
+
 class BookChaptersTest(unittest.TestCase):
     def test_a_grouping_node_without_a_range_is_skipped(self):
         nodes = [{"wholeRef": "Sippurei Maasiyot 1", "match_templates": [{"term_slugs": ["first"]}]},

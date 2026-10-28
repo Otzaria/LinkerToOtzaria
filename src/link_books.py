@@ -2103,6 +2103,8 @@ def process_batch(
     # Prefer the preceding emitted target for a remaining ambiguous "שם".  Unlike
     # Sefaria's resolver history this deliberately excludes records we reject.
     last_ref = ibid_context.last_emitted_ref if ibid_context is not None else None
+    # (line, end, failed, candidates) of the citation before; unknown at a batch start.
+    previous = None
     for (line_index, content, context_ref), context_object, doc in zip(batch, context_objects, docs):
         # Digest the exact content the offsets index, so the build can drop this line's
         # links if the source book changed before Phase-2 applies them (cross-cycle drift).
@@ -2123,10 +2125,24 @@ def process_batch(
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
                 start, end = rr.raw_entity.span.range
+                # Sefaria's reading of the citation before this one, whatever we emit for it.
+                preceding = None if previous is None else (
+                    content[previous[1]:start] if previous[0] == line_index and previous[1] <= start
+                    else "" if previous[0] == line_index else None,
+                    previous[2], previous[3])
+                previous = (line_index, end, failed, [] if failed else candidate_refs(rr))
                 spelled = None
                 regrouped = None
                 chapters = ()
                 chapter_led = False
+                own_daf = None
+                if ref is None and not failed:
+                    own_daf = own_tractate_daf_ref(
+                        rr, content, start, end, context_object, context_ref_factory,
+                        preceding=preceding,
+                        names_elsewhere=functools.partial(clause_names_elsewhere, linker))
+                    if own_daf is not None:
+                        ref, relative = own_daf, False
                 if failed:
                     regrouped = parenthesized_address(linker, rr, content, context_object)
                     if regrouped is not None:
@@ -2180,14 +2196,16 @@ def process_batch(
                         position = talmud_positions.get(line_index) if talmud_positions and context_ref else None
                     recovered = own_tractate_relative_ref(
                         anchor_text, position, context_ref_factory
-                    ) or untitled_relative_ref(anchor_text, position, context_ref_factory)
+                    ) or untitled_relative_ref(
+                        anchor_text, position, context_ref_factory
+                    ) or chapter_located_relative_ref(anchor_text, position, context_ref_factory)
                     if recovered is None:
                         continue
                     ref, relative_direction = recovered
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
-                if recovered is None and regrouped is None and spelled is None:
+                if recovered is None and regrouped is None and spelled is None and own_daf is None:
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2641,11 +2659,12 @@ def _locates_only(part) -> bool:
         part.type.name == "NAMED" and bool(_CHAPTER_LEAD_RE.match(_HTML_TAG_RE.sub("", part.text).strip())))
 
 
-def parenthesized_address_parts(raw_entity, content: str) -> int | None:
+def parenthesized_address_parts(raw_entity, content: str, *, any_lead: bool = False) -> int | None:
     """Index of the first part inside the citation's one "(", or None.
 
     The parts before it must only locate the address ("בריש מרובה", "בפרק דלקמן"),
-    and those inside must spell a title and an address on their own ("ב״ק דף סג:").
+    unless ``any_lead``, and those inside must spell a title and an address on their
+    own ("ב״ק דף סג:").
     """
     raw_start, raw_end = raw_entity.span.range
     text = content[raw_start:raw_end]
@@ -2657,23 +2676,93 @@ def parenthesized_address_parts(raw_entity, content: str) -> int | None:
     if not first or any(part.span.range[1] > paren for part in parts[:first]):
         return None
     address = [part.type.name for part in parts[first:]]
-    if not all(_locates_only(part) for part in parts[:first]) or not set(address) <= _PAREN_ADDRESS_TYPES:
+    if not set(address) <= _PAREN_ADDRESS_TYPES or not (
+            any_lead or all(_locates_only(part) for part in parts[:first])):
         return None
     if "NAMED" not in address or "NUMBERED" not in address:
         return None
     return first
 
 
+def _related_works(one, other) -> bool:
+    """Whether two indexes are one work, one comments on the other, or one names the other."""
+    titles = (one.title, other.title)
+    bases = [set(getattr(index, "base_text_titles", None) or ()) for index in (one, other)]
+    return (titles[0] == titles[1] or titles[0] in bases[1] or titles[1] in bases[0]
+            or bool(bases[0] & bases[1])
+            or any(re.search(rf"(?:^|\s){re.escape(a)}(?:\s|$)", b) for a, b in (titles, titles[::-1])))
+
+
+_NIQQUD_RE = re.compile(r"[\u0591-\u05c7]")
+
+
+def lead_names_other_works(linker, raw, first: int, ref) -> bool:
+    """Whether the parts before ``first`` (the parenthesis) stay outside the citation of ref.
+
+    The NER may join words before the parenthesis to the citation in it ("בנדה (ויקרא
+    טו יט)", "בספר הישר בפרק זה בורר (סנהדרין דף כד.)", Otzaria/otzaria#3453, #3450).
+    Only a parenthesized verse or Bavli daf is read alone. Besides what only locates it,
+    a lead word must then be a plain word or whole titles Sefaria could not chain to the
+    parenthesized one. A word that opens a title without completing it ("ירושלמי",
+    "תוספתא", "רש\"י") qualifies the parenthesized title, and a related work names it;
+    both keep the citation dropped, as does a numbered chapter that does not contain ref.
+    A work of ref's own category may share its section names, so it is kept apart only
+    when a chapter in the lead contains ref.
+    """
+    if _top_category(ref.index) != "Tanakh" and not _bavli_tractate_itself(ref.index):
+        return False
+    from sefaria.model.linker.ref_part import LEAF_TRIE_ENTRY
+
+    trie = linker._ref_resolver.get_ref_part_title_trie()
+    placed = False
+    works = {}
+    for part in raw.raw_ref_parts[:first]:
+        text = _NIQQUD_RE.sub("", _plain_quotes(part.text))
+        if part.type.name == "RELATIVE":
+            continue
+        if part.type.name in ("NAMED", "NUMBERED") and _CHAPTER_LEAD_RE.match(text):
+            if any(chapter.overlaps(ref) for chapter in named_chapters(text, ref)):
+                placed = True
+            elif part.type.name == "NUMBERED":
+                return False
+            # A named chapter phrase only narrows the address (see parenthesized_address).
+            continue
+        if part.type.name != "NAMED":
+            return False
+        titles, _ = trie.get_continuations(text, allow_partial=False)
+        if titles is None:
+            continue  # a plain word
+        named = {}
+        for node in (titles[LEAF_TRIE_ENTRY] if LEAF_TRIE_ENTRY in titles else ()):
+            try:
+                index = node.ref().index
+            except Exception:
+                continue
+            named[index.title] = index
+        if not named:
+            return False
+        works.update(named)
+    category = _top_category(ref.index)
+    return not any(
+        _related_works(work, ref.index) or (not placed and _top_category(work) == category)
+        for work in works.values())
+
+
+def _top_category(index):
+    return (list(getattr(index, "categories", None) or ()) or [None])[0]
+
+
 def parenthesized_address(linker, rr, content: str, context_ref):
     """(Ref, (start, end), chapters) of a failed citation's parenthesized address, resolved alone.
 
     The NER joins a chapter phrase the resolver cannot read to an explicit address in
-    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). The chapters the
+    parentheses; the address alone is unambiguous (Otzaria/otzaria#2490). Any other lead
+    must pass :func:`lead_names_other_works`. The chapters the
     phrase names that overlap it may narrow it, but never drop it: authors use some
     chapter names for other chapters than Sefaria ("דיני ממונות בתרא" for "זה בורר").
     """
     raw = rr.raw_entity
-    first = parenthesized_address_parts(raw, content)
+    first = parenthesized_address_parts(raw, content, any_lead=True)
     if first is None:
         return None
     from sefaria.model.linker.ref_part import RawRef
@@ -2687,6 +2776,9 @@ def parenthesized_address(linker, rr, content: str, context_ref):
     if resolved is None or resolved.is_ambiguous or resolved.ref is None:
         return None
     if getattr(getattr(resolved, "context_type", None), "name", None) == "CURRENT_BOOK":
+        return None
+    if not all(_locates_only(part) for part in raw.raw_ref_parts[:first]) and not lead_names_other_works(
+            linker, raw, first, resolved.ref):
         return None
     raw_start, raw_end = raw.span.range
     text = content[raw_start:raw_end]
@@ -3007,7 +3099,8 @@ def _amud_ref(tractate: str, daf: int, side: str, ref_factory):
 
 # "פ"ב." / "פ"ק." abbreviate פרק ב / פרק קמא, not a daf.
 _CHAPTER_ABBREVIATION_RE = re.compile(r"פ[\"'״׳]")
-_RELATIVE_WORD = r"[וד]?(?:לקמן|לעיל|להלן)\s+"
+# The address may open a parenthesis after the word: "לעיל (דף לו:)" (Otzaria/otzaria#3450).
+_RELATIVE_WORD = r"[וד]?(?:לקמן|לעיל|להלן)(?:\s*\(\s*|\s+)"
 _UNTITLED_DAF = r"[א-ת]{1,3}|[א-ת]{1,2}[\"״][א-ת]|[א-ת]['׳]"
 # One daf address: "יא:", "דף כ"ג.", "ב,א" or "צה ע"ב".
 _DAF_ADDRESS = (
@@ -3068,6 +3161,154 @@ def untitled_relative_ref(anchor_text: str, source_ref, ref_factory):
         target = _amud_ref(tractates[0], (amud + 1) // 2, match["only"], ref_factory)
         return _on_stated_side(target, source_ref, side_word)
     return _on_stated_side(_address_ref(match, tractates[0], ref_factory), source_ref, side_word)
+
+
+# A daf address ending the anchor: "(דף כא.)", "התם (דף כז.)", "שם לט:".
+_TRAILING_DAF_RE = re.compile(rf"(?:^|(?<=[\s(])){_DAF_ADDRESS}$")
+# Words that may still say where an untitled address is, back to its clause's start.
+_CLAUSE_WORDS = 8
+
+
+def _in_tractate(ref, tractate: str) -> bool:
+    title = getattr(getattr(ref, "index", None), "title", None) or ""
+    return title == tractate or title.endswith(f" on {tractate}")
+
+
+def candidate_refs(rr) -> list:
+    return [r.ref for r in rr.resolved_raw_refs] if getattr(rr, "is_ambiguous", False) else [rr.ref]
+
+
+def clause_before(content: str, start: int) -> list[str]:
+    """The last words before an anchor, back to its clause's start; its own "(" is skipped."""
+    text = _plain_quotes(content[:start]).rstrip(" ([")
+    cut = max(text.rfind(mark) for mark in ".:;()[]")
+    return text[cut + 1:].split()[-_CLAUSE_WORDS:]
+
+
+def own_tractate_daf_ref(rr, content: str, start: int, end: int, source_ref, ref_factory, *,
+                         preceding=None, names_elsewhere=None):
+    """The own tractate's amud for an untitled daf citation Sefaria reads only in that tractate.
+
+    In a Bavli tractate or its "X on <tractate>" commentary, "(דף כא.)" or "התם (דף כז.)"
+    names the tractate's own daf. Sefaria offers it together with the same address in the
+    commentary, or only in the commentary through the current book, so the citation was
+    dropped (Otzaria/otzaria#3450). Every candidate must be that one amud, the anchor must
+    end with it and name no side; a relative citation stays with its own recovery.
+
+    Sefaria's reading may only lack what the text says elsewhere: the clause before the
+    anchor must name no other tractate or chapter (``names_elsewhere``), and the preceding
+    citation (``preceding``: the text between, or None on another line; whether it failed;
+    its candidates) must lie in this tractate when "שם" refers to it or when nothing but
+    a few words separate them ("(ב"מ דף מד: ודף מה.)").
+    """
+    anchor_text = content[start:end]
+    if not _is_talmud_source(source_ref, ref_factory) or _relative_side(anchor_text) is not None:
+        return None
+    tractates = _own_tractates(source_ref, ref_factory)
+    match = _TRAILING_DAF_RE.search(_bare_anchor(anchor_text))
+    if len(tractates) != 1 or match is None:
+        return None
+    tractate = tractates[0]
+    target = _address_ref(match, tractate, ref_factory)
+    candidates = candidate_refs(rr)
+    if target is None or not candidates:
+        return None
+    for candidate in candidates:
+        if not _in_tractate(candidate, tractate):
+            return None
+        if list(candidate.sections) != list(target.sections) or (
+                list(candidate.toSections) != list(target.toSections)):
+            return None
+    gap, failed, refs = preceding if preceding is not None else (None, True, [])
+    adjacent = gap is not None and len(_plain_quotes(gap).strip(" ()[].,:;-–").split()) <= 3
+    if has_raw_part_type(rr, "IBID") or adjacent:
+        if failed or not refs or not all(_in_tractate(ref, tractate) for ref in refs):
+            return None
+    if names_elsewhere is not None and names_elsewhere(clause_before(content, start), target, tractate):
+        return None
+    return target
+
+
+def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> bool:
+    """Whether these words, ending just before target's address, may place it elsewhere.
+
+    They do when they name another tractate, or a chapter that does not contain target:
+    a chapter phrase ("בפ' הוציאו לו את הכף") must open with the name of one of the
+    tractate's own chapters that contains it, and a chapter's bare name counts only right
+    before the address, since many are also a sage's name ("ר' ישמעאל").
+    """
+    from sefaria.model.linker.ref_part import LEAF_TRIE_ENTRY
+
+    trie = linker._ref_resolver.get_ref_part_title_trie()
+    own = {tractate, f"Mishnah {tractate}"}
+    words = [_NIQQUD_RE.sub("", word) for word in words]
+    for i, word in enumerate(words):
+        if _CHAPTER_LEAD_RE.match(word) and not any(
+                chapter.overlaps(target)
+                for j in range(i + 1, len(words) + 1)
+                for chapter in named_chapters(" ".join(words[i:j]), target)):
+            return True
+        for n in (1, 2, 3):
+            if i + n > len(words):
+                break
+            titles, _ = trie.get_continuations(" ".join(words[i:i + n]), allow_partial=False)
+            if titles is None or LEAF_TRIE_ENTRY not in titles:
+                continue
+            for node in titles[LEAF_TRIE_ENTRY]:
+                try:
+                    named = node.ref()
+                except Exception:
+                    continue
+                if _top_category(named.index) not in ("Talmud", "Mishnah", "Tosefta"):
+                    continue
+                if not named.sections:
+                    if named.index.title not in own:
+                        return True
+                elif i + n == len(words) and not (
+                        named.index.title == tractate and named.overlaps(target)):
+                    return True
+    return False
+
+
+# A chapter phrase with the relative word before it or inside the parenthesis:
+# "בספ"ב (לקמן דף יט:)", "לקמן פ"ב (דף טז:)", "לקמן בפירקין (דף ה.)".
+_CHAPTER_RELATIVE_RE = re.compile(
+    rf"(?P<before>{_RELATIVE_WORD})?(?P<chapter>[^()]+?)\s*\(\s*(?P<inside>{_RELATIVE_WORD})?{_DAF_ADDRESS}")
+# "בפירקין": the chapter the citing line is in.
+_OWN_CHAPTER_RE = re.compile(r"ו?[בד]?(?:פירקין|פרקין)")
+
+
+def chapter_located_relative_ref(anchor_text: str, source_ref, ref_factory):
+    """The (Ref, direction) of "בספ"ב (לקמן דף יט:)" cited from within a tractate or its commentary.
+
+    The relative word, the chapter and the one address must all agree: the chapter must be
+    the source's own one ("בפירקין") or one the phrase names in Sefaria's own chapter terms,
+    and it must contain the address (Otzaria/otzaria#3450).
+    """
+    match = _CHAPTER_RELATIVE_RE.fullmatch(_bare_anchor(anchor_text))
+    if match is None or bool(match["before"]) == bool(match["inside"]):
+        return None
+    if not _is_talmud_source(source_ref, ref_factory):
+        return None
+    tractates = _own_tractates(source_ref, ref_factory)
+    if len(tractates) != 1:
+        return None
+    side_word = _relative_side(match["before"] or match["inside"])
+    found = _on_stated_side(_address_ref(match, tractates[0], ref_factory), source_ref, side_word)
+    if found is None:
+        return None
+    target = found[0]
+    chapter = _plain_quotes(match["chapter"])
+    if _OWN_CHAPTER_RE.fullmatch(chapter):
+        amud = source_ref.sections[0]
+        if source_ref.toSections[0] != amud:
+            return None
+        source = _amud_ref(tractates[0], (amud + 1) // 2, "א" if amud % 2 else "ב", ref_factory)
+        chapters = [whole for whole, _names in _book_chapters(tractates[0])
+                    if source is not None and whole.overlaps(source)]
+    else:
+        chapters = named_chapters(chapter, target)
+    return found if any(whole.overlaps(target) for whole in chapters) else None
 
 
 def _address_ref(match, tractate: str, ref_factory):
