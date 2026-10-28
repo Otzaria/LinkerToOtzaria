@@ -157,6 +157,27 @@ def _load_plan(
     return validated, books, hashes, ranges
 
 
+def _plan_context_ranges(validated: dict) -> dict[tuple[str, str], tuple[tuple[int, int], ...]]:
+    """Whole-book ranges of the context-probe books of a validated plan."""
+    return {
+        (item["source_name"], item["canonical_he_title"]): tuple(
+            (start, end) for start, end in item["context_ranges"]
+        )
+        for item in validated["changed"]
+        if "context_ranges" in item
+    }
+
+
+def _accepted_layouts(
+    ner_ranges: tuple[tuple[int, int], ...],
+    context_ranges: tuple[tuple[int, int], ...] | None,
+) -> list[list[list[int]]]:
+    layouts = [[list(item) for item in ner_ranges]]
+    if context_ranges is not None:
+        layouts.append([list(item) for item in context_ranges])
+    return layouts
+
+
 def build_producer_normalizer():
     """Construct the pinned training-time normalizer without importing sefaria.model."""
     from sefaria.helper.normalization import NormalizerComposer
@@ -173,7 +194,8 @@ def build_producer_normalizer():
     return ProducerNormalizer()
 
 
-def _checkpoint_document(args, books, hashes, ner_ranges) -> dict:
+def _checkpoint_document(args, books, hashes, ner_ranges, context_ranges=None) -> dict:
+    context_ranges = context_ranges or {}
     return {
         "schema_version": SCHEMA_VERSION,
         "relink_request_id": args.relink_request_id,
@@ -192,6 +214,14 @@ def _checkpoint_document(args, books, hashes, ner_ranges) -> dict:
                         (book.source_name, book.canonical_he_title)
                     ]
                 ],
+                **(
+                    {"context_ranges": [
+                        list(item)
+                        for item in context_ranges[(book.source_name, book.canonical_he_title)]
+                    ]}
+                    if (book.source_name, book.canonical_he_title) in context_ranges
+                    else {}
+                ),
             }
             for book in books
         ],
@@ -224,6 +254,7 @@ def _validate_completed_book(
     book: BookKey,
     source_hash: str,
     ner_ranges: tuple[tuple[int, int], ...],
+    context_ranges: tuple[tuple[int, int], ...] | None = None,
 ) -> None:
     cid = claim_id(book)
     path = root / "ner-data" / cid / "book_manifest.json"
@@ -242,7 +273,7 @@ def _validate_completed_book(
         raise RuntimeError(f"checkpoint book {book!r} identity mismatch")
     if value["source_book_hash"] != source_hash:
         raise RuntimeError(f"checkpoint book {book!r} source hash mismatch")
-    if value["ner_ranges"] != [list(item) for item in ner_ranges]:
+    if value["ner_ranges"] not in _accepted_layouts(ner_ranges, context_ranges):
         raise RuntimeError(f"checkpoint book {book!r} NER line plan mismatch")
     for field in ("line_count", "eligible_line_count"):
         if type(value[field]) is not int or value[field] < 0:
@@ -272,6 +303,7 @@ def _validate_partial_book(
     book: BookKey,
     source_hash: str,
     ner_ranges: tuple[tuple[int, int], ...],
+    context_ranges: tuple[tuple[int, int], ...] | None = None,
 ) -> dict:
     cid = claim_id(book)
     path = root / "partial" / cid / "partial_manifest.json"
@@ -290,7 +322,7 @@ def _validate_partial_book(
         raise RuntimeError(f"partial checkpoint book {book!r} identity mismatch")
     if value["source_book_hash"] != source_hash:
         raise RuntimeError(f"partial checkpoint book {book!r} source hash mismatch")
-    if value["ner_ranges"] != [list(item) for item in ner_ranges]:
+    if value["ner_ranges"] not in _accepted_layouts(ner_ranges, context_ranges):
         raise RuntimeError(f"partial checkpoint book {book!r} NER line plan mismatch")
     if type(value["line_count"]) is not int or value["line_count"] < 0:
         raise RuntimeError(f"partial checkpoint book {book!r} has invalid line_count")
@@ -317,9 +349,10 @@ def _validate_partial_book(
     return value
 
 
-def _prepare_root(args, books, hashes, ner_ranges) -> Path:
+def _prepare_root(args, books, hashes, ner_ranges, context_ranges=None) -> Path:
     root = Path(args.output)
-    expected = _checkpoint_document(args, books, hashes, ner_ranges)
+    context_ranges = context_ranges or {}
+    expected = _checkpoint_document(args, books, hashes, ner_ranges, context_ranges)
     checkpoint = root / "checkpoint.json"
     migrate_checkpoint = False
     if checkpoint.exists():
@@ -370,6 +403,7 @@ def _prepare_root(args, books, hashes, ner_ranges) -> Path:
                     book,
                     hashes[(book.source_name, book.canonical_he_title)],
                     ner_ranges[(book.source_name, book.canonical_he_title)],
+                    context_ranges.get((book.source_name, book.canonical_he_title)),
                 )
             elif partial.exists():
                 shutil.rmtree(partial)
@@ -379,6 +413,7 @@ def _prepare_root(args, books, hashes, ner_ranges) -> Path:
                 book,
                 hashes[(book.source_name, book.canonical_he_title)],
                 ner_ranges[(book.source_name, book.canonical_he_title)],
+                context_ranges.get((book.source_name, book.canonical_he_title)),
             )
             shutil.rmtree(root / "partial" / cid, ignore_errors=True)
         else:
@@ -390,6 +425,7 @@ def _prepare_root(args, books, hashes, ner_ranges) -> Path:
                     book,
                     hashes[(book.source_name, book.canonical_he_title)],
                     ner_ranges[(book.source_name, book.canonical_he_title)],
+                    context_ranges.get((book.source_name, book.canonical_he_title)),
                 )
             elif partial.exists():
                 # A kill between mkdir and the first atomic manifest write contains
@@ -477,38 +513,24 @@ def _claim_heartbeat_loop(
             return
 
 
-def _produce_book(
-    args,
-    recognizer,
-    con,
-    book: BookKey,
-    source_hash: str,
-    ner_ranges: tuple[tuple[int, int], ...],
-    root: Path,
-    worker_hb: Path,
-) -> None:
+def _produce_layout(
+    args, recognizer, book, source_hash, lines, layout, root, worker_hb, batch_descriptors,
+) -> tuple[list[dict], int, bool]:
+    """NER one planned layout of a book into its partial directory.
+
+    Returns the batch descriptors, the eligible line count and whether any line
+    produced an entity.
+    """
     cid = claim_id(book)
-    lines = book_lines(con, book)
-    book_root = root / "ner-data" / cid
     temporary = root / "partial" / cid
     partial_manifest_path = temporary / "partial_manifest.json"
-    if partial_manifest_path.exists():
-        partial_manifest = _validate_partial_book(
-            root, book, source_hash, ner_ranges
-        )
-        if partial_manifest["line_count"] != len(lines):
-            raise RuntimeError(f"partial checkpoint line count changed for {book!r}")
-        batch_descriptors = list(partial_manifest["batches"])
-    else:
-        shutil.rmtree(temporary, ignore_errors=True)
-        temporary.mkdir(parents=True)
-        batch_descriptors = []
     by_start = {descriptor["batch_start"]: descriptor for descriptor in batch_descriptors}
     eligible_count = 0
+    has_entity = False
     expected_starts = set()
     selected_indices = {
         line_index
-        for range_start, range_end in ner_ranges
+        for range_start, range_end in layout
         for line_index in range(range_start, range_end)
     }
     current_indices = {line_index for line_index, _, _ in lines}
@@ -531,6 +553,7 @@ def _produce_book(
                     zip((line_index for line_index, _, _ in batch), normalized)
                 ),
             )
+            has_entity = has_entity or any(line["result"]["entities"] for line in value["lines"])
             eligible_count += len(batch)
             continue
         try:
@@ -551,6 +574,7 @@ def _produce_book(
             }
             for (line_index, _, _), text, result in zip(batch, normalized, results)
         ]
+        has_entity = has_entity or any(record["result"]["entities"] for record in line_records)
         batch_path = temporary / f"{start:012d}.json"
         size, digest = write_json_atomic(batch_path, {
             "schema_version": SCHEMA_VERSION,
@@ -570,13 +594,58 @@ def _produce_book(
             "book": book.to_dict(),
             "source_book_hash": source_hash,
             "line_count": len(lines),
-            "ner_ranges": [list(item) for item in ner_ranges],
+            "ner_ranges": [list(item) for item in layout],
             "batches": batch_descriptors,
         })
         eligible_count += len(batch)
     if set(by_start) != expected_starts:
         raise RuntimeError(
             f"partial checkpoint batch ledger differs from the current book for {book!r}"
+        )
+    return batch_descriptors, eligible_count, has_entity
+
+
+def _produce_book(
+    args,
+    recognizer,
+    con,
+    book: BookKey,
+    source_hash: str,
+    ner_ranges: tuple[tuple[int, int], ...],
+    root: Path,
+    worker_hb: Path,
+    context_ranges: tuple[tuple[int, int], ...] | None = None,
+) -> None:
+    cid = claim_id(book)
+    lines = book_lines(con, book)
+    book_root = root / "ner-data" / cid
+    temporary = root / "partial" / cid
+    partial_manifest_path = temporary / "partial_manifest.json"
+    layout = ner_ranges
+    if partial_manifest_path.exists():
+        partial_manifest = _validate_partial_book(
+            root, book, source_hash, ner_ranges, context_ranges
+        )
+        if partial_manifest["line_count"] != len(lines):
+            raise RuntimeError(f"partial checkpoint line count changed for {book!r}")
+        layout = tuple((start, end) for start, end in partial_manifest["ner_ranges"])
+        batch_descriptors = list(partial_manifest["batches"])
+    else:
+        shutil.rmtree(temporary, ignore_errors=True)
+        temporary.mkdir(parents=True)
+        batch_descriptors = []
+    batch_descriptors, eligible_count, has_entity = _produce_layout(
+        args, recognizer, book, source_hash, lines, layout, root, worker_hb, batch_descriptors,
+    )
+    if context_ranges is not None and layout == ner_ranges and has_entity:
+        # A probed line may move the ibid history: the resolver needs the whole book.
+        _log(args.worker_label, f"context probe hit an entity in {book.canonical_he_title!r}; "
+             "covering the whole book")
+        shutil.rmtree(temporary)
+        temporary.mkdir(parents=True)
+        layout = context_ranges
+        batch_descriptors, eligible_count, _ = _produce_layout(
+            args, recognizer, book, source_hash, lines, layout, root, worker_hb, [],
         )
     final_descriptors = [
         {
@@ -591,7 +660,7 @@ def _produce_book(
         "source_book_hash": source_hash,
         "line_count": len(lines),
         "eligible_line_count": eligible_count,
-        "ner_ranges": [list(item) for item in ner_ranges],
+        "ner_ranges": [list(item) for item in layout],
         "batches": final_descriptors,
     })
     partial_manifest_path.unlink(missing_ok=True)
@@ -642,7 +711,8 @@ def _largest_books_first(
 
 
 def worker(args) -> int:
-    _, books, hashes, ner_ranges = _load_plan(args)
+    validated, books, hashes, ner_ranges = _load_plan(args)
+    context_ranges = _plan_context_ranges(validated)
     root = Path(args.output)
     for name in ("claims", "done", "failed", "partial", "worker-heartbeats", "ner-data"):
         (root / name).mkdir(parents=True, exist_ok=True)
@@ -690,6 +760,7 @@ def worker(args) -> int:
                         ner_ranges[(book.source_name, book.canonical_he_title)],
                         root,
                         worker_hb,
+                        context_ranges.get((book.source_name, book.canonical_he_title)),
                     )
                 except Exception as error:
                     write_json_atomic(root / "failed" / cid, {
@@ -741,8 +812,8 @@ def finalize(args) -> int:
 
 
 def driver(args, progress_seconds: float = 60.0) -> int:
-    _, books, hashes, ner_ranges = _load_plan(args)
-    root = _prepare_root(args, books, hashes, ner_ranges)
+    validated, books, hashes, ner_ranges = _load_plan(args)
+    root = _prepare_root(args, books, hashes, ner_ranges, _plan_context_ranges(validated))
     processes = []
     deadline = (
         time.monotonic() + args.deadline_seconds

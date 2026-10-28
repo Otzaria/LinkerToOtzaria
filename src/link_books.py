@@ -192,6 +192,11 @@ def transport_batches(lines, selected_indices=None):
         yield batch_start, batch
 
 
+def transport_seams(lines) -> list[int]:
+    """The line opening each transport batch after the first, over the whole book."""
+    return [batch[0][0] for _, batch in transport_batches(lines)][1:]
+
+
 @contextmanager
 def periodic_heartbeat(callback, interval=HEARTBEAT_SECONDS):
     """Refresh a live worker/book claim while one resolver batch is blocked."""
@@ -3315,6 +3320,47 @@ def is_implausible_citation_target(target_ref: str, anchor_text: str) -> bool:
     )
 
 
+def book_line_plan(bk, lines, item, precomputed):
+    """(NER line indices, line reuse pairs, stateful ibid) for one requested book.
+
+    An unescalated context probe stays narrow and stateless: its probed lines have no
+    NER entity, so no ibid history moves.  Otherwise it covers the whole book.
+    """
+    stateful_ibid = requires_book_context(lines)
+    all_indices = {line_index for line_index, _, _ in lines}
+    if "ner_ranges" in item:
+        ner_indices = indices_from_ranges(item["ner_ranges"])
+        reuse_value = item.get("reuse")
+        if type(reuse_value) is not list:
+            raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
+        reuse = []
+        for index, pair in enumerate(reuse_value):
+            if (
+                type(pair) is not list
+                or len(pair) != 2
+                or any(type(value) is not int for value in pair)
+            ):
+                raise RuntimeError(
+                    f"invalid line reuse pair {index} for {bk!r}"
+                )
+            reuse.append(tuple(pair))
+    else:
+        ner_indices = all_indices
+        reuse = []
+    if "context_ranges" in item:
+        if indices_from_ranges(item["context_ranges"]) != all_indices:
+            raise RuntimeError(f"context probe does not cover the book {bk!r}")
+        key = (bk.source_name, bk.canonical_he_title)
+        if precomputed is not None and key not in precomputed.escalated:
+            if not stateful_ibid or any(precomputed.entity_lines(key).values()):
+                raise RuntimeError(f"unescalated context probe is not inert for {bk!r}")
+            stateful_ibid = False
+        else:
+            ner_indices = all_indices
+            reuse = []
+    return ner_indices, reuse, stateful_ibid
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--snapshot", required=True, help="lines_snapshot.db from dumpLines")
@@ -3411,6 +3457,10 @@ def main():
                     "source_name", "canonical_he_title", "hash",
                     "ner_ranges", "reuse",
                 },
+                {
+                    "source_name", "canonical_he_title", "hash",
+                    "ner_ranges", "reuse", "context_ranges",
+                },
             )
             if (not isinstance(item, dict)
                     or set(item) not in allowed_shapes
@@ -3453,9 +3503,11 @@ def main():
             changed_books=[
                 {
                     **book.to_dict(),
-                    "ner_ranges": requested_plans[
-                        (book.source_name, book.canonical_he_title)
-                    ]["ner_ranges"],
+                    **{
+                        name: requested_plans[(book.source_name, book.canonical_he_title)][name]
+                        for name in ("ner_ranges", "context_ranges")
+                        if name in requested_plans[(book.source_name, book.canonical_he_title)]
+                    },
                 }
                 for book in books
             ],
@@ -3635,28 +3687,12 @@ def main():
                     if claim is None:
                         break  # done, or another live worker owns it (it marks done/failed)
                     lines = book_lines(con, bk)
-                    stateful_ibid = requires_book_context(lines)
+                    ner_indices, reuse, stateful_ibid = book_line_plan(
+                        bk, lines,
+                        requested_plans.get((bk.source_name, bk.canonical_he_title), {}),
+                        precomputed,
+                    )
                     cooperative = precomputed is not None and not stateful_ibid
-                    item = requested_plans.get((bk.source_name, bk.canonical_he_title), {})
-                    if "ner_ranges" in item:
-                        ner_indices = indices_from_ranges(item["ner_ranges"])
-                        reuse_value = item.get("reuse")
-                        if type(reuse_value) is not list:
-                            raise RuntimeError(f"line reuse plan is not an array for {bk!r}")
-                        reuse = []
-                        for index, pair in enumerate(reuse_value):
-                            if (
-                                type(pair) is not list
-                                or len(pair) != 2
-                                or any(type(value) is not int for value in pair)
-                            ):
-                                raise RuntimeError(
-                                    f"invalid line reuse pair {index} for {bk!r}"
-                                )
-                            reuse.append(tuple(pair))
-                    else:
-                        ner_indices = {line_index for line_index, _, _ in lines}
-                        reuse = []
                     if stateful_ibid and (reuse or set(ner_indices) != {
                         line_index for line_index, _, _ in lines
                     }):
