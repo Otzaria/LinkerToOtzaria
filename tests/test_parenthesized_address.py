@@ -429,11 +429,12 @@ class LeadNamesOtherWorksTest(unittest.TestCase):
                 mock.patch.object(link_books, "named_chapters", lambda _text, _ref: chapters):
             return link_books.lead_names_other_works(linker, raw, len(lead), ref)
 
-    def test_a_plain_word_or_an_unrelated_title_is_dropped(self):
-        self.assertTrue(self.outside([("NAMED", "בְּנִדָּה")]))
-        self.assertTrue(self.outside([("NAMED", "<b>בנדה</b>")]))
-        self.assertTrue(self.outside([("NAMED", "שנאמר")]))
-        self.assertTrue(self.outside([("NAMED", "שנאמר"), ("NAMED", "בנדה")]))
+    def test_a_lead_without_quotation_evidence_is_not_discarded(self):
+        for lead in ([("NAMED", "בְּנִדָּה")], [("NAMED", "<b>בנדה</b>")],
+                     [("NAMED", "שנאמר")], [("NAMED", "שנאמר"), ("NAMED", "בנדה")],
+                     [("NAMED", 'והשטמ"ק')], [("NAMED", "ובתורת גיטין")]):
+            with self.subTest(lead=lead):
+                self.assertFalse(self.outside(lead))
 
     def test_a_qualifier_or_a_related_work_keeps_the_drop(self):
         for lead in ("ירושלמי", "רש\"י"):
@@ -468,7 +469,7 @@ class LeadNamesOtherWorksTest(unittest.TestCase):
         self.assertTrue(self.outside([("NAMED", "בספר הישר"), ("NAMED", "בפרק זה בורר")],
                                      self.SANHEDRIN, chapters=(chapter,)))
         self.assertFalse(self.outside([("NAMED", "בספר הישר"), ("NAMED", "בפרק זה בורר")], self.SANHEDRIN))
-        self.assertTrue(self.outside([("RELATIVE", "לקמן"), ("NAMED", "בנדה")]))
+        self.assertFalse(self.outside([("RELATIVE", "לקמן"), ("NAMED", "בנדה")]))
 
 
 class AbsorbedLeadTest(unittest.TestCase):

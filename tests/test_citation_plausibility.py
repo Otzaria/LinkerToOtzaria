@@ -391,8 +391,9 @@ class OwnTractateDafRefTest(unittest.TestCase):
     """"(דף כא.)" in a commentary on a tractate names the tractate's own daf (Otzaria/otzaria#3450)."""
 
     def own(self, anchor, *candidates, source="Tosafot on Shabbat 18a:3:1", **guards):
-        found = link_books.own_tractate_daf_ref(
-            _candidates(*candidates), anchor, 0, len(anchor), TalmudRef(source), TalmudRef, **guards)
+        with mock.patch.object(link_books, "_book_chapters", lambda _title: _SHABBAT_CHAPTERS):
+            found = link_books.own_tractate_daf_ref(
+                _candidates(*candidates), anchor, 0, len(anchor), TalmudRef(source), TalmudRef, **guards)
         return None if found is None else found.normal()
 
     def test_the_tractate_wins_over_its_commentary(self):
@@ -401,7 +402,7 @@ class OwnTractateDafRefTest(unittest.TestCase):
             ("התם (דף כז.", ("Shabbat 27a", "Tosafot on Shabbat 27a"), "Shabbat 27a"),
             ("בפירקין (דף ט.", ("Shabbat 9a", "Tosafot on Shabbat 9a"), "Shabbat 9a"),
             ("שם לט:", ("Shabbat 39b", "Tosafot on Shabbat 39b"), "Shabbat 39b"),
-            ("בפ\"ב (דף יד:", ("Tosafot on Shabbat 14b",), "Shabbat 14b"),
+            ("בפ\"ב (דף כא:", ("Tosafot on Shabbat 21b",), "Shabbat 21b"),
             ("בגמרא (דף טז.", ("Shabbat 16a",), "Shabbat 16a"),
             ("(דף כא ע\"ב)", ("Shabbat 21b", "Tosafot on Shabbat 21b"), "Shabbat 21b"),
         ]:
@@ -424,6 +425,11 @@ class OwnTractateDafRefTest(unittest.TestCase):
             ("דבכא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
             # A relative citation keeps its own recovery, which checks the side.
             ("לקמן (דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+            # A chapter locator is evidence only when it actually contains the daf.
+            ("בפ\"ב (דף יד:", ("Tosafot on Shabbat 14b",)),
+            # An explicitly named commentary is never the base Gemara.
+            ("בתוספות (דף כא.", ("Tosafot on Shabbat 21a",)),
+            ("ברש\"י (דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
         ]:
             with self.subTest(anchor=anchor, candidates=candidates):
                 self.assertIsNone(self.own(anchor, *candidates))
@@ -496,7 +502,7 @@ class ClauseTest(unittest.TestCase):
                          ["ובערכין", "פרק", "יש", "בערכין", "להקל", "ולהחמיר"])
         content = "א ב ג ד ה ו ז ח ט י [דף ס"
         self.assertEqual(link_books.clause_before(content, content.index("דף")),
-                         ["ג", "ד", "ה", "ו", "ז", "ח", "ט", "י"])
+                         ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י"])
         self.assertEqual(link_books.clause_before("כך. (דף ס", 5), [])
 
     def names(self, words, chapters=()):
