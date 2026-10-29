@@ -505,7 +505,7 @@ class ClauseTest(unittest.TestCase):
                          ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י"])
         self.assertEqual(link_books.clause_before("כך. (דף ס", 5), [])
 
-    def names(self, words, chapters=()):
+    def names(self, words, chapters=(), prefixes=()):
         """Leaves: a book's title (no sections), or a chapter of one (Shabbat ch. 2 is 20b-36b)."""
         leaves = {"ובערכין": [("Arakhin", "Talmud", None)], "בשבת": [("Shabbat", "Talmud", None)],
                   "משנה שבת": [("Mishnah Shabbat", "Mishnah", None)],
@@ -532,7 +532,7 @@ class ClauseTest(unittest.TestCase):
                 return self.nodes
 
         trie = types.SimpleNamespace(get_continuations=lambda key, allow_partial: (
-            (Titles(key), None) if key in leaves else (None, None)))
+            (Titles(key), None) if key in leaves else ({}, None) if key in prefixes else (None, None)))
         linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(get_ref_part_title_trie=lambda: trie))
         ref_part = types.ModuleType("sefaria.model.linker.ref_part")
         ref_part.LEAF_TRIE_ENTRY = leaf
@@ -559,6 +559,11 @@ class ClauseTest(unittest.TestCase):
                       ["ור'", "ר'", "ישמעאל", "לא", "בעי"]):
             with self.subTest(words=words):
                 self.assertFalse(self.names(words))
+
+    def test_a_generic_mishnah_descriptor_is_not_a_named_commentary(self):
+        self.assertFalse(self.names(["מתני'", 'כדתנן'], prefixes=("מתני'",)))
+        self.assertTrue(self.names(["מתני'", 'ירושלמי', 'שבת'],
+                                   prefixes=("מתני'", 'ירושלמי')))
 
 
 class OwnTractateDafBatchTest(unittest.TestCase):

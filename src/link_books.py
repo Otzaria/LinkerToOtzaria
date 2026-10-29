@@ -3574,7 +3574,8 @@ def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> b
                         return True
                 continue
             if LEAF_TRIE_ENTRY not in titles:
-                if n == 1 and not re.fullmatch(r"ו?[במ]?(?:גמרא|גמ['\"]?|פירקין|פרקין)", word):
+                if n == 1 and not re.fullmatch(
+                        r"ו?[במ]?(?:גמרא|גמ['\"]?|מתני['\"]?|מתניתין|פירקין|פרקין)", word):
                     return True  # e.g. רש"י: an unfinished commentary title
                 continue
             for node in titles[LEAF_TRIE_ENTRY]:
