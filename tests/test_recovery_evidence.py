@@ -356,6 +356,36 @@ class BiblicalCorpusTest(unittest.TestCase):
 
 
 class NamedCommentaryTest(unittest.TestCase):
+    def relative(self, before, anchor, blocked):
+        text = before + anchor + ') המשך הדברים'
+        rr = citation(text, anchor, [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ח.')], failed=True)
+        linker = NS(bulk_link=lambda *_a, **_kw: [NS(resolved_refs=[rr])])
+        guard = mock.Mock(return_value=blocked)
+        with mock.patch.object(lb, 'own_tractate_relative_ref', return_value=(
+                TalmudRef('Shabbat 8a'), 'above')), \
+                mock.patch.object(lb, 'clause_names_elsewhere', guard):
+            records, _ = lb.process_batch(linker, lb.BookKey('MoreBooks', 'ספר'),
+                                         [(0, text, None)], lambda _: None,
+                                         context_ref_factory=TalmudRef)
+        return records, guard
+
+    def test_a_commentary_before_a_relative_parenthesis_is_not_gemara(self):
+        for before in ('וכמו שכתב הרא"ש ז"ל ', 'ועיין בר"ן ז"ל ', 'ועיין רשב"א ז"ל '):
+            with self.subTest(before=before):
+                records, guard = self.relative(before, 'לעיל (דף ח.', blocked=True)
+                self.assertEqual(records, [])
+                self.assertIn('ז"ל', guard.call_args.args[1])
+
+    def test_a_neutral_relative_parenthesis_still_recovers(self):
+        records, guard = self.relative('כדאמרינן ', 'לעיל (דף ח.', blocked=False)
+        self.assertEqual([r.target_ref for r in records], ['Shabbat 8a'])
+        guard.assert_called_once()
+
+    def test_preexisting_whole_anchor_relative_forms_keep_their_behavior(self):
+        records, guard = self.relative('כדאמרינן ', 'לעיל דף ח.', blocked=True)
+        self.assertEqual([r.target_ref for r in records], ['Shabbat 8a'])
+        guard.assert_not_called()
+
     def test_a_named_rashi_target_is_never_replaced_by_gemara(self):
         text = 'רש"י (דף כא.)'
         rr = _candidates('Rashi on Gittin 21a')

@@ -2243,6 +2243,13 @@ def process_batch(
                     if recovered is None:
                         continue
                     ref, relative_direction = recovered
+                    # The newly accepted inner parenthesis must not hide the
+                    # actual cited work outside the NER span: "כתב הרא\"ש ז\"ל
+                    # לעיל (ח' ע\"א)" cites Rosh, not the underlying Gemara.
+                    # Older whole-anchor forms keep their published behavior.
+                    if "(" in _bare_anchor(anchor_text) and clause_names_elsewhere(
+                            linker, clause_before(content, start), ref, ref.index.title):
+                        continue
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
