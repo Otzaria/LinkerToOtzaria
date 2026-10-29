@@ -126,6 +126,14 @@ class QuotationEvidenceTest(QuoteFixtures, unittest.TestCase):
         self.assertFalse(lb.quoted_tanakh_address(Verse('Genesis 1:5'), text, 0, text.index(')'), absorbed_lead=True))
         text = 'ויקרא (בראשית א ה) <span title="' + 'x' * 400 + '">אלהים לאור יום</span>'
         self.assertTrue(lb.quoted_tanakh_address(Verse('Genesis 1:5'), text, 0, text.index(')'), absorbed_lead=True))
+        for quote in ('"', "'"):
+            text = f'ויקרא (בראשית א ה) <span title={quote}> אלהים לאור יום{quote}>קרבן אחר</span>'
+            self.assertFalse(lb.quoted_tanakh_address(
+                Verse('Genesis 1:5'), text, 0, text.index(')'), absorbed_lead=True))
+        # A ')' inside a tag after the NER span is not the citation's closing ')'.
+        text = 'ויקרא (בראשית א ה<span title="> ) אלהים לאור יום">קרבן אחר</span>'
+        self.assertFalse(lb.quoted_tanakh_address(
+            Verse('Genesis 1:5'), text, 0, text.index('<'), absorbed_lead=True))
 
     def test_an_author_outside_the_ner_span_is_not_an_introducer(self):
         text = 'וכמו שכתב רש"י ז"ל בחומש (דברים א יג) שם דנבון דומה לשולחני תגר'

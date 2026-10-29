@@ -2740,13 +2740,18 @@ def _related_works(one, other) -> bool:
 
 _NIQQUD_RE = re.compile(r"[\u0591-\u05c7]")
 _QUOTE_INTRO_RE = re.compile(r"(?<![א-ת])(?:ו?שנאמר|דכתיב|כדכתיב|שהרי\s+הוא\s+אומר)(?![א-ת])")
+# A '>' inside a quoted HTML attribute does not end its tag. Attribute text
+# must never become positive quotation evidence after stripping half a tag.
+_QUOTE_HTML_TAG = r'''<(?:"[^"]*"|'[^']*'|[^'">])*>'''
+_QUOTE_HTML_TAG_RE = re.compile(_QUOTE_HTML_TAG)
+_QUOTE_CLOSE_RE = re.compile(rf"(?:\s|{_QUOTE_HTML_TAG})*\)")
 
 
 def hebrew_quote_words(text: str) -> tuple[str, ...]:
     """Words for exact quotation evidence; never used to change stored offsets."""
     import html
 
-    plain = html.unescape(_HTML_TAG_RE.sub(" ", text)).replace("־", " ")
+    plain = html.unescape(_QUOTE_HTML_TAG_RE.sub(" ", text)).replace("־", " ")
     def object_pronoun(match):
         word = match.group()
         bare = _NIQQUD_RE.sub("", word)
@@ -2801,11 +2806,11 @@ def _tanakh_quote_books() -> tuple:
 def adjoining_quote_words(content, start, end):
     # Keep a complete short quotation (sometimes two verses), but never borrow
     # evidence across another parenthesized citation or from HTML attributes.
-    prefix = _HTML_TAG_RE.sub(" ", content[:start]).rstrip(" ([")
+    prefix = _QUOTE_HTML_TAG_RE.sub(" ", content[:start]).rstrip(" ([")
     cut = max(prefix.rfind(mark) for mark in "()[]")
     before = hebrew_quote_words(prefix[cut + 1:])[-24:]
     tail = content[end:]
-    close = re.match(r"(?:\s|<[^>]*>)*\)", tail)
+    close = _QUOTE_CLOSE_RE.match(tail)
     after = hebrew_quote_words(tail[close.end():])[:8] if close else ()
     return before, after
 
@@ -2918,7 +2923,7 @@ def quoted_tanakh_address(ref, content: str, start: int, end: int, *, absorbed_l
         return False
     before = hebrew_quote_words(content[:start])[-16:]
     tail = content[end:]
-    close = re.match(r"(?:\s|<[^>]*>)*\)", tail)
+    close = _QUOTE_CLOSE_RE.match(tail)
     after = hebrew_quote_words(tail[close.end():])[:16] if close else ()
 
     def matches(words):
