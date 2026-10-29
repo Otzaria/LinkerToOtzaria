@@ -2167,6 +2167,7 @@ def process_batch(
                 chapter_led = False
                 own_daf = None
                 contextual = None
+                quoted_ibid = None
                 if ref is None and not failed:
                     own_daf = own_tractate_daf_ref(
                         rr, content, start, end, context_object, context_ref_factory,
@@ -2192,6 +2193,10 @@ def process_batch(
                         linker, rr, content, start, end, antecedent, context_ref_factory,
                         gap=None if preceding is None else preceding[0])
                     ref = contextual
+                if ref is None and not relative:
+                    quoted_ibid = quoted_biblical_ibid_ref(
+                        linker, rr, content, start, end, context_ref_factory)
+                    ref = quoted_ibid
                 if ref is None and not relative:
                     continue
                 # A parenthesized Hebrew number opening a line is its structural
@@ -2242,7 +2247,8 @@ def process_batch(
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
                 if (recovered is None and regrouped is None and spelled is None
-                        and own_daf is None and contextual is None and not text_rebuilt):
+                        and own_daf is None and contextual is None and quoted_ibid is None
+                        and not text_rebuilt):
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2775,6 +2781,50 @@ def _unique_quote(title, words):
     return at >= 0 and corpus.find(quote, at + 1) < 0
 
 
+@functools.lru_cache(maxsize=1)
+def _tanakh_quote_books() -> tuple:
+    from sefaria.model import library
+
+    # Include every base book, so a repeated phrase in another biblical book
+    # cannot manufacture evidence for one of the resolver's remembered books.
+    indexes = library.get_indexes_in_category("Tanakh", include_dependant=False, full_records=True)
+    titles = sorted(index.title for index in indexes if list(index.categories) in (
+        ["Tanakh", "Torah"], ["Tanakh", "Prophets"], ["Tanakh", "Writings"]))
+    # The category also contains complex ancillary works that cannot be read at
+    # book level. An incomplete base corpus cannot establish global uniqueness.
+    if len(titles) != 39:
+        return ()
+    books = tuple((title, _hebrew_book_quote_text(title)) for title in titles)
+    return books if all(corpus.strip() for _title, corpus in books) else ()
+
+
+def adjoining_quote_words(content, start, end):
+    # Keep a complete short quotation (sometimes two verses), but never borrow
+    # evidence across another parenthesized citation or from HTML attributes.
+    prefix = _HTML_TAG_RE.sub(" ", content[:start]).rstrip(" ([")
+    cut = max(prefix.rfind(mark) for mark in "()[]")
+    before = hebrew_quote_words(prefix[cut + 1:])[-24:]
+    tail = content[end:]
+    close = re.match(r"(?:\s|<[^>]*>)*\)", tail)
+    after = hebrew_quote_words(tail[close.end():])[:8] if close else ()
+    return before, after
+
+
+def unquoted_clause_words(words, phrases):
+    """Keep potential work names outside the positively identified quoted words.
+
+    Biblical words such as 'בית' also begin book titles. Only words covered by
+    an exact, globally unique four-word quotation lose their title reading.
+    Original tokens (including author acronyms) are retained everywhere else.
+    """
+    normalized = [(word, i) for i, token in enumerate(words) for word in hebrew_quote_words(token)]
+    quoted = set()
+    for j in range(len(normalized) - 3):
+        if " " + " ".join(word for word, _i in normalized[j:j + 4]) + " " in phrases:
+            quoted.update(i for _word, i in normalized[j:j + 4])
+    return [word for i, word in enumerate(words) if i not in quoted]
+
+
 class _TextRebuiltCitation:
     is_ambiguous = False
     resolution_failed = False
@@ -2940,6 +2990,13 @@ def lead_names_other_works(linker, raw, first: int, ref, content: str | None = N
             continue
         if part.type.name != "NAMED":
             return False
+        if not tanakh:
+            chapters = named_chapters(text, ref)
+            if chapters:
+                if not any(chapter.overlaps(ref) for chapter in chapters):
+                    return False
+                placed = True
+                continue
         if tanakh:
             text = _QUOTE_INTRO_RE.sub("", text).strip()
             if not text:
@@ -3029,7 +3086,7 @@ def chapter_led_splits(raw_entity) -> list[tuple[str, int, int]]:
 
 # Words that place a citation within its chapter: "בריש", "סוף", "שלהי".
 _CHAPTER_EDGE_RE = re.compile(r"^ו?[במ]?(?:ריש|סוף|שלהי) ")
-_LEAD_PREFIXES = ("", "ו", "ב", "מ", "ד", "ל", "וב", "ומ")
+_LEAD_PREFIXES = ("", "ו", "ב", "מ", "ד", "ל", "וב", "ומ", "דב", "דמ")
 
 
 def _plain_quotes(text: str) -> str:
@@ -3529,6 +3586,72 @@ def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> b
 _IBID_VERSE_RE = re.compile(
     rf"(?P<ibids>שם\s+(?:שם\s+)?)(?P<first>{_UNTITLED_DAF})"
     rf"(?:\s+(?P<second>{_UNTITLED_DAF}))?")
+
+
+def quoted_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):
+    """Identify a fully addressed biblical quote without inheriting lost history.
+
+    A four-word phrase must occur exactly once in the entire Tanakh, in the
+    printed verse. Two printed numbers supply both chapter and verse. With just
+    a verse number, the resolver must independently offer that exact address;
+    no chapter is invented. Different adjoining quotations, short quotations,
+    commentary candidates, ranges and contradictory numbers all fail closed.
+    This evidence does not revive or modify Sefaria's ibid history.
+    """
+    if ref_factory is None or not has_raw_part_type(rr, "IBID"):
+        return None
+    anchor = _NIQQUD_RE.sub("", _plain_quotes(_bare_anchor(content[start:end])))
+    match = _IBID_VERSE_RE.fullmatch(anchor)
+    if match is None:
+        return None
+    tokens = [re.sub(r"[^א-ת]", "", match[n]) for n in ("first", "second") if match[n]]
+    if (not all(_is_canonical_numeral(t) for t in tokens)
+            or (match["ibids"].split().count("שם") == 2 and len(tokens) != 1)):
+        return None
+    numbers = [_numeral(t) for t in tokens]
+    refs = [] if getattr(rr, "resolution_failed", False) else candidate_refs(rr)
+    if any(_top_category(r.index) != "Tanakh" or getattr(r.index, "dependence", None)
+           for r in refs):
+        return None
+    if len(numbers) == 1 and not refs:
+        return None  # the omitted chapter cannot be inferred from the words alone
+    windows = adjoining_quote_words(content, start, end)
+    quotes = {" " + " ".join(words[i:i + 4]) + " "
+              for words in windows for i in range(len(words) - 3)}
+    if not quotes:
+        return None
+    distinctive = {}
+    for quote in quotes:
+        found = []
+        for title, corpus in _tanakh_quote_books():
+            at = corpus.find(quote)
+            if at >= 0:
+                found.append(title)
+                if corpus.find(quote, at + 1) >= 0:
+                    found.append(title)
+        if len(found) == 1:
+            distinctive.setdefault(found[0], set()).add(quote)
+    if len(distinctive) != 1:
+        return None
+    title, phrases = next(iter(distinctive.items()))
+    if len(numbers) == 2:
+        try:
+            refs = [ref_factory(f"{title} {numbers[0]}:{numbers[1]}")]
+        except Exception:
+            return None
+    found = {}
+    for ref in refs:
+        if (ref.index.title != title or len(ref.sections) != 2
+                or list(ref.sections) != list(ref.toSections)
+                or list(ref.sections[-len(numbers):]) != numbers):
+            continue
+        words = unquoted_clause_words(clause_before(content, start), phrases)
+        if clause_names_elsewhere(linker, words, ref, title):
+            continue
+        verse = " " + " ".join(_hebrew_ref_words(ref.normal())) + " "
+        if any(phrase in verse for phrase in phrases):
+            found[ref.normal()] = ref
+    return next(iter(found.values())) if len(found) == 1 else None
 
 
 def contextual_ibid_ref(linker, rr, content, start, end, antecedent, ref_factory, *, gap=None):

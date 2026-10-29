@@ -426,7 +426,9 @@ class LeadNamesOtherWorksTest(unittest.TestCase):
                                            "sefaria.model": types.ModuleType("sefaria.model"),
                                            "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
                                            "sefaria.model.linker.ref_part": ref_part}), \
-                mock.patch.object(link_books, "named_chapters", lambda _text, _ref: chapters):
+                mock.patch.object(link_books, "named_chapters", lambda text, _ref: chapters if (
+                    link_books._CHAPTER_LEAD_RE.match(text) or text in (
+                        "בהאומנין", 'בח"ה', "דבפרק האומנין")) else ()):
             return link_books.lead_names_other_works(linker, raw, len(lead), ref)
 
     def test_a_lead_without_quotation_evidence_is_not_discarded(self):
@@ -470,6 +472,15 @@ class LeadNamesOtherWorksTest(unittest.TestCase):
                                      self.SANHEDRIN, chapters=(chapter,)))
         self.assertFalse(self.outside([("NAMED", "בספר הישר"), ("NAMED", "בפרק זה בורר")], self.SANHEDRIN))
         self.assertFalse(self.outside([("RELATIVE", "לקמן"), ("NAMED", "בנדה")]))
+
+    def test_a_bare_chapter_name_must_be_known_and_contain_the_address(self):
+        inside = types.SimpleNamespace(overlaps=lambda _ref: True)
+        outside = types.SimpleNamespace(overlaps=lambda _ref: False)
+        for lead in ("בהאומנין", 'בח"ה', "דבפרק האומנין"):
+            with self.subTest(lead=lead):
+                self.assertTrue(self.outside([("NAMED", lead)], self.SANHEDRIN, (inside,)))
+                self.assertFalse(self.outside([("NAMED", lead)], self.SANHEDRIN, (outside,)))
+                self.assertFalse(self.outside([("NAMED", lead)], self.SANHEDRIN))
 
 
 class AbsorbedLeadTest(unittest.TestCase):

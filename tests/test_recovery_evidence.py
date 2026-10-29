@@ -17,13 +17,16 @@ VERSES = {
     'Genesis 48:8': 'וירא ישראל את בני יוסף ויאמר מי אלה',
     'Genesis 48:12': 'ויוצא יוסף אתם מעם ברכיו וישתחו לאפיו ארצה',
     'Genesis 48:13': 'ויקח יוסף את שניהם את אפרים בימינו משמאל ישראל',
+    'Genesis 48:17': 'וירא יוסף כי ישית אביו יד ימינו על ראש אפרים',
+    'Proverbs 19:13': 'הוות לאביו בן כסיל ודלף טרד מדיני אשה',
+    'Proverbs 19:14': 'בית והון נחלת אבות ומה אשה משכלת',
     'Leviticus 15:19': 'ואשה כי תהיה זבה דם יהיה זבה בבשרה שבעת ימים תהיה בנדתה',
     'Leviticus 11:4': 'אך את זה לא תאכלו ממעלי הגרה וממפרסי הפרסה את הגמל',
     'Deuteronomy 14:7': 'אך את זה לא תאכלו ממעלי הגרה וממפריסי הפרסה השסועה את הגמל',
     'Deuteronomy 1:13': 'הבו לכם אנשים חכמים ונבנים וידעים לשבטיכם ואשימם בראשיכם',
 }
 BOOKS = {book: ' '.join(v for k, v in VERSES.items() if k.startswith(book + ' '))
-         for book in ('Genesis', 'Leviticus', 'Deuteronomy')}
+         for book in ('Genesis', 'Leviticus', 'Deuteronomy', 'Proverbs')}
 
 
 class Verse:
@@ -88,8 +91,10 @@ def citation(content, anchor, parts, refs=(), failed=False):
 class QuoteFixtures:
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
-        mock.patch.object(lb, '_hebrew_ref_words', lambda n: lb.hebrew_quote_words(VERSES[n])).start()
+        mock.patch.object(lb, '_hebrew_ref_words', lambda n: lb.hebrew_quote_words(VERSES.get(n, ''))).start()
         mock.patch.object(lb, '_hebrew_book_quote_text', lambda n: ' ' + BOOKS[n] + ' ').start()
+        mock.patch.object(lb, '_tanakh_quote_books', lambda: tuple(
+            (n, ' ' + words + ' ') for n, words in BOOKS.items())).start()
 
 
 class QuotationEvidenceTest(QuoteFixtures, unittest.TestCase):
@@ -176,7 +181,8 @@ class CitationBoundaryTest(QuoteFixtures, unittest.TestCase):
             ('IBID', 'שם'), ('IBID', 'שם'), ('NUMBERED', 'ח')], [Verse('Genesis 48:8'), Verse('Leviticus 11:4')])])
         resolver = NS(_ibid_history=NS(last_refs=[]), reset_ibid_history=lambda: None)
         linker = NS(_ref_resolver=resolver, bulk_link=lambda texts, **_: [docs[t] for t in texts])
-        with mock.patch.object(lb, 'BATCH_LINES', batch_size):
+        with mock.patch.object(lb, 'BATCH_LINES', batch_size), \
+                mock.patch.object(lb, 'clause_names_elsewhere', return_value=False):
             records, _ = lb.process_book(linker, lb.BookKey('Sefaria', 'אגדת בראשית'), rows,
                                          lambda _: None, lambda: None, context_ref_factory=Verse)
         return [(r.line_index, r.target_ref) for r in records]
@@ -185,8 +191,9 @@ class CitationBoundaryTest(QuoteFixtures, unittest.TestCase):
         self.assertEqual(self.book(100), [(0, 'Genesis 48:13'), (1, 'Genesis 48:8')])
         self.assertEqual(self.book(1), self.book(100))
 
-    def test_an_intervening_failed_citation_is_never_skipped(self):
-        self.assertEqual(self.book(100, intervening=True), [(0, 'Genesis 48:13')])
+    def test_independent_unique_quotation_can_resolve_after_a_failure(self):
+        self.assertEqual(self.book(100, intervening=True), [
+            (0, 'Genesis 48:13'), (2, 'Genesis 48:8')])
         self.assertEqual(self.book(1, intervening=True), self.book(100, intervening=True))
 
     def test_checkpoint_preserves_the_exact_immediate_antecedent(self):
@@ -208,6 +215,57 @@ class CitationBoundaryTest(QuoteFixtures, unittest.TestCase):
         without_previous = {k: v for k, v in state.items() if k != 'previous_citation'}
         with self.assertRaises(RuntimeError):
             restored.restore_state(without_previous, Verse, key, 0, batch, 'a' * 64)
+
+
+class IndependentBiblicalQuoteTest(QuoteFixtures, unittest.TestCase):
+    def recover(self, text, anchor, refs=(), failed=False, blocked=False):
+        parts = [('IBID' if t == 'שם' else 'NUMBERED', t) for t in anchor.split()]
+        rr = citation(text, anchor, parts, [Verse(r) for r in refs], failed)
+        with mock.patch.object(lb, 'clause_names_elsewhere', return_value=blocked):
+            ref = lb.quoted_biblical_ibid_ref(None, rr, text, *rr.raw_entity.span.range, Verse)
+        return None if ref is None else ref.normal()
+
+    def test_a_unique_quote_and_printed_chapter_verse_need_no_history(self):
+        text = 'הוות לאביו בן כסיל ודלף טרד מדיני אשה (שם יט יג)'
+        self.assertEqual(self.recover(text, 'שם יט יג', failed=True), 'Proverbs 19:13')
+        self.assertIsNone(self.recover(text, 'שם יט יג', failed=True, blocked=True))
+
+    def test_a_unique_quote_can_choose_only_a_resolver_supplied_chapter(self):
+        text = 'וירא יוסף כי ישית אביו (שם שם יז)'
+        self.assertEqual(self.recover(text, 'שם שם יז', ['Genesis 48:17', 'Leviticus 11:17']),
+                         'Genesis 48:17')
+        self.assertIsNone(self.recover(text, 'שם שם יז', failed=True))
+        self.assertIsNone(self.recover(text, 'שם שם יז', ['Genesis 47:17', 'Leviticus 11:17']))
+
+    def test_wrong_numbers_and_short_quotes_never_produce_an_address(self):
+        for text, anchor in [
+                ('הוות לאביו בן כסיל (שם יט יד)', 'שם יט יד'),
+                ('הוות לאביו בן (שם יט יג)', 'שם יט יג'),
+                ('הוות לאביו בן כסיל (שם שם יט יג)', 'שם שם יט יג')]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.recover(text, anchor, failed=True))
+
+    def test_a_phrase_repeated_in_another_book_is_not_unique(self):
+        text = 'הוות לאביו בן כסיל (שם יט יג)'
+        books = lb._tanakh_quote_books() + (('Other', ' הוות לאביו בן כסיל '),)
+        with mock.patch.object(lb, '_tanakh_quote_books', return_value=books):
+            self.assertIsNone(self.recover(text, 'שם יט יג', failed=True))
+
+    def test_quotes_of_different_books_on_the_two_sides_are_ambiguous(self):
+        text = 'הוות לאביו בן כסיל (שם יט יג) וירא ישראל את בני יוסף'
+        self.assertIsNone(self.recover(text, 'שם יט יג', failed=True))
+
+    def test_a_short_two_verse_quote_keeps_its_printed_start_address(self):
+        text = VERSES['Proverbs 19:13'] + '. ' + VERSES['Proverbs 19:14'] + '. (שם יט יג)'
+        self.assertEqual(self.recover(text, 'שם יט יג', failed=True), 'Proverbs 19:13')
+        # The same words behind another citation cannot identify the current one.
+        text = VERSES['Proverbs 19:13'] + ' (שם יט יד) פירוש הדברים (שם יט יג)'
+        self.assertIsNone(self.recover(text, 'שם יט יג', failed=True))
+
+    def test_only_proven_quoted_tokens_lose_their_title_reading(self):
+        words = ['רש"י', 'הוות', 'לאביו', 'בן', 'כסיל', 'כתב', 'בית']
+        self.assertEqual(lb.unquoted_clause_words(words, {' הוות לאביו בן כסיל '}),
+                         ['רש"י', 'כתב', 'בית'])
 
 
 class ExplicitListsTest(unittest.TestCase):
@@ -266,6 +324,27 @@ class ExplicitListsTest(unittest.TestCase):
             self.assertEqual(record.source_hash, lb.content_hash(text))
         self.assertIs(history.last_emitted_ref, previous)
         self.assertEqual(history.previous_citation[4].normal(), 'Deuteronomy 14:7')
+
+
+class BiblicalCorpusTest(unittest.TestCase):
+    def corpus(self, count, empty=False):
+        indexes = [NS(title=str(i), categories=['Tanakh', 'Torah']) for i in range(count)]
+        indexes.append(NS(title='ancillary complex work', categories=['Tanakh', 'Masorah']))
+        model = types.ModuleType('sefaria.model')
+        model.library = NS(get_indexes_in_category=lambda *a, **kw: indexes)
+        lb._tanakh_quote_books.cache_clear()
+        self.addCleanup(lb._tanakh_quote_books.cache_clear)
+        def text(title):
+            self.assertNotEqual(title, 'ancillary complex work')
+            return '' if empty and title == '0' else ' quoted text '
+        with mock.patch.dict(sys.modules, {'sefaria.model': model}), \
+                mock.patch.object(lb, '_hebrew_book_quote_text', side_effect=text):
+            return lb._tanakh_quote_books()
+
+    def test_global_evidence_requires_every_base_book_and_excludes_ancillary_works(self):
+        self.assertEqual(len(self.corpus(39)), 39)
+        self.assertEqual(self.corpus(38), ())
+        self.assertEqual(self.corpus(39, empty=True), ())
 
 
 class NamedCommentaryTest(unittest.TestCase):
