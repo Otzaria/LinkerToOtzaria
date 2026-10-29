@@ -565,6 +565,11 @@ class ClauseTest(unittest.TestCase):
         self.assertTrue(self.names(["מתני'", 'ירושלמי', 'שבת'],
                                    prefixes=("מתני'", 'ירושלמי')))
 
+    def test_an_authors_explicit_self_reference_is_not_gemara(self):
+        for word in ('כתבתי', 'שכתבתי', 'כתבנו', 'שפירשתי', 'פירשנו', 'ביארתי', 'שביארנו'):
+            with self.subTest(word=word):
+                self.assertTrue(self.names(['וכבר', word]))
+
 
 class OwnTractateDafBatchTest(unittest.TestCase):
     """The recovered daf is an absolute link and stays out of the "שם" history."""

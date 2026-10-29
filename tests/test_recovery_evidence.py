@@ -356,8 +356,8 @@ class BiblicalCorpusTest(unittest.TestCase):
 
 
 class NamedCommentaryTest(unittest.TestCase):
-    def relative(self, before, anchor, blocked):
-        text = before + anchor + ') המשך הדברים'
+    def relative(self, before, anchor, blocked, after=') המשך הדברים'):
+        text = before + anchor + after
         rr = citation(text, anchor, [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ח.')], failed=True)
         linker = NS(bulk_link=lambda *_a, **_kw: [NS(resolved_refs=[rr])])
         guard = mock.Mock(return_value=blocked)
@@ -385,6 +385,14 @@ class NamedCommentaryTest(unittest.TestCase):
         records, guard = self.relative('כדאמרינן ', 'לעיל דף ח.', blocked=True)
         self.assertEqual([r.target_ref for r in records], ['Shabbat 8a'])
         guard.assert_not_called()
+
+    def test_a_dh_outside_the_relative_ner_span_is_not_gemara(self):
+        for tail in (') [בד"ה בדרבנן וכו\']', ') בד״ה בדרבנן', '</small>) <b>[בד"ה בדרבנן]</b>'):
+            with self.subTest(tail=tail):
+                records, _ = self.relative('כדמוכח ', 'לעיל (דף ח.', False, tail)
+                self.assertEqual(records, [])
+        records, _ = self.relative('כדמוכח ', 'לעיל (דף ח.', False, ') גבי הדין הזה')
+        self.assertEqual([r.target_ref for r in records], ['Shabbat 8a'])
 
     def test_a_named_rashi_target_is_never_replaced_by_gemara(self):
         text = 'רש"י (דף כא.)'

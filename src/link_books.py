@@ -2247,8 +2247,10 @@ def process_batch(
                     # actual cited work outside the NER span: "כתב הרא\"ש ז\"ל
                     # לעיל (ח' ע\"א)" cites Rosh, not the underlying Gemara.
                     # Older whole-anchor forms keep their published behavior.
-                    if "(" in _bare_anchor(anchor_text) and clause_names_elsewhere(
-                            linker, clause_before(content, start), ref, ref.index.title):
+                    if "(" in _bare_anchor(anchor_text) and (
+                            clause_names_elsewhere(
+                                linker, clause_before(content, start), ref, ref.index.title)
+                            or commentary_qualifier_after(content, end)):
                         continue
                     target_ref = ref.normal()
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
@@ -3469,6 +3471,21 @@ def clause_before(content: str, start: int) -> list[str]:
     return text[cut + 1:].split()
 
 
+def commentary_qualifier_after(content: str, end: int) -> bool:
+    """A DH immediately after the citation still qualifies its cited work.
+
+    E.g. Tosafot Shevuot604: 'לעיל (דף מו.) [בד"ה בדרבנן וכו׳]'. The
+    qualifier may sit outside the NER entity but rules out a bare Gemara target.
+    """
+    tail = content[end:]
+    close = _QUOTE_CLOSE_RE.match(tail)
+    if close:
+        tail = tail[close.end():]
+    tail = " ".join(_QUOTE_HTML_TAG_RE.sub(" ", tail).replace(
+        "״", '"').replace("׳", "'").split()).lstrip(" ([")
+    return bool(re.match(r"(?:ב?ד[\"']ה)(?![א-ת])", tail))
+
+
 def untitled_daf_anchor(anchor_text, source_ref, ref_factory):
     """One explicit amud, with only an ibid, Gemara or verified chapter locator.
 
@@ -3555,6 +3572,9 @@ def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> b
         return True  # do not silently forget a work named earlier in a long clause
     own = {tractate, f"Mishnah {tractate}"}
     words = [_NIQQUD_RE.sub("", word) for word in words]
+    if any(re.search(r"(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו)(?![א-ת])", word)
+           for word in words):
+        return True  # an author's self-reference is not the underlying Gemara
     if any(re.match(r"ו?[במ]?(?:פירש|פירוש|כתב|כתבו|חידושי|ספר)(?![א-ת])", word) for word in words):
         return True
     for i, word in enumerate(words):
