@@ -1,7 +1,9 @@
 import os
 import re
 import sys
+import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -282,6 +284,336 @@ class UntitledRelativeRefTest(unittest.TestCase):
         self.assertIsNone(link_books.untitled_relative_ref("(לקמן יא:)", None, TalmudRef))
         self.assertIsNone(link_books.untitled_relative_ref(
             "(לקמן יא:)", TalmudRef("Tosafot on Shabbat 3a:1:1"), None))
+
+
+class ParenthesizedRelativeRefTest(unittest.TestCase):
+    """"לעיל (דף לו:)": the address opens a parenthesis after the relative word (Otzaria/otzaria#3450)."""
+
+    def test_the_reported_forms_link_to_the_own_tractate(self):
+        for anchor, source, expected in [
+            ("לעיל (דף לו:", "Tosafot on Shabbat 38b:8:1", ("Shabbat 36b", "above")),
+            ("לעיל (דף לו:)", "Tosafot on Shabbat 38b:8:1", ("Shabbat 36b", "above")),
+            ("לקמן (דף כא.", "Tosafot on Shabbat 12a:1:1", ("Shabbat 21a", "below")),
+            ("ולקמן ( דף ח:", "Shabbat 3a:2", ("Shabbat 8b", "below")),
+            ("דלעיל (ד.", "Tosafot on Shabbat 5a:1:1", ("Shabbat 4a", "above")),
+        ]:
+            with self.subTest(anchor=anchor):
+                found = link_books.untitled_relative_ref(anchor, TalmudRef(source), TalmudRef)
+                self.assertEqual((found[0].normal(), found[1]), expected)
+        found = link_books.own_tractate_relative_ref(
+            "לקמן (גיטין דף כג:", TalmudRef("Rashi on Gittin 3a:14:1"), TalmudRef)
+        self.assertEqual((found[0].normal(), found[1]), ("Gittin 23b", "below"))
+
+    def test_the_parenthesis_relaxes_no_other_rule(self):
+        for anchor, source in [
+            ("לעיל (דף לו:", "Tosafot on Shabbat 30a:1:1"),
+            ("לקמן (דף לו: ושם", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן (קיב", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן ((דף לו:", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן (שם", "Tosafot on Shabbat 3a:1:1"),
+            ("בגמרא לקמן (דף יג.", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן (דף לו:", "Rif Gittin 3a:1"),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(link_books.untitled_relative_ref(anchor, TalmudRef(source), TalmudRef))
+
+
+class _Chapter:
+    """A chapter of a TalmudRef tractate, from one amud to another (inclusive)."""
+
+    def __init__(self, first, last):
+        self.first, self.last = TalmudRef(first).sections[0], TalmudRef(last).sections[0]
+
+    def overlaps(self, ref):
+        return ref.sections[0] <= self.last and self.first <= ref.toSections[0]
+
+
+# Shabbat: chapter 1 is 2a-20b, chapter 2 (במה מדליקין) 20b-36b, chapter 3 36b-47b.
+_SHABBAT_CHAPTERS = (
+    (_Chapter("Shabbat 2a", "Shabbat 20b"), frozenset({"פרק ראשון", "פ\"ק", "פרק יציאות השבת"})),
+    (_Chapter("Shabbat 20b", "Shabbat 36b"), frozenset({"פרק שני", "פ\"ב", "ספ\"ב", "פרק במה מדליקין"})),
+    (_Chapter("Shabbat 36b", "Shabbat 47b"), frozenset({"פרק שלישי", "פ\"ג", "פרק כירה"})),
+)
+
+
+class ChapterLocatedRelativeRefTest(unittest.TestCase):
+    """"בספ"ב (לקמן דף יט:)": a chapter phrase and a relative word frame one address (Otzaria/otzaria#3450)."""
+
+    def recover(self, anchor, source="Tosafot on Shabbat 3a:1:1"):
+        with mock.patch.object(link_books, "_book_chapters", lambda _title: _SHABBAT_CHAPTERS):
+            found = link_books.chapter_located_relative_ref(anchor, TalmudRef(source), TalmudRef)
+        return None if found is None else (found[0].normal(), found[1])
+
+    def test_a_chapter_containing_the_address_frames_it(self):
+        for anchor, source, expected in [
+            ("בספ\"ב (לקמן דף לו.", "Tosafot on Shabbat 3a:1:1", ("Shabbat 36a", "below")),
+            ("בפ\"ב (לקמן דף כא:", "Tosafot on Shabbat 3a:1:1", ("Shabbat 21b", "below")),
+            ("לקמן פ\"ג (דף מ.", "Tosafot on Shabbat 3a:1:1", ("Shabbat 40a", "below")),
+            ("לעיל בפרק במה מדליקין (דף כא:", "Tosafot on Shabbat 40a:1:1", ("Shabbat 21b", "above")),
+            ("לקמן בפירקין (דף ה.", "Tosafot on Shabbat 3a:1:1", ("Shabbat 5a", "below")),
+            ("לעיל (בפירקין) (דף ה.", "Tosafot on Shabbat 9a:1:1", None),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertEqual(self.recover(anchor, source), expected)
+
+    def test_a_chapter_elsewhere_or_another_chapter_drops_the_citation(self):
+        for anchor, source in [
+            ("בפ\"ב (לקמן דף מ.", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן בפירקין (דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן בפרק הזהב (דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("בגמרא (לקמן דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("בפ\"ב (לעיל דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("לקמן בפ\"ב (לקמן דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("בפ\"ב (דף כא:", "Tosafot on Shabbat 3a:1:1"),
+            ("בפ\"ב (לקמן דף כא: ושם", "Tosafot on Shabbat 3a:1:1"),
+            ("בפ\"ב (לקמן דף כא:", "Rif Gittin 3a:1"),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertIsNone(self.recover(anchor, source))
+
+    def test_the_own_chapter_needs_a_source_on_one_amud(self):
+        source = TalmudRef("Tosafot on Shabbat 3a:1:1")
+        source.toSections = [source.sections[0] + 1]
+        with mock.patch.object(link_books, "_book_chapters", lambda _title: _SHABBAT_CHAPTERS):
+            self.assertIsNone(link_books.chapter_located_relative_ref(
+                "לקמן בפירקין (דף ה.", source, TalmudRef))
+
+
+def _candidates(*refs):
+    """A resolved citation offering these refs: one is unambiguous, several are ambiguous."""
+    found = [TalmudRef(ref) for ref in refs]
+    return types.SimpleNamespace(
+        is_ambiguous=len(found) > 1, ref=found[0] if len(found) == 1 else None,
+        resolved_raw_refs=[types.SimpleNamespace(ref=ref) for ref in found])
+
+
+class OwnTractateDafRefTest(unittest.TestCase):
+    """"(דף כא.)" in a commentary on a tractate names the tractate's own daf (Otzaria/otzaria#3450)."""
+
+    def own(self, anchor, *candidates, source="Tosafot on Shabbat 18a:3:1", **guards):
+        with mock.patch.object(link_books, "_book_chapters", lambda _title: _SHABBAT_CHAPTERS):
+            found = link_books.own_tractate_daf_ref(
+                _candidates(*candidates), anchor, 0, len(anchor), TalmudRef(source), TalmudRef, **guards)
+        return None if found is None else found.normal()
+
+    def test_the_tractate_wins_over_its_commentary(self):
+        for anchor, candidates, expected in [
+            ("דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 21a"), "Shabbat 21a"),
+            ("התם (דף כז.", ("Shabbat 27a", "Tosafot on Shabbat 27a"), "Shabbat 27a"),
+            ("בפירקין (דף ט.", ("Shabbat 9a", "Tosafot on Shabbat 9a"), "Shabbat 9a"),
+            ("שם לט:", ("Shabbat 39b", "Tosafot on Shabbat 39b"), "Shabbat 39b"),
+            ("בפ\"ב (דף כא:", ("Tosafot on Shabbat 21b",), "Shabbat 21b"),
+            ("בגמרא (דף טז.", ("Shabbat 16a",), "Shabbat 16a"),
+            ("(דף כא ע\"ב)", ("Shabbat 21b", "Tosafot on Shabbat 21b"), "Shabbat 21b"),
+        ]:
+            with self.subTest(anchor=anchor):
+                self.assertEqual(self.own(anchor, *candidates), expected)
+        self.assertEqual(self.own("(דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                  source="Shabbat 3a:2"), "Shabbat 21a")
+
+    def test_any_doubt_keeps_the_drop(self):
+        for anchor, candidates in [
+            # Another tractate is a real alternative.
+            ("דף כא.", ("Shabbat 21a", "Gittin 21a")),
+            # Sefaria read another address than the anchor spells.
+            ("דף כא.", ("Shabbat 22a", "Tosafot on Shabbat 22a")),
+            ("דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 22a")),
+            # No amud, a lone amud, an unclear numeral, or nothing spelled at the end.
+            ("דף כא", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+            ("ע\"א", ("Shabbat 18a", "Tosafot on Shabbat 18a")),
+            ("דף כא. ושם", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+            ("דבכא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+            # A relative citation keeps its own recovery, which checks the side.
+            ("לקמן (דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+            # A chapter locator is evidence only when it actually contains the daf.
+            ("בפ\"ב (דף יד:", ("Tosafot on Shabbat 14b",)),
+            # An explicitly named commentary is never the base Gemara.
+            ("בתוספות (דף כא.", ("Tosafot on Shabbat 21a",)),
+            ("ברש\"י (דף כא.", ("Shabbat 21a", "Tosafot on Shabbat 21a")),
+        ]:
+            with self.subTest(anchor=anchor, candidates=candidates):
+                self.assertIsNone(self.own(anchor, *candidates))
+        # A segment is not the amud the anchor names.
+        segment = _candidates("Shabbat 21a", "Tosafot on Shabbat 21a")
+        segment.resolved_raw_refs[0].ref.sections = segment.resolved_raw_refs[0].ref.sections + [3]
+        self.assertIsNone(link_books.own_tractate_daf_ref(
+            segment, "דף כא.", 0, 6, TalmudRef("Tosafot on Shabbat 18a:3:1"), TalmudRef))
+        self.assertIsNone(self.own("דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                   source="Rif Gittin 3a:1"))
+        self.assertIsNone(link_books.own_tractate_daf_ref(
+            _candidates("Shabbat 21a"), "דף כא.", 0, 6, None, TalmudRef))
+        no_candidate = types.SimpleNamespace(is_ambiguous=False, ref=None, resolved_raw_refs=[])
+        self.assertIsNone(link_books.own_tractate_daf_ref(
+            no_candidate, "דף כא.", 0, 6, TalmudRef("Tosafot on Shabbat 18a:3:1"), TalmudRef))
+
+    def test_the_text_around_may_place_the_address_elsewhere(self):
+        own, other = [TalmudRef("Shabbat 3a")], [TalmudRef("Gittin 3a")]
+        ibid = _candidates("Shabbat 21a", "Tosafot on Shabbat 21a")
+        ibid.raw_entity = types.SimpleNamespace(raw_ref_parts=[types.SimpleNamespace(
+            type=types.SimpleNamespace(name="IBID"))])
+        source = TalmudRef("Tosafot on Shabbat 18a:3:1")
+
+        def with_ibid(preceding):
+            found = link_books.own_tractate_daf_ref(ibid, "שם דף כא.", 0, 9, source, TalmudRef,
+                                                    preceding=preceding)
+            return None if found is None else found.normal()
+
+        # "שם" continues the citation before it, which must be read in this tractate.
+        self.assertEqual(with_ibid((None, False, own)), "Shabbat 21a")
+        self.assertEqual(with_ibid((" ועוד הרבה מילים כאן ", False, own)), "Shabbat 21a")
+        for preceding in (None, (None, True, []), (None, False, other), (None, False, own + other)):
+            with self.subTest(preceding=preceding):
+                self.assertIsNone(with_ibid(preceding))
+        # A citation just before an untitled address may be what it continues.
+        for gap in (" ו", " </small>(", " ודף "):
+            with self.subTest(gap=gap):
+                self.assertIsNone(self.own("דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                           preceding=(gap, False, other)))
+                self.assertIsNone(self.own("דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                           preceding=(gap, True, [])))
+                self.assertEqual(self.own("דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                          preceding=(gap, False, own)), "Shabbat 21a")
+        self.assertEqual(self.own("דף כא.", "Shabbat 21a", "Tosafot on Shabbat 21a",
+                                  preceding=(" ועוד הרבה מילים כאן ", True, [])), "Shabbat 21a")
+        # The clause before the anchor may name another tractate or chapter.
+        seen = []
+
+        def names_elsewhere(words, target, tractate):
+            seen.append((words, target.normal(), tractate))
+            return "ובערכין" in words
+
+        content = "ומפרש התם. ובערכין (טז.) ומפרש"
+        start = content.index("טז.")
+        rr = _candidates("Shabbat 16a", "Tosafot on Shabbat 16a")
+        self.assertIsNone(link_books.own_tractate_daf_ref(
+            rr, content, start, start + 3, source, TalmudRef, names_elsewhere=names_elsewhere))
+        self.assertEqual(seen, [(["ובערכין"], "Shabbat 16a", "Shabbat")])
+        content = content.replace("ובערכין", "ובגמרא")
+        start = content.index("טז.")
+        self.assertEqual(link_books.own_tractate_daf_ref(
+            rr, content, start, start + 3, source, TalmudRef, names_elsewhere=names_elsewhere).normal(),
+            "Shabbat 16a")
+
+
+class ClauseTest(unittest.TestCase):
+    def test_the_clause_runs_back_to_its_start_past_its_own_parenthesis(self):
+        content = "(זבחים פח:) ובערכין <b>פרק</b> יש בערכין להקל ולהחמיר (טז.) ומפרש"
+        self.assertEqual(link_books.clause_before(content, content.index("טז.")),
+                         ["ובערכין", "פרק", "יש", "בערכין", "להקל", "ולהחמיר"])
+        content = "א ב ג ד ה ו ז ח ט י [דף ס"
+        self.assertEqual(link_books.clause_before(content, content.index("דף")),
+                         ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י"])
+        self.assertEqual(link_books.clause_before("כך. (דף ס", 5), [])
+
+    def names(self, words, chapters=(), prefixes=()):
+        """Leaves: a book's title (no sections), or a chapter of one (Shabbat ch. 2 is 20b-36b)."""
+        leaves = {"ובערכין": [("Arakhin", "Talmud", None)], "בשבת": [("Shabbat", "Talmud", None)],
+                  "משנה שבת": [("Mishnah Shabbat", "Mishnah", None)],
+                  "ירושלמי שבת": [("Jerusalem Talmud Shabbat", "Talmud", None)],
+                  "ויקרא": [("Leviticus", "Tanakh", None)],
+                  "ר' ישמעאל": [("Avodah Zarah", "Talmud", (90, 100))],
+                  "במה מדליקין": [("Shabbat", "Talmud", (40, 72))]}
+        leaf = object()
+
+        class Titles:
+            def __init__(self, key):
+                self.nodes = []
+                for title, category, span in leaves[key]:
+                    named = types.SimpleNamespace(
+                        index=types.SimpleNamespace(title=title, categories=[category]),
+                        sections=[span[0]] if span else [],
+                        overlaps=lambda ref, span=span: span[0] <= ref.sections[0] <= span[1])
+                    self.nodes.append(types.SimpleNamespace(ref=lambda named=named: named))
+
+            def __contains__(self, key):
+                return key is leaf
+
+            def __getitem__(self, key):
+                return self.nodes
+
+        trie = types.SimpleNamespace(get_continuations=lambda key, allow_partial: (
+            (Titles(key), None) if key in leaves else ({}, None) if key in prefixes else (None, None)))
+        linker = types.SimpleNamespace(_ref_resolver=types.SimpleNamespace(get_ref_part_title_trie=lambda: trie))
+        ref_part = types.ModuleType("sefaria.model.linker.ref_part")
+        ref_part.LEAF_TRIE_ENTRY = leaf
+        with mock.patch.dict(sys.modules, {"sefaria": types.ModuleType("sefaria"),
+                                           "sefaria.model": types.ModuleType("sefaria.model"),
+                                           "sefaria.model.linker": types.ModuleType("sefaria.model.linker"),
+                                           "sefaria.model.linker.ref_part": ref_part}), \
+                mock.patch.object(link_books, "named_chapters",
+                                  lambda text, _ref: chapters if text in ("בפ' הוציאו לו", "פרק במה מדליקין") else ()):
+            return link_books.clause_names_elsewhere(linker, words, TalmudRef("Shabbat 16a"), "Shabbat")
+
+    def test_another_tractate_or_chapter_places_it_elsewhere(self):
+        self.assertTrue(self.names(["ומפרש", "ובערכין"]))
+        self.assertTrue(self.names(["ירושלמי", "שבת"]))
+        self.assertTrue(self.names(["ובגמרא", "פרק", "יש", "בערכין"]))
+        self.assertTrue(self.names(["דאמרינן", "ר'", "ישמעאל"]))
+        # A chapter of this tractate that does not contain the address.
+        self.assertTrue(self.names(["כדאמרינן", "במה", "מדליקין"]))
+        inside = types.SimpleNamespace(overlaps=lambda _ref: True)
+        outside = types.SimpleNamespace(overlaps=lambda _ref: False)
+        self.assertTrue(self.names(["ומפורש", "בפ'", "הוציאו", "לו", "את", "הכף"], chapters=(outside,)))
+        self.assertFalse(self.names(["ומפורש", "בפ'", "הוציאו", "לו", "את", "הכף"], chapters=(inside,)))
+        for words in (["ומפרש", "התם"], ["בשבת"], ["משנה", "שבת"], ["ויקרא"], ["בְּשַׁבָּת"], [],
+                      ["ור'", "ר'", "ישמעאל", "לא", "בעי"]):
+            with self.subTest(words=words):
+                self.assertFalse(self.names(words))
+
+    def test_a_generic_mishnah_descriptor_is_not_a_named_commentary(self):
+        self.assertFalse(self.names(["מתני'", 'כדתנן'], prefixes=("מתני'",)))
+        self.assertTrue(self.names(["מתני'", 'ירושלמי', 'שבת'],
+                                   prefixes=("מתני'", 'ירושלמי')))
+
+    def test_an_authors_explicit_self_reference_is_not_gemara(self):
+        for word in ('כתבתי', 'שכתבתי', 'כתבנו', 'שפירשתי', 'פירשנו', 'ביארתי', 'שביארנו'):
+            with self.subTest(word=word):
+                self.assertTrue(self.names(['וכבר', word]))
+
+
+class OwnTractateDafBatchTest(unittest.TestCase):
+    """The recovered daf is an absolute link and stays out of the "שם" history."""
+
+    def records(self, first_failed):
+        lines = [(0, "כדאיתא (שבת דף ג.) ושם", "Tosafot on Shabbat 18a:2:1"),
+                 (1, "כדאמרינן התם (דף כז.) גבי", "Tosafot on Shabbat 18a:3:1")]
+
+        def citation(rr, content, anchor, *parts):
+            start = content.index(anchor)
+            rr.context_type = None
+            rr.raw_entity = types.SimpleNamespace(
+                span=types.SimpleNamespace(range=(start, start + len(anchor))),
+                raw_ref_parts=[types.SimpleNamespace(type=types.SimpleNamespace(name=p)) for p in parts])
+            return rr
+
+        first = citation(_candidates("Shabbat 3a"), lines[0][1], "שבת דף ג.", "NAMED", "NUMBERED")
+        first.resolution_failed = first_failed
+        ibid = citation(_candidates("Shabbat 27a", "Tosafot on Shabbat 27a"), lines[1][1], "התם (דף כז.",
+                        "IBID", "NUMBERED")
+        ibid.resolution_failed = False
+        resolver = types.SimpleNamespace(_ibid_history=types.SimpleNamespace(last_refs=[]),
+                                         reset_ibid_history=lambda: None)
+        linker = types.SimpleNamespace(_ref_resolver=resolver, bulk_link=lambda *_a, **_k: [
+            types.SimpleNamespace(resolved_refs=[first]), types.SimpleNamespace(resolved_refs=[ibid])])
+        history = link_books.IbidContext()
+        history.last_emitted_ref = TalmudRef("Shabbat 3a")
+        with mock.patch.multiple(link_books, clause_names_elsewhere=lambda *_: False,
+                                 parenthesized_address=lambda *_: None, chapter_led_citation=lambda *_: None):
+            records, _ = link_books.process_batch(
+                linker, link_books.BookKey("Sefaria", "תוספות על שבת"), lines, lambda _line: None,
+                context_ref_factory=TalmudRef, ibid_context=history)
+        return [(r.line_index, r.target_ref, lines[r.line_index][1][r.start:r.end], r.context_ref,
+                 r.relative_direction) for r in records], history.last_emitted_ref
+
+    def test_an_ambiguous_daf_in_a_commentary_links_to_the_tractate(self):
+        records, antecedent = self.records(first_failed=False)
+        self.assertEqual(records, [(0, "Shabbat 3a", "שבת דף ג.", None, None),
+                                   (1, "Shabbat 27a", "התם (דף כז.", None, None)])
+        self.assertIsNone(antecedent)
+
+    def test_an_ibid_after_a_failed_citation_stays_unlinked(self):
+        records, _ = self.records(first_failed=True)
+        self.assertEqual(records, [])
 
 
 class TalmudPositionsTest(unittest.TestCase):

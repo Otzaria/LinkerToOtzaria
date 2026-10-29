@@ -530,7 +530,7 @@ class WorkerMemoryTest(unittest.TestCase):
                 return [type("Doc", (), {"resolved_refs": [failed(*s) for s in spans]})()]
 
         previous = TalmudRef("Shabbat 2a")
-        ibid = type("Ibid", (), {"last_emitted_ref": previous,
+        ibid = type("Ibid", (), {"last_emitted_ref": previous, "previous_citation": None,
                                  "resolve": lambda _self, _linker, invoke: invoke()})()
         records, _ = link_books.process_batch(
             Linker(), link_books.BookKey("Sefaria", "תוספות על שבת"),
@@ -568,7 +568,7 @@ class WorkerMemoryTest(unittest.TestCase):
                 return [type("Doc", (), {"resolved_refs": [failed(*s) for s in spans]})()]
 
         previous = TanakhRef("דברים ל ו")
-        ibid = type("Ibid", (), {"last_emitted_ref": previous,
+        ibid = type("Ibid", (), {"last_emitted_ref": previous, "previous_citation": None,
                                  "resolve": lambda _self, _linker, invoke: invoke()})()
         records, _ = link_books.process_batch(
             Linker(), link_books.BookKey("OnYourWayToOtzaria", "שבע נתיבות התורה"),
@@ -606,7 +606,7 @@ class WorkerMemoryTest(unittest.TestCase):
         linker = NS(bulk_link=lambda *_args, **_kwargs: [NS(resolved_refs=refs)])
 
         def run():
-            ibid = NS(last_emitted_ref=None, resolve=lambda _linker, invoke: invoke())
+            ibid = NS(last_emitted_ref=None, previous_citation=None, resolve=lambda _linker, invoke: invoke())
             records, _ = link_books.process_batch(
                 linker, link_books.BookKey("test", "test"), [(0, content, None)],
                 lambda _line: None, context_ref_factory=TanakhRef, ibid_context=ibid,
@@ -655,7 +655,7 @@ class WorkerMemoryTest(unittest.TestCase):
         def run(talmud_positions):
             linker = Linker()
             previous = TalmudRef("Gittin 2a")
-            ibid = type("Ibid", (), {"last_emitted_ref": previous,
+            ibid = type("Ibid", (), {"last_emitted_ref": previous, "previous_citation": None,
                                      "resolve": lambda _self, _linker, invoke: invoke()})()
             records, _ = link_books.process_batch(
                 linker, book, lines[1:], lambda _line: None, context_ref_factory=TalmudRef,
