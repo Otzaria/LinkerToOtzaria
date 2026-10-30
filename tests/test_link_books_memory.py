@@ -544,11 +544,12 @@ class WorkerMemoryTest(unittest.TestCase):
         previous = TalmudRef("Shabbat 2a")
         ibid = type("Ibid", (), {"last_emitted_ref": previous, "previous_citation": None,
                                  "resolve": lambda _self, _linker, invoke: invoke()})()
-        records, _ = link_books.process_batch(
-            Linker(), link_books.BookKey("Sefaria", "תוספות על שבת"),
-            [(7, content, "Tosafot on Shabbat 3a:1:1")], lambda _line: None,
-            context_ref_factory=TalmudRef, ibid_context=ibid,
-        )
+        with mock.patch.object(link_books, 'clause_names_elsewhere', return_value=False):
+            records, _ = link_books.process_batch(
+                Linker(), link_books.BookKey("Sefaria", "תוספות על שבת"),
+                [(7, content, "Tosafot on Shabbat 3a:1:1")], lambda _line: None,
+                context_ref_factory=TalmudRef, ibid_context=ibid,
+            )
         self.assertEqual(
             [(r.start, r.target_ref, r.relative_direction, r.context_ref) for r in records],
             [(spans[0][0], "Shabbat 11b", "below", "Tosafot on Shabbat 3a:1:1"),
