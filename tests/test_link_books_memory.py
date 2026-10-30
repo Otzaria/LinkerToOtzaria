@@ -289,6 +289,12 @@ class WorkerMemoryTest(unittest.TestCase):
             def __init__(self, text):
                 self.text = text
 
+            def is_empty(self):
+                return False
+
+            def is_range(self):
+                return False
+
             def normal(self):
                 return self.text
 
@@ -424,6 +430,12 @@ class WorkerMemoryTest(unittest.TestCase):
 
             def order_id(self):
                 return self.order
+
+            def is_empty(self):
+                return False
+
+            def is_range(self):
+                return False
 
             def normal(self):
                 return self.normalized
@@ -582,8 +594,8 @@ class WorkerMemoryTest(unittest.TestCase):
         self.assertTrue(all(r.source_hash == link_books.content_hash(content) for r in records))
         self.assertIs(ibid.last_emitted_ref, previous)
 
-    def test_geresh_recovery_keeps_existing_successful_and_ambiguous_ibid_links(self):
-        """Adding the failed Psalms citation must not change either Deuteronomy link."""
+    def test_failed_or_rebuilt_citation_cannot_seed_an_unrelated_ibid(self):
+        """An unrelated remembered work must not override the immediately cited work."""
         from types import SimpleNamespace as NS
         from test_citation_plausibility import TanakhRef
 
@@ -616,11 +628,11 @@ class WorkerMemoryTest(unittest.TestCase):
         with mock.patch.object(link_books, "geresh_numeral_ref", return_value=None):
             before, before_last = run()
         after, after_last = run()
-        self.assertEqual(len(before), 2)
-        self.assertEqual(len(after), 3)
+        self.assertEqual(len(before), 1)
+        self.assertEqual(len(after), 2)
         self.assertEqual(before, [r for r in after if r["target_ref"] != "Psalms 18:31"])
-        self.assertIs(before_last, continuation)
-        self.assertIs(after_last, continuation)
+        self.assertIsNone(before_last)
+        self.assertIsNone(after_last)
 
     def test_a_non_sefaria_talmud_commentary_recovers_by_its_daf_heading(self):
         """"(לקמן ד.)" in a Dicta "X על גיטין" line under "דף ג:" links to Gittin 4a."""

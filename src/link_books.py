@@ -17,6 +17,7 @@ Run (from the Sefaria-Project dir, its venv, with the NER server up):
 from __future__ import annotations
 
 import argparse
+import collections
 import functools
 import hashlib
 import itertools
@@ -2168,6 +2169,8 @@ def process_batch(
                 own_daf = None
                 contextual = None
                 quoted_ibid = None
+                code_commentary = None
+                bounded_chapter = None
                 if ref is None and not failed:
                     own_daf = own_tractate_daf_ref(
                         rr, content, start, end, context_object, context_ref_factory,
@@ -2253,11 +2256,31 @@ def process_batch(
                             or commentary_qualifier_after(content, end)):
                         continue
                     target_ref = ref.normal()
+                code_commentary = explicit_code_commentary_ref(
+                    ref, content, start, end, context_ref_factory)
+                if code_commentary is not None:
+                    ref, target_ref = code_commentary, code_commentary.normal()
+                    relative_direction = None
+                if not target_has_text(ref):
+                    bounded_chapter = named_chapter_content_ref(ref, rr, anchor_text, context_ref_factory)
+                    if bounded_chapter is None:
+                        continue
+                    ref, target_ref = bounded_chapter, bounded_chapter.normal()
+                if (base_code_has_commentary_address(ref, anchor_text)
+                        or has_unproven_code_number(rr, ref)):
+                    continue
+                if (has_raw_part_type(rr, "IBID") and not has_raw_part_type(rr, "NAMED")
+                        and (antecedent is None or ref.index.title != antecedent.index.title)
+                        and own_daf is None and recovered is None
+                        and quoted_ibid is None):
+                    # A rejected citation is not a book/address antecedent, even
+                    # when Sefaria kept it in its private resolver history.
+                    continue
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
                 if (recovered is None and regrouped is None and spelled is None
                         and own_daf is None and contextual is None and quoted_ibid is None
-                        and not text_rebuilt):
+                        and not text_rebuilt and code_commentary is None and bounded_chapter is None):
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -4012,6 +4035,171 @@ def is_mishnah_chapter_misread(target_ref: str, anchor_text: str) -> bool:
         and "משנה" not in anchor_text
         and bool(_MISHNAH_CHAPTER_MISREAD_RE.search(anchor_text))
     )
+
+
+# Availability belongs to the final target, including legacy and relative paths.
+# Cache by type and normal form so transport batches do not repeat Mongo queries.
+_TARGET_TEXT_CACHE = collections.OrderedDict()
+
+
+def target_has_text(ref) -> bool:
+    key = type(ref), ref.normal()
+    if key in _TARGET_TEXT_CACHE:
+        _TARGET_TEXT_CACHE.move_to_end(key)
+        return _TARGET_TEXT_CACHE[key]
+    # is_empty() on an out-of-bounds range can report False: validate endpoints
+    # independently instead of treating any text in its parent as range evidence.
+    try:
+        # A resolver-created virtual Ref can print a normal form that its schema
+        # cannot parse back (four Nefesh David addresses in the published payload).
+        # Schema-backed refs must round-trip before exporting that canonical key.
+        canonical = True
+        if getattr(ref, "index_node", None) is not None:
+            parsed = type(ref)(key[1])
+            canonical = parsed.normal() == key[1]
+            ref = parsed
+        available = canonical and not ref.is_empty()
+        if available and ref.is_range():
+            available = not ref.starting_ref().is_empty() and not ref.ending_ref().is_empty()
+    except Exception as error:
+        # Some upstream alt-structure nodes have an invalid reversed boundary.
+        # That is an unusable citation; database/transport failures still fail the book.
+        if not any(cls.__name__ == "InputError" and cls.__module__ == "sefaria.system.exceptions"
+                   for cls in type(error).__mro__):
+            raise
+        available = False
+    _TARGET_TEXT_CACHE[key] = available
+    if len(_TARGET_TEXT_CACHE) > 65_536:
+        _TARGET_TEXT_CACHE.popitem(last=False)
+    return available
+
+
+@functools.lru_cache(maxsize=4096)
+def _chapter_content_bounds(normal: str) -> str | None:
+    from sefaria.model import Ref
+
+    scope = Ref(normal)
+    leaves = scope.all_segment_refs()
+    if not leaves or len(leaves) > 10_000:
+        return None
+    available = [leaf for leaf in leaves if scope.contains(leaf) and target_has_text(leaf)]
+    if not available:
+        return None
+    result = available[0].to(available[-1])
+    # This is strictly an intersection with the declared chapter, never a move
+    # to the first line of its parent or to text after the requested range.
+    if not scope.contains(result) or not target_has_text(result):
+        return None
+    return result.normal()
+
+
+def _chapter_marker(text):
+    return (_CHAPTER_LEAD_RE.match(text) or re.match(
+        r'ו?[במ]?(?:[רס]?פ["״][א-ת]+|ריש|סוף|שלהי)(?![א-ת])', text))
+
+
+def named_chapter_content_ref(ref, rr, anchor, ref_factory):
+    """Repair empty boundaries only for an independently named canonical chapter.
+
+    Sefaria copies Bavli chapter bounds to its commentaries, whose first/last
+    comment may be absent. Do not treat that as a malformed printed segment:
+    keep the actual text INSIDE the chapter. An explicit numeric range has no
+    such evidence and must retain both endpoints or stay omitted.
+    """
+    if (ref_factory is None or _top_category(ref.index) != "Talmud"
+            or not ref.is_range() or ref.is_segment_level()
+            or not getattr(ref.index, "base_text_titles", None)):
+        return None
+    parts = getattr(rr.raw_entity, "raw_ref_parts", ())
+    if any(getattr(getattr(part, "type", None), "name", None) == "NUMBERED"
+           and not _chapter_marker(_plain_quotes(getattr(part, "text", ""))) for part in parts):
+        return None
+    words = [word.strip("()[],:;.") for word in
+             _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", anchor))).split()]
+    if len(words) > 16 or not any(_chapter_marker(word) for word in words):
+        return None
+    spelled = set().union(*(chapter_lead_names(" ".join(words[i:j]))
+                            for i in range(len(words)) for j in range(i + 1, min(len(words), i + 8) + 1)))
+    if not any(whole.normal() == ref.normal() and spelled & names
+               for whole, names in _book_chapters(ref.index.title)):
+        return None
+    normal = _chapter_content_bounds(ref.normal())
+    return None if normal is None else ref_factory(normal)
+
+
+def base_code_has_commentary_address(ref, anchor: str) -> bool:
+    # A se'if katan belongs to a commentator, not to the Shulchan Arukh itself.
+    # Do not guess the commentator or remove the prefix and invent a base se'if.
+    return getattr(getattr(ref, "index", None), "title", "").startswith("Shulchan Arukh,") and bool(re.search(
+        r'(?<![א-ת])ו?[בלמכ]?(?:ס[\"\']ק|סק[\"\']|סעיף\s+קטן)', _plain_quotes(anchor)))
+
+
+_CODE_NOTE_ADDRESS_RE = re.compile(
+    r"ו?ב?(?P<part>יו[\"]ד|חו[\"]מ)\s+"
+    r"(?:(?:סימן|סי['\"]?)\s+)?(?P<chapter>[א-ת'\"]{1,7})\s+"
+    r"(?:ס[\"]ק\s*|סק[\"]?\s*|סעיף\s+קטן\s+)(?P<note>[א-ת'\"]{1,7})")
+_CODE_NOTE_AUTHOR_RE = re.compile(
+    r"(?<![א-ת])ו?[כשה]?(?:ה)?(?P<author>ש[\"]ך|ט[\"]ז)"
+    r"(?:\s+ז[\"]ל)?(?:\s+שם)?(?:\s+בסי'\s+הנ[\"]ל)?$")
+
+
+def explicit_code_commentary_ref(ref, content, start, end, ref_factory):
+    """Recover a named Shakh/Taz with its own printed siman and se'if katan.
+
+    The full anchor must spell the code, both canonical numbers and the note
+    marker. A directly attributed, unambiguous author must precede it. Never
+    subtract100 from the resolver's result or infer an author from a source book.
+    """
+    if ref_factory is None or not getattr(getattr(ref, "index", None), "title", "").startswith("Shulchan Arukh,"):
+        return None
+    def plain(text):
+        return _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", text)))
+    anchor = plain(content[start:end]).strip(" ()[]")
+    address = _CODE_NOTE_ADDRESS_RE.fullmatch(anchor)
+    if address is None:
+        return None
+    before = plain(content[:start]).rstrip(" ([")
+    cut = max(before.rfind(mark) for mark in ".:;()[]")
+    before = before[cut + 1:].strip()
+    author = _CODE_NOTE_AUTHOR_RE.search(before)
+    if author is None:
+        return None
+    lead = before[:author.start()].strip()
+    if lead and not re.search(r"(?:כתב|ועיין|ועי'|ולא|קושית|קושיית)$", lead):
+        return None  # e.g. "הבית יוסף והש\"ך": more than one attributed work
+    letters = [re.sub(r"[^א-ת]", "", address[k]) for k in ("chapter", "note")]
+    # These are the existing strict canonical numerals (below400). Other spellings
+    # stay omitted rather than expanding the accepted address language implicitly.
+    if not all(_is_canonical_numeral(n) for n in letters):
+        return None
+    chapter, note = map(_numeral, letters)
+    part = {"יו\"ד": "Yoreh De'ah", 'חו\"מ': "Choshen Mishpat"}[address["part"]]
+    if ref.index.title != f"Shulchan Arukh, {part}":
+        return None
+    title = {"ש\"ך": "Siftei Kohen", 'ט\"ז': "Turei Zahav"}[author["author"]]
+    title = f"{title} on Shulchan Arukh, {part}"
+    try:
+        candidate = ref_factory(f"{title} {chapter}:{note}")
+    except Exception:
+        return None
+    if (candidate.index.title != title or candidate.sections != [chapter, note]
+            or candidate.toSections != candidate.sections or not target_has_text(candidate)):
+        return None
+    return candidate
+
+
+def has_unproven_code_number(rr, ref) -> bool:
+    """Do not turn common prose/halakhot abbreviations into Rambam segments.
+
+    Bare לא / כ׳ / מה״נ may be prose, unlike explicitly labelled הלכה כ׳.
+    Omit the ambiguous reading; a coincidentally existing segment proves no number.
+    """
+    if not getattr(getattr(ref, "index", None), "title", "").startswith("Mishneh Torah,"):
+        return False
+    return any(getattr(getattr(part, "type", None), "name", None) == "NUMBERED"
+               and _NIQQUD_RE.sub("", _plain_quotes(getattr(part, "text", ""))).strip()
+               in {"לא", "כ'", 'מה"נ'}
+               for part in getattr(rr.raw_entity, "raw_ref_parts", ()))
 
 
 def is_implausible_citation_target(target_ref: str, anchor_text: str) -> bool:
