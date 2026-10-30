@@ -3607,7 +3607,7 @@ _RELATIVE_DISCOURSE_ABBREVIATIONS = frozenset({
 _NATIVE_CITATION_VERB_RE = re.compile(
     r'ו?[דכבש]?(?:אמרינן|אמר|קאמר|פריך|תנא|תנן|תניא|משמע|מוכח|מייתי|כדאמר|כדמוכח)')
 _CITED_WRITING_RE = re.compile(
-    r'ו?[דכבשמל]?(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו|כתב|כתבו|פירש|פירשו|פירוש|לפרש|פי[\"\']|כמ[\"]ש|כמש[\"]כ)')
+    r'ו?[דכבשמל]?(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו|כתב|כתבו|פירש|פירשו|פירוש|לפרש|מפרש|מפרשים|פי[\"\']|כמ[\"]ש|כמש[\"]כ)')
 
 
 def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target):
@@ -3674,8 +3674,8 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
             if not any(chapter.overlaps(target) for j in range(i + 1, len(words) + 1)
                        for chapter in named_chapters(' '.join(words[i:j]), target)):
                 return False
-        if common:
-            continue
+        # A discourse abbreviation is not enough to dismiss a complete known
+        # commentary alias (e.g. מ״מ / ע״י). Those ambiguous readings stay out.
         for length in (1, 2, 3):
             if i + length > len(words):
                 break
@@ -3695,13 +3695,26 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
                 if _top_category(named.index) not in ('Talmud', 'Mishnah', 'Tosefta') or named.sections:
                     continue  # a bare sage/chapter alias is not a work locator
                 if named.index.title not in own:
+                    # כר׳ + a sage's name is "like Rabbi ...", not the
+                    # title-trie's coincidentally identical Keritot abbreviation.
+                    if (word in ("כר'", "וכר'") and i + 1 < len(words)
+                            and words[i + 1] in {
+                                'ישמעאל', 'אחא', 'עקיבא', 'מאיר', 'יהודה', 'יוסי',
+                                'שמעון', 'אליעזר', 'אלעזר', 'יהושע', 'יוחנן', 'חנינא'}):
+                        continue
                     # The resolver's permissive title trie also reads כפרה as
                     # Mishnah Parah, הכלים as Kelim and כר׳ as Keritot. Require
                     # an actual tractate name, with only a locator prefix.
                     title = named.index.get_title('he')
                     title = re.sub(r'^(?:משנה|תוספתא)\s+', '', title)
                     phrase = ' '.join(words[i:i + length])
-                    if not re.fullmatch(rf'ו?[במדל]?{re.escape(_plain_quotes(title))}', phrase):
+                    base = re.sub(r'^(?:Mishnah|Tosefta) ', '', named.index.title)
+                    aliases = {title}
+                    for canonical, book_aliases, _ in _bavli_chapter_books():
+                        if canonical == base:
+                            aliases.update(book_aliases)
+                    if not any(re.fullmatch(rf'ו?[במדל]?{re.escape(_plain_quotes(alias))}', phrase)
+                               for alias in aliases):
                         continue
                     # "משבת קפריש" describes the Shabbat prohibition, not a tractate.
                     if named.index.title in ('Shabbat', 'Mishnah Shabbat') and any(

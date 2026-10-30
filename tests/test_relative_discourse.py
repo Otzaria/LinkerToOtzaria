@@ -16,16 +16,17 @@ class RelativeDiscourseTest(unittest.TestCase):
         def continuation(phrase, **_):
             if phrase != named:
                 return None, None
-            if phrase == 'רש"י':
-                index = NS(title='Rashi on Shabbat', dependence='Commentary', base_text_titles=['Shabbat'])
+            if phrase in ('רש"י', 'מ"מ'):
+                index = NS(title='Rashi on Shabbat' if phrase == 'רש"י' else 'Magid Mishneh', dependence='Commentary', base_text_titles=['Shabbat'])
             else:
-                index = NS(title='Gittin', categories=['Talmud'], base_text_titles=[],
-                           get_title=lambda _: 'גיטין')
+                index = NS(title=('Avodah Zarah' if phrase == 'בע"ז' else 'Mishnah Keritot' if phrase == "כר'" else 'Gittin'), categories=['Talmud'], base_text_titles=[],
+                           get_title=lambda _: 'עבודה זרה' if phrase == 'בע"ז' else 'משנה כריתות' if phrase == "כר'" else 'גיטין')
             return {LEAF: [NS(ref=lambda: NS(index=index, sections=[]))]}, None
         linker = NS(_ref_resolver=NS(get_ref_part_title_trie=lambda: NS(get_continuations=continuation)))
         mod = types.ModuleType('sefaria.model.linker.ref_part');mod.LEAF_TRIE_ENTRY = LEAF
         with mock.patch.dict(sys.modules, {'sefaria.model.linker.ref_part': mod}), \
-                mock.patch.object(lb, 'clause_names_elsewhere', return_value=True):
+                mock.patch.object(lb, 'clause_names_elsewhere', return_value=True), \
+                mock.patch.object(lb, '_bavli_chapter_books', return_value=(('Avodah Zarah', ('עבודה זרה', 'ע״ז'), ()), ('Keritot', ("כר'",), ()))):
             return lb.relative_clause_is_clear(linker, rr, text, *rr.raw_entity.span.range,
                                                TalmudRef('Tosafot on Shabbat 3a:1:1'), TalmudRef('Shabbat 8a'))
 
@@ -33,15 +34,18 @@ class RelativeDiscourseTest(unittest.TestCase):
         self.assertTrue(self.scope('פירש בקונטרס אלא דרשא גופה פריך '))
         self.assertTrue(self.scope('פירש רש"י בענין אחר והא אמרינן ', named='רש"י'))
         self.assertTrue(self.scope('וא"ת אע"פ דכה"ג אמר '))
+        self.assertTrue(self.scope("לעולם כר' ישמעאל – ", named="כר'"))
 
     def test_governing_commentary_and_self_references_stay_out_of_gemara(self):
         for before in ('בקונטרס גופיה פירש ', 'פירשתי ', 'ועיין בר"ן ',
-                       'רש"י אמר ', 'עיין ע"י ', 'הגאון ר"ע '):
+                       'רש"י אמר ', 'עיין ע"י ', 'הגאון ר"ע ', 'ר"ע מפרש '):
             with self.subTest(before=before):
                 self.assertFalse(self.scope(before, named='רש"י'))
 
     def test_an_explicit_other_tractate_is_not_erased_by_a_later_gemara_verb(self):
         self.assertFalse(self.scope('בגיטין הא אמרינן ', named='בגיטין'))
+        self.assertFalse(self.scope('בע"ז הא אמרינן ', named='בע"ז'))
+        self.assertFalse(self.scope('מ"מ הא אמרינן ', named='מ"מ'))
 
     def test_a_following_dh_never_selects_the_base_gemara(self):
         self.assertFalse(self.scope('כדמוכח ', after=') [בד"ה בדרבנן וכו\']'))
