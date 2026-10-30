@@ -298,6 +298,12 @@ class _Ref:
         self._normal = normal
         self.index = type("Index", (), {"title": normal.split(" ")[0]})()
 
+    def is_empty(self):
+        return False
+
+    def is_range(self):
+        return False
+
     def normal(self):
         return self._normal
 

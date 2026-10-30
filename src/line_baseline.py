@@ -37,7 +37,7 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 # longer be reused safely when another line in the same book changed.  Keep this
 # deliberately broad: a needless full-book pass costs time; a stale ibid target is
 # a silent wrong link.  The linker is still free to reject ordinary uses of the word.
-_IBID_TOKEN_RE = re.compile(r"(?<![א-ת])שם(?![א-ת])")
+_IBID_TOKEN_RE = re.compile(r"(?<![א-ת])ו?[בכלמש]?שם(?![א-ת])")
 # Canonical Hebrew Bavli tractate titles; the planner must not import Sefaria.
 # The resolver shares this gate and still validates the actual index metadata.
 _BAVLI_HE_TITLES = frozenset({

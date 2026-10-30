@@ -109,6 +109,12 @@ class _TalmudRef:
             raise ValueError(text)
         self.text = text
 
+    def is_empty(self):
+        return False
+
+    def is_range(self):
+        return False
+
     def normal(self):
         return self.text
 
@@ -229,6 +235,12 @@ class _Amudim:
         if text not in self.SPANS:
             raise ValueError(text)
         self.text = text
+
+    def is_empty(self):
+        return False
+
+    def is_range(self):
+        return False
 
     def normal(self):
         return self.text
@@ -406,7 +418,8 @@ _TRIE = {
 
 def _ref(normal, category):
     index = types.SimpleNamespace(title=normal.rsplit(" ", 1)[0], categories=category, base_text_titles=[])
-    return types.SimpleNamespace(index=index, normal=lambda: normal, is_talmud=lambda: category[0] == "Talmud")
+    return types.SimpleNamespace(index=index, normal=lambda: normal, is_talmud=lambda: category[0] == "Talmud",
+                                 is_empty=lambda: False, is_range=lambda: False)
 
 
 class LeadNamesOtherWorksTest(unittest.TestCase):
