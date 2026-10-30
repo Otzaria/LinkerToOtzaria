@@ -39766,5 +39766,5 @@
 "source_name": "yam-HaHachmaToOtzaria"
 }
 ],
-"engine_fingerprint": "dump=44e55916743983b8;engine_src=e3599195a9566a5c;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0"
+"engine_fingerprint": "dump=44e55916743983b8;engine_src=fdab1bf508a0bf8c;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0"
 }
