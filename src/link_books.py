@@ -3699,7 +3699,7 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
                     # title-trie's coincidentally identical Keritot abbreviation.
                     if (word in ("כר'", "וכר'") and i + 1 < len(words)
                             and words[i + 1] in {
-                                'ישמעאל', 'אחא', 'עקיבא', 'מאיר', 'יהודה', 'יוסי',
+                                'ישמעאל', 'אבא', 'אחא', 'עקיבא', 'מאיר', 'יהודה', 'יוסי',
                                 'שמעון', 'אליעזר', 'אלעזר', 'יהושע', 'יוחנן', 'חנינא'}):
                         continue
                     # The resolver's permissive title trie also reads כפרה as

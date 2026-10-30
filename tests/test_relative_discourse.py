@@ -34,7 +34,9 @@ class RelativeDiscourseTest(unittest.TestCase):
         self.assertTrue(self.scope('פירש בקונטרס אלא דרשא גופה פריך '))
         self.assertTrue(self.scope('פירש רש"י בענין אחר והא אמרינן ', named='רש"י'))
         self.assertTrue(self.scope('וא"ת אע"פ דכה"ג אמר '))
-        self.assertTrue(self.scope("לעולם כר' ישמעאל – ", named="כר'"))
+        for phrase in ("לעולם כר' ישמעאל – ", "משמע דהלכה כר' אבא דקאמר ",
+                       "כמאן כר' אחא אמרינן "):
+            self.assertTrue(self.scope(phrase, named="כר'"))
 
     def test_governing_commentary_and_self_references_stay_out_of_gemara(self):
         for before in ('בקונטרס גופיה פירש ', 'פירשתי ', 'ועיין בר"ן ',
