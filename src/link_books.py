@@ -2172,6 +2172,7 @@ def process_batch(
                 code_commentary = None
                 bounded_chapter = None
                 own_ibid = False
+                supported_biblical = False
                 source_relative = explicit_own_relative_ref(
                     linker, rr, content, start, end, context_object, context_ref_factory)
                 if source_relative is not None:
@@ -2290,8 +2291,11 @@ def process_batch(
                         or abbreviated_biblical_ibid_ref(
                             linker, rr, content, start, end, context_ref_factory))
                     if quoted_ibid is None:
-                        continue
-                    ref, target_ref = quoted_ibid, quoted_ibid.normal()
+                        supported_biblical = resolved_biblical_ibid_is_supported(rr, ref, content, start, end)
+                        if not supported_biblical:
+                            continue
+                    else:
+                        ref, target_ref = quoted_ibid, quoted_ibid.normal()
                 if not target_has_text(ref):
                     bounded_chapter = named_chapter_content_ref(
                         ref, rr, anchor_text, context_ref_factory, content=content, end=end, source_ref=context_object)
@@ -2304,7 +2308,7 @@ def process_batch(
                 if (has_raw_part_type(rr, "IBID") and not has_raw_part_type(rr, "NAMED")
                         and (antecedent is None or ref.index.title != antecedent.index.title)
                         and own_daf is None and recovered is None
-                        and quoted_ibid is None and not own_ibid):
+                        and quoted_ibid is None and not own_ibid and not supported_biblical):
                     # A rejected citation is not a book/address antecedent, even
                     # when Sefaria kept it in its private resolver history.
                     continue
@@ -3996,6 +4000,69 @@ def quoted_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):
         if any(phrase in verse for phrase in phrases):
             found[ref.normal()] = ref
     return next(iter(found.values())) if len(found) == 1 else None
+
+
+def resolved_biblical_ibid_is_supported(rr, ref, content, start, end):
+    """Validate an existing, unambiguous Bible verse; never choose a new target.
+
+    Sefaria legitimately returns to an earlier biblical book after quoting
+    another work. Do not discard its sole successful candidate solely because
+    that book differs from the immediately preceding citation. Require the exact
+    printed address and two distinct adjoining words in the verse, in order.
+    Short/imprecise quotations can support this existing address; recovering a
+    failed or ambiguous address still requires the stronger global-quote proof.
+    """
+    if (not has_raw_part_type(rr, 'IBID') or has_raw_part_type(rr, 'NAMED')
+            or getattr(rr, 'resolution_failed', False) or getattr(rr, 'is_ambiguous', False)
+            or getattr(rr, 'text_rebuilt', False) or _top_category(ref.index) != 'Tanakh'
+            or getattr(ref.index, 'dependence', None) or len(ref.sections) != 2
+            or list(ref.sections) != list(ref.toSections)):
+        return False
+    refs = candidate_refs(rr)
+    if len(refs) != 1 or refs[0].normal() != ref.normal():
+        return False
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(content[start:end])))
+    match = _IBID_VERSE_RE.fullmatch(anchor)
+    if match is None or (match['verse_label'] and match['second']):
+        return False
+    tokens = [re.sub(r'[^א-ת]', '', match[n]) for n in ('first', 'second') if match[n]]
+    if (len(match['ibids'].split()) == 2 and len(tokens) != 1
+            or not all(_is_canonical_numeral(token) for token in tokens)
+            or list(ref.sections[-len(tokens):]) != [_numeral(token) for token in tokens]):
+        return False
+    words = clause_before(content, start)
+    for word in words:
+        word = _plain_quotes(word).strip('(),;:.')
+        if (_CITED_WRITING_RE.fullmatch(word)
+                or re.fullmatch(r'ו?(?:עיין|ראה|ספר|בספר|חידושי|בחידושי|ירושלמי)', word)
+                or re.fullmatch(r'ו?[בכלמד]?(?:קונטרס|קונט\')', word)):
+            return False
+        # Unknown writer acronyms cannot borrow this existing-candidate rule.
+        if re.search(r'[א-ת]["\'][א-ת]', word):
+            variants = {word[n:] for n in range(3)
+                        if n == 0 or re.fullmatch(r'[ובכלמדשה]{1,2}', word[:n])}
+            common = _RELATIVE_DISCOURSE_ABBREVIATIONS | {'הקב"ה', 'רבש"ע', 'ד"א', 'זש"ה', 'א"ר', 'ז"ה'}
+            if not variants & common and not _is_canonical_numeral(re.sub(r'[^א-ת]', '', word)):
+                return False
+    verse = _hebrew_ref_words(ref.normal())
+    before, after = adjoining_quote_words(content, start, end)
+    prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start]).rstrip(' ([')
+    if '<' in prefix or '>' in prefix:
+        return False
+    # Square brackets can contain an editor's corrected quotation, as in
+    # Aggadat Bereshit136. Retain them for validation of the existing candidate;
+    # a prior parenthesized citation still ends the adjoining evidence.
+    cut = max(prefix.rfind(mark) for mark in '()')
+    editorial = hebrew_quote_words(prefix[cut + 1:])[-8:]
+    for quote in (before[-8:], after[:8], editorial):
+        # Ordered support tolerates omitted articles/abbreviated divine names,
+        # without rewriting the quote, numbers, or upstream candidate.
+        for i, one in enumerate(quote):
+            for two in quote[i + 1:]:
+                if one != two and any(one == word and two in verse[j + 1:]
+                                      for j, word in enumerate(verse)):
+                    return True
+    return False
 
 
 def abbreviated_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):

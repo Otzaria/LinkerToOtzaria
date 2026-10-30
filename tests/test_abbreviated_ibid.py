@@ -99,3 +99,31 @@ class ExplicitVerseLabelTest(QuoteFixtures, unittest.TestCase):
             rr=citation(text,'שם פסוק מח יג',[('IBID','שם'),('NUMBERED','פסוק מח'),('NUMBERED','יג')],
                         refs=[Verse('Genesis 48:13')])
             self.assertIsNone(lb.quoted_biblical_ibid_ref(None,rr,text,*rr.raw_entity.span.range,Verse))
+
+class ExistingResolvedBiblicalTest(QuoteFixtures, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        verse='ותאמר אל העבד מי האיש הלזה ההלך בשדה לקראתנו'
+        mock.patch.dict(VERSES,{'Genesis 24:65':verse}).start()
+        mock.patch.dict(BOOKS,{'Genesis':BOOKS['Genesis']+' '+verse}).start()
+
+    def supported(self,quote='מי איש הלזה',address='שם כד סה',refs=('Genesis 24:65',),failed=False):
+        text=quote+' ('+address+')'
+        parts=[('IBID' if w=='שם' else 'NUMBERED',w) for w in address.split()]
+        rr=citation(text,address,parts,refs=[Verse(r) for r in refs],failed=failed)
+        return lb.resolved_biblical_ibid_is_supported(rr,Verse(refs[0]),text,*rr.raw_entity.span.range)
+
+    def test_existing_exact_address_can_survive_an_imprecise_quote(self):
+        self.assertTrue(self.supported())
+        self.assertTrue(self.supported(quote='כמו שאמר (כלומר) [מי איש הלזה] וגו׳'))
+
+    def test_this_rule_cannot_choose_a_target_or_change_printed_numbers(self):
+        self.assertFalse(self.supported(refs=('Genesis 24:65','Genesis 48:8')))
+        self.assertFalse(self.supported(failed=True))
+        self.assertFalse(self.supported(address='שם כד יב'))
+        self.assertFalse(self.supported(address='שם שם'))
+
+    def test_wrong_quote_order_and_foreign_author_stay_rejected(self):
+        self.assertFalse(self.supported(quote='הלזה מי איש'))
+        self.assertFalse(self.supported(quote='הוות לאביו בן כסיל'))
+        self.assertFalse(self.supported(quote='כתב רש"י מי איש הלזה'))
