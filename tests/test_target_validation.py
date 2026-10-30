@@ -152,7 +152,8 @@ class TargetValidationTest(unittest.TestCase):
         scope.index = NS(title='Tosafot on Sukkah', categories=['Talmud', 'Bavli'], base_text_titles=['Sukkah'])
         scope.is_segment_level = lambda: False
         bounded = Ref('Tosafot on Sukkah 29b:4:1-42b:3:1')
-        with mock.patch.object(lb, '_book_chapters', return_value=((scope, {'לולב הגזול'}),)), \
+        with mock.patch.object(lb, 'chapter_book_is_proven', return_value=True), \
+                mock.patch.object(lb, '_book_chapters', return_value=((scope, {'לולב הגזול'}),)), \
                 mock.patch.object(lb, '_chapter_content_bounds', return_value=bounded.normal()) as bounds:
             anchor = 'תוספות ר"פ לולב הגזול'
             rr = citation(anchor, anchor, [('NAMED', anchor)], [scope])
@@ -165,6 +166,27 @@ class TargetValidationTest(unittest.TestCase):
             wrong = citation(explicit, explicit, [('NAMED', anchor), ('NUMBERED', 'דף מב')], [scope])
             self.assertIsNone(lb.named_chapter_content_ref(scope, wrong, explicit, lambda _: bounded))
             self.assertEqual(bounds.call_count, 1)
+
+    def test_a_shared_chapter_name_or_ordinal_cannot_choose_the_tractate(self):
+        chapter = lambda names: ((None, set(names)),)
+        books = (
+            ('Shabbat', ('שבת',), chapter({'הזורק', 'פרק הזורק', 'שני'})),
+            ('Gittin', ('גיטין', 'גטין'), chapter({'הזורק גט', 'פרק הזורק גט', 'שני'})),
+            ('Bekhorot', ('בכורות',), chapter({'בתרא'})),
+            ('Kiddushin', ('קידושין',), chapter({'בתרא'})),
+            ('Bava Batra', ('בבא בתרא',), chapter({'חזקת הבתים'})),
+        )
+        def target(base):
+            return NS(index=NS(base_text_titles=[base]))
+        lb._chapter_alias_works.cache_clear()
+        self.addCleanup(lb._chapter_alias_works.cache_clear)
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=books):
+            self.assertFalse(lb.chapter_book_is_proven(target('Shabbat'), "בתוס' בפרק הזורק", ''))
+            self.assertFalse(lb.chapter_book_is_proven(target('Kiddushin'), "רש\"י בפ' בתרא", ' דבכורות'))
+            self.assertFalse(lb.chapter_book_is_proven(target('Shabbat'), 'תוספות בפרק שני', ' דגיטין'))
+            self.assertTrue(lb.chapter_book_is_proven(target('Gittin'), 'תוספות בפרק שני', ' דגטין'))
+            self.assertTrue(lb.chapter_book_is_proven(target('Gittin'), 'תוספות בפרק הזורק דגיטין', ''))
+            self.assertTrue(lb.chapter_book_is_proven(target('Bava Batra'), 'תוספות בפרק חזקת הבתים', ''))
 
     def test_prefixed_ibids_keep_the_whole_book_history(self):
         for word in ('שם', 'ושם', 'משם', 'ומשם', 'בשם', 'כשם', 'לשם', 'ששם'):

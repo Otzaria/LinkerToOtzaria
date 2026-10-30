@@ -2262,7 +2262,8 @@ def process_batch(
                     ref, target_ref = code_commentary, code_commentary.normal()
                     relative_direction = None
                 if not target_has_text(ref):
-                    bounded_chapter = named_chapter_content_ref(ref, rr, anchor_text, context_ref_factory)
+                    bounded_chapter = named_chapter_content_ref(
+                        ref, rr, anchor_text, context_ref_factory, content=content, end=end, source_ref=context_object)
                     if bounded_chapter is None:
                         continue
                     ref, target_ref = bounded_chapter, bounded_chapter.normal()
@@ -4098,7 +4099,94 @@ def _chapter_marker(text):
         r'ו?[במ]?(?:[רס]?פ["״][א-ת]+|ריש|סוף|שלהי)(?![א-ת])', text))
 
 
-def named_chapter_content_ref(ref, rr, anchor, ref_factory):
+@functools.lru_cache(maxsize=1)
+def _bavli_chapter_books():
+    from sefaria.model import library
+    from sefaria.model.schema import NonUniqueTerm
+
+    books = []
+    for index in library.get_indexes_in_category("Bavli", include_dependant=False, full_records=True):
+        if not _bavli_tractate_itself(index):
+            continue
+        aliases = set(index.nodes.all_node_titles("he"))
+        # Linker terms also carry the printed abbreviations (ב"מ, ר"ה, גטין).
+        # Use only templates consisting of one term that identifies this book.
+        for template in index.nodes.serialize().get("match_templates", []):
+            slugs = template.get("term_slugs", [])
+            if len(slugs) == 1:
+                term = NonUniqueTerm.init(slugs[0])
+                if term is not None:
+                    aliases.update(term.get_titles("he"))
+        books.append((index.title, tuple(sorted(aliases)), _book_chapters(index.title)))
+    return tuple(books)
+
+
+@functools.lru_cache(maxsize=1)
+def _chapter_alias_works():
+    aliases = collections.defaultdict(set)
+    for title, _, chapters in _bavli_chapter_books():
+        for _, names in chapters:
+            for name in names:
+                words = name.split()
+                # Printed chapter names can abbreviate a longer canonical title:
+                # Gittin's "הזורק גט" also competes with Shabbat's "הזורק".
+                for end in range(1, len(words) + 1):
+                    aliases[" ".join(words[:end])].add(title)
+    return aliases
+
+
+def chapter_book_is_proven(ref, anchor, tail, source_ref=None) -> bool:
+    """A chapter ordinal/shared name does not independently identify its tractate.
+
+    A tractate just outside the NER span still belongs to the address ("פרק שני
+    דגיטין"). Otherwise require a chapter name unique across canonical Bavli
+    tractates, or a relative chapter in the citing work's own tractate.
+    """
+    books = _bavli_chapter_books()
+    bases = set(getattr(ref.index, "base_text_titles", None) or ())
+    target = {title for title, _, _ in books if title in bases}
+    if len(target) != 1:
+        return False
+    def plain(text):
+        return _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", text)))
+    text = plain(anchor)
+    after = plain(tail).lstrip(" )] ")
+    # Only the immediately following ד<title> (or במסכת title) can extend
+    # the address. Do not mistake a later comparison to another work for it.
+    explicit = set()
+    for title, aliases, _ in books:
+        for alias in aliases:
+            escaped = re.escape(plain(alias))
+            if (re.search(rf'(?<![א-ת])(?:ו?[במדל])?{escaped}(?![א-ת])', text)
+                    or re.match(rf'(?:ד|במסכת\s+){escaped}(?![א-ת])', after)):
+                explicit.add(title)
+    if explicit:
+        return explicit == target
+    # A source's printed relative locator can refer to its own base tractate;
+    # an arbitrary resolver ibid cannot manufacture this evidence.
+    if (source_ref is not None and bases & set(getattr(source_ref.index, "base_text_titles", None) or ())
+            and source_ref.is_talmud() and source_ref.sections and ref.sections):
+        if (re.search(r'(?<![א-ת])ו?לעיל(?![א-ת])', text)
+                and ref.toSections[0] < source_ref.sections[0]):
+            return True
+        if (re.search(r'(?<![א-ת])ו?(?:לקמן|להלן)(?![א-ת])', text)
+                and ref.sections[0] > source_ref.toSections[0]):
+            return True
+    words = [word.strip("()[],:;.") for word in text.split()]
+    anchor_words = len(words)
+    words += [word.strip("()[],:;.") for word in after.split()[:3]]
+    names = set().union(*(chapter_lead_names(" ".join(words[i:j]))
+                          for i in range(min(anchor_words, 16))
+                          for j in range(i + 1, min(len(words), i + 8) + 1)))
+    aliases = _chapter_alias_works()
+    matches = [(len(name.split()), title) for name in names for title in aliases.get(name, ())]
+    if not matches:
+        return False
+    longest = max(length for length, _ in matches)
+    return {title for length, title in matches if length == longest} == target
+
+
+def named_chapter_content_ref(ref, rr, anchor, ref_factory, *, content=None, end=None, source_ref=None):
     """Repair empty boundaries only for an independently named canonical chapter.
 
     Sefaria copies Bavli chapter bounds to its commentaries, whose first/last
@@ -4122,6 +4210,9 @@ def named_chapter_content_ref(ref, rr, anchor, ref_factory):
                             for i in range(len(words)) for j in range(i + 1, min(len(words), i + 8) + 1)))
     if not any(whole.normal() == ref.normal() and spelled & names
                for whole, names in _book_chapters(ref.index.title)):
+        return None
+    tail = "" if content is None or end is None else content[end:]
+    if not chapter_book_is_proven(ref, anchor, tail, source_ref):
         return None
     normal = _chapter_content_bounds(ref.normal())
     return None if normal is None else ref_factory(normal)
