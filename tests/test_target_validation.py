@@ -63,6 +63,13 @@ class TargetValidationTest(unittest.TestCase):
         self.assertFalse(lb.target_has_text(Ref('Proverbs 27:1-32', endpoints=(start, end))))
         self.assertTrue(lb.target_has_text(Ref('Proverbs 27:1-27', endpoints=(start, Ref('Proverbs 27:27')))))
 
+    def test_a_whole_daf_keeps_existing_text_when_one_amud_has_no_commentary(self):
+        a = Ref('Chiddushei Ramban on Shabbat 122a')
+        b = Ref('Chiddushei Ramban on Shabbat 122b', empty=True)
+        self.assertTrue(lb.target_has_text(Ref('Chiddushei Ramban on Shabbat 122', endpoints=(a, b))))
+        self.assertFalse(lb.target_has_text(Ref('Chiddushei Ramban on Shabbat 122a-122b', endpoints=(a, b))))
+        self.assertFalse(lb.target_has_text(Ref('Chiddushei Ramban on Shabbat 123', endpoints=(b, b))))
+
     def test_schema_backed_targets_must_round_trip_their_exported_key(self):
         class SchemaRef(Ref):
             index_node = object()

@@ -4041,6 +4041,7 @@ def is_mishnah_chapter_misread(target_ref: str, anchor_text: str) -> bool:
 # Availability belongs to the final target, including legacy and relative paths.
 # Cache by type and normal form so transport batches do not repeat Mongo queries.
 _TARGET_TEXT_CACHE = collections.OrderedDict()
+_EXPLICIT_TARGET_RANGE_RE = re.compile(r" \d+[ab]?(?::\d+[ab]?)*-\d+[ab]?(?::\d+[ab]?)*$")
 
 
 def target_has_text(ref) -> bool:
@@ -4061,7 +4062,13 @@ def target_has_text(ref) -> bool:
             ref = parsed
         available = canonical and not ref.is_empty()
         if available and ref.is_range():
-            available = not ref.starting_ref().is_empty() and not ref.ending_ref().is_empty()
+            start_exists = not ref.starting_ref().is_empty()
+            end_exists = not ref.ending_ref().is_empty()
+            # A canonical whole daf ("Ramban on Shabbat 122") implicitly spans
+            # both amudim; one may have no commentary. It is still a valid scope
+            # when the other has text. Explicit numeric ranges require both ends.
+            available = ((start_exists and end_exists) if _EXPLICIT_TARGET_RANGE_RE.search(key[1])
+                         else (start_exists or end_exists))
     except Exception as error:
         # Some upstream alt-structure nodes have an invalid reversed boundary.
         # That is an unusable citation; database/transport failures still fail the book.
