@@ -103,3 +103,37 @@ class ResolvedRelativeOwnershipTest(unittest.TestCase):
             with self.subTest(refs=refs):
                 self.assertEqual(self.records('וכמו שכתב הרא"ש ז"ל ',refs),[])
                 self.assertEqual([r.target_ref for r in self.records('כדאמרינן ',refs)],['Shabbat 8a'])
+
+class RelativeChapterWordsTest(unittest.TestCase):
+    scope = RelativeDiscourseTest.scope
+    def test_chapter_acronyms_require_the_printed_daf_to_lie_in_that_chapter(self):
+        for prefix in ('ומתני דפ"ג ', 'וי"ל דבפ"ג ', 'ממתניתין דס"פ שבועת הפקדון '):
+            with self.subTest(prefix=prefix), mock.patch.object(lb,'named_chapters',return_value=(NS(overlaps=lambda _:True),)):
+                self.assertTrue(self.scope(prefix))
+            with self.subTest(prefix=prefix), mock.patch.object(lb,'named_chapters',return_value=()):
+                self.assertFalse(self.scope(prefix))
+
+    def test_generic_shas_and_mishnah_words_are_not_commentary_names(self):
+        self.assertTrue(self.scope('ופשיטא ליה להש"ס לפי המסקנא דמוקי '))
+        self.assertTrue(self.scope('וכן רבא ורמי בר חמא ס"ל הכי '))
+
+class OwnCommentaryIbidTest(unittest.TestCase):
+    def proven(self,before='ובמקומה ',after=') כתבתיה',heading='<b>הלכך הדין</b> הדברים',
+               prior='Shabbat 8a',duplicate=False):
+        text=before+'שם ד"ה הלכך'+after;anchor='שם ד"ה הלכך'
+        rr=citation(text,anchor,[('IBID','שם'),('DH','ד"ה הלכך')])
+        ref=TalmudRef('Tosafot on Shabbat 8a:1:1');ref.sections=[15,1,1];ref.toSections=ref.sections[:]
+        segment=NS(normal=ref.normal,text=lambda _:NS(as_string=lambda:heading))
+        container=NS(all_segment_refs=lambda:[segment,segment] if duplicate else [segment])
+        return lb.own_commentary_ibid_is_proven(rr,ref,text,*rr.raw_entity.span.range,
+            TalmudRef('Tosafot on Shabbat 18a:1:1'),TalmudRef(prior),lambda _:container)
+
+    def test_self_dh_uses_the_offered_commentary_at_the_previous_proven_amud(self):
+        self.assertTrue(self.proven())
+
+    def test_foreign_attribution_ambiguous_heading_and_wrong_page_fail_closed(self):
+        self.assertFalse(self.proven(before='כתב הרא"ש ובמקומה '))
+        self.assertFalse(self.proven(after=') כתב הרא"ש'))
+        self.assertFalse(self.proven(heading='פסק אחר. <b>הלכך הדין</b>'))
+        self.assertFalse(self.proven(prior='Shabbat 9a'))
+        self.assertFalse(self.proven(duplicate=True))
