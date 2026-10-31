@@ -31,6 +31,12 @@ class _Ref:
     def __init__(self, normal):
         self._normal = normal
 
+    def is_empty(self):
+        return False
+
+    def is_range(self):
+        return False
+
     def normal(self):
         return self._normal
 

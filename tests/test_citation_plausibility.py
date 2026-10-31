@@ -59,6 +59,12 @@ class SpelledTalmudRefTest(unittest.TestCase):
                 raise ValueError(text)
             self.text = text
 
+        def is_empty(self):
+            return False
+
+        def is_range(self):
+            return False
+
         def normal(self):
             return self.text
 
@@ -107,6 +113,12 @@ class TalmudRef:
             "get_title": lambda _self, lang: self.HEBREW[title]})()
         self.sections = [2 * int(daf) - (amud == "a")] if daf else []
         self.toSections = self.sections
+
+    def is_empty(self):
+        return False
+
+    def is_range(self):
+        return False
 
     def normal(self):
         return self.text
@@ -739,10 +751,14 @@ class TanakhRef:
         # Like Sefaria's Ref, a verse past the end of the chapter parses but is empty.
         self.empty = values[:1] == [18] and values[-1] > 51
         self.sections = values
+        self.index = types.SimpleNamespace(title=self.TITLES[title])
         self.text = f"{self.TITLES[title]} {':'.join(map(str, values))}"
 
     def is_empty(self):
         return self.empty
+
+    def is_range(self):
+        return False
 
     def normal(self):
         return self.text

@@ -39,6 +39,9 @@ class Verse:
         self.toSections = list(self.sections)
         self._normal = normal
 
+    def is_range(self):
+        return False
+
     def normal(self):
         return self._normal
 

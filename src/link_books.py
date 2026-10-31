@@ -17,6 +17,7 @@ Run (from the Sefaria-Project dir, its venv, with the NER server up):
 from __future__ import annotations
 
 import argparse
+import collections
 import functools
 import hashlib
 import itertools
@@ -2168,6 +2169,20 @@ def process_batch(
                 own_daf = None
                 contextual = None
                 quoted_ibid = None
+                code_commentary = None
+                bounded_chapter = None
+                own_ibid = False
+                supported_biblical = False
+                source_relative = explicit_own_relative_ref(
+                    linker, rr, content, start, end, context_object, context_ref_factory)
+                if source_relative is not None:
+                    ref, relative = source_relative[0], False
+                else:
+                    scoped = explicit_relative_address(content[start:end], context_object, context_ref_factory)
+                    if scoped is not None and (ref is None or ref.index.title == scoped[0].index.title):
+                        # A successful upstream base-text guess must pass the same
+                        # work-identity proof as a failed/ambiguous recovery.
+                        continue
                 if ref is None and not failed:
                     own_daf = own_tractate_daf_ref(
                         rr, content, start, end, context_object, context_ref_factory,
@@ -2175,7 +2190,7 @@ def process_batch(
                         names_elsewhere=functools.partial(clause_names_elsewhere, linker))
                     if own_daf is not None:
                         ref, relative = own_daf, False
-                if failed:
+                if failed and source_relative is None:
                     regrouped = parenthesized_address(linker, rr, content, context_object)
                     if regrouped is not None:
                         ref, (start, end), chapters = regrouped
@@ -2196,6 +2211,9 @@ def process_batch(
                 if ref is None and not relative:
                     quoted_ibid = quoted_biblical_ibid_ref(
                         linker, rr, content, start, end, context_ref_factory)
+                    if quoted_ibid is None:
+                        quoted_ibid = abbreviated_biblical_ibid_ref(
+                            linker, rr, content, start, end, context_ref_factory)
                     ref = quoted_ibid
                 if ref is None and not relative:
                     continue
@@ -2228,7 +2246,8 @@ def process_batch(
                         if corrected is None:
                             continue
                         ref, target_ref = context_ref_factory(corrected), corrected
-                    relative_direction = relative_ref_direction(rr, ref, context_object, anchor_text)
+                    relative_direction = (source_relative[1] if source_relative is not None else
+                                          relative_ref_direction(rr, ref, context_object, anchor_text))
                 recovered = None
                 if relative and relative_direction is None:
                     position = context_object
@@ -2253,11 +2272,52 @@ def process_batch(
                             or commentary_qualifier_after(content, end)):
                         continue
                     target_ref = ref.normal()
+                code_commentary = explicit_code_commentary_ref(
+                    ref, content, start, end, context_ref_factory)
+                if code_commentary is not None:
+                    ref, target_ref = code_commentary, code_commentary.normal()
+                    relative_direction = None
+                own_ibid = own_commentary_ibid_is_proven(
+                    rr, ref, content, start, end, context_object, antecedent, context_ref_factory)
+                if (has_raw_part_type(rr, "IBID") and not has_raw_part_type(rr, "NAMED")
+                        and (antecedent is None or ref.index.title != antecedent.index.title)
+                        and own_daf is None and recovered is None and quoted_ibid is None and not own_ibid):
+                    # A successful upstream guess can still carry a different
+                    # work's private ibid history. Give it the SAME independent
+                    # quotation proof as an ambiguous/failed candidate, before
+                    # rejecting it. Availability alone is never that proof.
+                    quoted_ibid = (quoted_biblical_ibid_ref(
+                        linker, rr, content, start, end, context_ref_factory)
+                        or abbreviated_biblical_ibid_ref(
+                            linker, rr, content, start, end, context_ref_factory))
+                    if quoted_ibid is None:
+                        supported_biblical = resolved_biblical_ibid_is_supported(rr, ref, content, start, end)
+                        if not supported_biblical:
+                            continue
+                    else:
+                        ref, target_ref = quoted_ibid, quoted_ibid.normal()
+                if not target_has_text(ref):
+                    bounded_chapter = named_chapter_content_ref(
+                        ref, rr, anchor_text, context_ref_factory, content=content, end=end, source_ref=context_object)
+                    if bounded_chapter is None:
+                        continue
+                    ref, target_ref = bounded_chapter, bounded_chapter.normal()
+                if (base_code_has_commentary_address(ref, anchor_text)
+                        or has_unproven_code_number(rr, ref)):
+                    continue
+                if (has_raw_part_type(rr, "IBID") and not has_raw_part_type(rr, "NAMED")
+                        and (antecedent is None or ref.index.title != antecedent.index.title)
+                        and own_daf is None and recovered is None
+                        and quoted_ibid is None and not own_ibid and not supported_biblical):
+                    # A rejected citation is not a book/address antecedent, even
+                    # when Sefaria kept it in its private resolver history.
+                    continue
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
                 if (recovered is None and regrouped is None and spelled is None
                         and own_daf is None and contextual is None and quoted_ibid is None
-                        and not text_rebuilt):
+                        and not text_rebuilt and code_commentary is None and bounded_chapter is None
+                        and source_relative is None and not own_ibid):
                     last_ref = ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
@@ -2833,9 +2893,11 @@ def unquoted_clause_words(words, phrases):
     """
     normalized = [(word, i) for i, token in enumerate(words) for word in hebrew_quote_words(token)]
     quoted = set()
-    for j in range(len(normalized) - 3):
-        if " " + " ".join(word for word, _i in normalized[j:j + 4]) + " " in phrases:
-            quoted.update(i for _word, i in normalized[j:j + 4])
+    for phrase in phrases:
+        size = len(phrase.split())
+        for j in range(len(normalized) - size + 1):
+            if " " + " ".join(word for word, _i in normalized[j:j + size]) + " " == phrase:
+                quoted.update(i for _word, i in normalized[j:j + size])
     return [word for i, word in enumerate(words) if i not in quoted]
 
 
@@ -3557,6 +3619,259 @@ def own_tractate_daf_ref(rr, content: str, start: int, end: int, source_ref, ref
     return target
 
 
+_RELATIVE_DISCOURSE_ABBREVIATIONS = frozenset({
+    'אע"ג', 'וא"ת', 'א"ת', 'וי"ל', 'י"ל', 'צ"ל', 'א"כ', 'א"נ', 'ה"ל', 'דה"ל',
+    'וה"ל', 'והל"ל', 'הל"ל', 'דהל"ל', 'ע"י', 'ע"כ', 'א"ל', 'כ"ע', 'לכ"ע', 'דכ"ע',
+    'י"ס', 'ס"ד', 'א"נ', 'מ"מ', 'מ"ל', 'נ"מ', 'ה"נ', 'כ"ש', 'א"א', 'כדפ"ל',
+    'ת"ל', 'כר"ע', 'ר"ע', 'דל"ל', 'דה"נ', 'ה"מ', 'בד"א', 'אע"פ', 'כה"ג', 'ב"ד', 'ס"ל',
+})
+_NATIVE_CITATION_VERB_RE = re.compile(
+    r'ו?[דכבש]?(?:אמרינן|אמר|קאמר|פריך|תנא|תנן|תניא|משמע|מוכח|מייתי|כדאמר|כדמוכח)')
+_CITED_WRITING_RE = re.compile(
+    r'ו?[דכבשמל]?(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו|כתב|כתבו|פירש|פירשו|פירוש|לפרש|מפרש|מפרשים|פי[\"\']|כמ[\"]ש|כמש[\"]כ)')
+
+
+def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target):
+    """A scoped relative address may quote a discussion, not the earlier writer.
+
+    Keep unknown writer acronyms and governing commentary/self attributions out.
+    Ordinary Talmud abbreviations and unfinished regular-word title prefixes do
+    not name a book. A native discussion predicate can separate Tosafot's Rashi/
+    Rabbenu Tam attribution from the Gemara address that follows it.
+    """
+    if commentary_qualifier_after(content, end) or has_raw_part_type(rr, "DH"):
+        return False
+    words = clause_before(content, start)
+    if not clause_names_elsewhere(linker, words, target, target.index.title):
+        return True
+    if len(words) > 512:
+        return False
+    words = [_NIQQUD_RE.sub('', _plain_quotes(word)).strip('(),;:.') for word in words]
+    raw_anchor = _NIQQUD_RE.sub('', _plain_quotes(content[start:end]))
+    native = [i for i, word in enumerate(words) if _NATIVE_CITATION_VERB_RE.fullmatch(word)]
+    for i, word in enumerate(words):
+        if word in ('ההיא', 'מפרש') and (words[i + 1:] == ['ד'] or
+                i == len(words) - 1 and raw_anchor.startswith('ד')):
+            native.append(i)
+    last_native = max(native, default=-1)
+    writers = [i for i, word in enumerate(words) if _CITED_WRITING_RE.fullmatch(word)]
+    # A governing "פירש לעיל" stays a commentary even if its later text quotes Gemara.
+    if any(i > last_native for i in writers):
+        return False
+    tosafot = getattr(source_ref.index, 'title', '').startswith('Tosafot on ')
+    from sefaria.model.linker.ref_part import LEAF_TRIE_ENTRY
+    trie = linker._ref_resolver.get_ref_part_title_trie()
+    own = {target.index.title, 'Mishnah ' + target.index.title}
+    def attribution(i):
+        # "רש״י אמר לעיל" could still refer to Rashi's own discussion.
+        # Require an intervening explanation before its Gemara predicate,
+        # or the explicitly subordinate "ר״ת מפרש דלקמן ..." form.
+        explanation = (last_native - i >= 3 and any(j < last_native for j in writers))
+        subordinate = (i + 1 == last_native and words[last_native] == 'מפרש'
+                       and raw_anchor.startswith('ד')
+                       and bool(re.fullmatch(r'ו?[בכלמד]?ר"ת', words[i])))
+        return tosafot and (explanation or subordinate)
+    for i, word in enumerate(words):
+        # Do not turn a named but otherwise unknown writer into a discourse abbreviation.
+        governed = i > 0 and re.fullmatch(
+            r'ו?(?:עיין|ראה|כתב|פירש|ספר|הרב|הגאון|רבנו|רבינו)', words[i - 1])
+        variants = {word[n:] for n in range(3)
+                    if n == 0 or re.fullmatch(r'[ובכלמדשה]{1,2}', word[:n])}
+        common = bool(variants & _RELATIVE_DISCOURSE_ABBREVIATIONS) and not governed
+        rt = bool(re.fullmatch(r'ו?[בכלמד]?ר"ת', word))
+        rashi = bool(re.fullmatch(r'ו?[בכלמד]?רש"י', word))
+        kuntres = bool(re.fullmatch(r'ו?[בכלמה]?(?:קונטרס|קונט\')', word))
+        if rt or rashi or kuntres:
+            if not attribution(i):
+                return False
+            continue
+        if re.fullmatch(r'ו?[בכלמדשה]{0,2}(?:ש"ס|גמרא|גמ[\'"]?|מתני[\'"]?|מתניתין)', word):
+            continue  # a generic Gemara/Mishnah descriptor identifies no other work
+        if any(_chapter_marker(lead) for lead in chapter_lead_names(word) | {word}):
+            if not any(chapter.overlaps(target) for j in range(i + 1, len(words) + 1)
+                       for chapter in named_chapters(' '.join(words[i:j]), target)):
+                return False
+            continue  # a proven פ״ג/ס״פ is an address, not an unknown author acronym
+        if re.search(r'[א-ת]["\'][א-ת]', word) and not common:
+            letters = re.sub(r'[^א-ת]', '', word)
+            if governed or not _is_canonical_numeral(letters):
+                return False
+        if word in ('ספר', 'בספר', 'חידושי', 'בחידושי'):
+            return False
+        # A discourse abbreviation is not enough to dismiss a complete known
+        # commentary alias (e.g. מ״מ / ע״י). Those ambiguous readings stay out.
+        for length in (1, 2, 3):
+            if i + length > len(words):
+                break
+            node, _ = trie.get_continuations(' '.join(words[i:i + length]), allow_partial=False)
+            if node is None or LEAF_TRIE_ENTRY not in node:
+                continue
+            for named_node in node[LEAF_TRIE_ENTRY]:
+                try:
+                    named = named_node.ref()
+                except Exception:
+                    continue
+                if getattr(named.index, 'dependence', None) or getattr(named.index, 'base_text_titles', None):
+                    title = named.index.title
+                    if attribution(i) and (title.startswith('Rashi on ') or title == 'Sefer HaYashar'):
+                        continue
+                    return False
+                if _top_category(named.index) not in ('Talmud', 'Mishnah', 'Tosefta') or named.sections:
+                    continue  # a bare sage/chapter alias is not a work locator
+                if named.index.title not in own:
+                    if (named.index.title == 'Mishnah Parah' and word == 'פרה'
+                            and i > 0 and words[i - 1] in ('גבי', 'וגבי')
+                            and i + 1 < len(words) and words[i + 1] == 'אדומה'):
+                        continue  # the red-heifer law, not a tractate locator
+                    # כר׳ + a sage's name is "like Rabbi ...", not the
+                    # title-trie's coincidentally identical Keritot abbreviation.
+                    if (word in ("כר'", "וכר'") and i + 1 < len(words)
+                            and words[i + 1] in {
+                                'ישמעאל', 'אבא', 'אחא', 'עקיבא', 'מאיר', 'יהודה', 'יוסי',
+                                'שמעון', 'אליעזר', 'אלעזר', 'יהושע', 'יוחנן', 'חנינא'}):
+                        continue
+                    # The resolver's permissive title trie also reads כפרה as
+                    # Mishnah Parah, הכלים as Kelim and כר׳ as Keritot. Require
+                    # an actual tractate name, with only a locator prefix.
+                    title = named.index.get_title('he')
+                    title = re.sub(r'^(?:משנה|תוספתא)\s+', '', title)
+                    phrase = ' '.join(words[i:i + length])
+                    base = re.sub(r'^(?:Mishnah|Tosefta) ', '', named.index.title)
+                    aliases = {title}
+                    for canonical, book_aliases, _ in _bavli_chapter_books():
+                        if canonical == base:
+                            aliases.update(book_aliases)
+                    if not any(re.fullmatch(rf'ו?[במדל]?{re.escape(_plain_quotes(alias))}', phrase)
+                               for alias in aliases):
+                        continue
+                    # "משבת קפריש" describes the Shabbat prohibition, not a tractate.
+                    if named.index.title in ('Shabbat', 'Mishnah Shabbat') and any(
+                            w in ('קפריש', 'העלם', 'אמלאכות', 'מלאכה', 'אשבת')
+                            for w in words[max(0, i - 2):i + 3]):
+                        continue
+                    return False
+    return True
+
+
+def explicit_relative_address(anchor, source_ref, ref_factory):
+    """The printed own-tractate address; this alone proves no cited work."""
+    if not getattr(getattr(source_ref, 'index', None), 'title', '').startswith('Tosafot on '):
+        return None
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(anchor))
+    recovered = (own_tractate_relative_ref(anchor, source_ref, ref_factory)
+                 or untitled_relative_ref(anchor, source_ref, ref_factory)
+                 or chapter_located_relative_ref(anchor, source_ref, ref_factory))
+    if recovered is None:
+        # "בפ\"ב לקמן (דף יז:)": the chapter precedes the relative word,
+        # rather than sitting inside its parenthesis.
+        at = re.search(r'(?<![א-ת])[וד]?(?:לקמן|לעיל|להלן)(?![א-ת])', anchor)
+        if at is None or at.start() == 0:
+            return None
+        lead = anchor[:at.start()].strip()
+        recovered = untitled_relative_ref(anchor[at.start():], source_ref, ref_factory)
+        if recovered is None or not _chapter_marker(lead) or not any(
+                chapter.overlaps(recovered[0]) for chapter in named_chapters(lead, recovered[0])):
+            return None
+    return recovered
+
+
+def explicit_own_relative_ref(linker, rr, content, start, end, source_ref, ref_factory):
+    """One printed relative amud with independently checked source and ownership."""
+    recovered = explicit_relative_address(content[start:end], source_ref, ref_factory)
+    if recovered is None:
+        return None
+    target, direction = recovered
+    if any(not _in_tractate(candidate, target.index.title)
+           or list(candidate.sections[:1]) != list(target.sections)
+           or list(candidate.toSections[:1]) != list(target.toSections)
+           for candidate in candidate_refs(rr)):
+        return None
+    if commentary_qualifier_after(content, end):
+        return own_relative_dh_ref(linker, rr, content, start, end, source_ref,
+                                   target, direction, ref_factory)
+    if not relative_clause_is_clear(linker, rr, content, start, end, source_ref, target):
+        return None
+    return target, direction
+
+
+def opening_commentary_dh(text):
+    """Only an opening bold DH or short first sentence supplies heading evidence."""
+    for bold in re.finditer(r'<b>(.*?)</b>', text, re.S):
+        if hebrew_quote_words(text[:bold.start()]):
+            break
+        heading = hebrew_quote_words(bold[1])
+        if heading:
+            return heading
+    plain = _QUOTE_HTML_TAG_RE.sub(' ', text)
+    if '.' in plain and '<' not in plain and '>' not in plain:
+        heading = hebrew_quote_words(plain.split('.', 1)[0])
+        if 1 <= len(heading) <= 12:
+            return heading
+    return ()
+
+
+def own_commentary_ibid_is_proven(rr, ref, content, start, end, source_ref, antecedent, ref_factory):
+    """Preserve 'ובמקומה (שם ד״ה X) כתבתיה' as the citing commentary.
+
+    The prior validated base-Gemara target supplies the exact amud. An already
+    offered own-work candidate must be its sole matching opening DH there.
+    No target is reconstructed, and no self-reference becomes bare Gemara.
+    """
+    if (source_ref is None or antecedent is None or ref_factory is None
+            or not has_raw_part_type(rr, 'IBID') or not has_raw_part_type(rr, 'DH')
+            or ref.index.title != source_ref.index.title
+            or antecedent.index.title not in (getattr(source_ref.index, 'base_text_titles', None) or ())
+            or not _bavli_tractate_itself(antecedent.index)
+            or len(ref.sections) < 2 or list(ref.sections) != list(ref.toSections)
+            or not antecedent.sections or antecedent.sections[0] != antecedent.toSections[0]
+            or ref.sections[0] != antecedent.sections[0]):
+        return False
+    before = _plain_quotes(content[:start]).rstrip(' ([').split()
+    tail = _plain_quotes(content[end:]).lstrip(' )]')
+    match = re.fullmatch(r'שם\s+ד["\']ה\s+([א-ת ]+)', _plain_quotes(_bare_anchor(content[start:end])))
+    if (not before or before[-1] not in ('במקומה', 'ובמקומה') or match is None
+            or not re.match(r'כתבתיה(?![א-ת])', tail)):
+        return False
+    if any(_CITED_WRITING_RE.fullmatch(word.strip('(),;:.'))
+           or re.fullmatch(r'ו?(?:עיין|ראה|העתיק|ציטט)', word.strip('(),;:.'))
+           for word in clause_before(content, start)):
+        return False  # first-person words inside an explicitly attributed quotation are not ours
+    dh = hebrew_quote_words(match[1])
+    if not 1 <= len(dh) <= 5:
+        return False
+    amud = ref.sections[0]
+    container = ref_factory(f'{source_ref.index.title} {(amud + 1) // 2}{"a" if amud % 2 else "b"}')
+    found = [s for s in container.all_segment_refs()
+             if opening_commentary_dh(s.text('he').as_string())[:len(dh)] == dh]
+    return len(found) == 1 and found[0].normal() == ref.normal()
+
+
+def own_relative_dh_ref(linker, rr, content, start, end, source_ref, target, direction, ref_factory):
+    """A DH outside a relative anchor identifies Tosafot, never bare Gemara.
+
+    Require a candidate in the citing commentary at that exact printed amud,
+    no other work in the preceding clause, and one unique matching DH.
+    """
+    if not any(candidate.index.title == source_ref.index.title for candidate in candidate_refs(rr)):
+        return None
+    if clause_names_elsewhere(linker, clause_before(content, start), target, target.index.title):
+        return None
+    tail = _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', content[end:])).lstrip(' )]([')
+    match = re.match(r'ב?ד["\']ה\s+([א-ת ]+?)\s+(?:וכו[\'"׳״]|וגו[\'"׳״])', tail)
+    if match is None:
+        return None
+    dh = hebrew_quote_words(match[1])
+    if not 1 <= len(dh) <= 5:
+        return None
+    address = source_ref.index.title + target.normal()[len(target.index.title):]
+    container = ref_factory(address)
+    found = []
+    for segment in container.all_segment_refs():
+        if opening_commentary_dh(segment.text('he').as_string())[:len(dh)] == dh:
+            found.append(segment)
+    return (found[0], direction) if len(found) == 1 else None
+
+
 def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> bool:
     """Whether these words, ending just before target's address, may place it elsewhere.
 
@@ -3617,7 +3932,7 @@ def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> b
 
 
 _IBID_VERSE_RE = re.compile(
-    rf"(?P<ibids>שם\s+(?:שם\s+)?)(?P<first>{_UNTITLED_DAF})"
+    rf"(?P<ibids>שם\s+(?:שם\s+)?)(?P<verse_label>פסוק\s+)?(?P<first>{_UNTITLED_DAF})"
     rf"(?:\s+(?P<second>{_UNTITLED_DAF}))?")
 
 
@@ -3635,7 +3950,7 @@ def quoted_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):
         return None
     anchor = _NIQQUD_RE.sub("", _plain_quotes(_bare_anchor(content[start:end])))
     match = _IBID_VERSE_RE.fullmatch(anchor)
-    if match is None:
+    if match is None or (match['verse_label'] and match['second']):
         return None
     tokens = [re.sub(r"[^א-ת]", "", match[n]) for n in ("first", "second") if match[n]]
     if (not all(_is_canonical_numeral(t) for t in tokens)
@@ -3687,6 +4002,146 @@ def quoted_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):
     return next(iter(found.values())) if len(found) == 1 else None
 
 
+def resolved_biblical_ibid_is_supported(rr, ref, content, start, end):
+    """Validate an existing, unambiguous Bible verse; never choose a new target.
+
+    Sefaria legitimately returns to an earlier biblical book after quoting
+    another work. Do not discard its sole successful candidate solely because
+    that book differs from the immediately preceding citation. Require the exact
+    printed address and two distinct adjoining words in the verse, in order.
+    Short/imprecise quotations can support this existing address; recovering a
+    failed or ambiguous address still requires the stronger global-quote proof.
+    """
+    if (not has_raw_part_type(rr, 'IBID') or has_raw_part_type(rr, 'NAMED')
+            or getattr(rr, 'resolution_failed', False) or getattr(rr, 'is_ambiguous', False)
+            or getattr(rr, 'text_rebuilt', False) or _top_category(ref.index) != 'Tanakh'
+            or getattr(ref.index, 'dependence', None) or len(ref.sections) != 2
+            or list(ref.sections) != list(ref.toSections)):
+        return False
+    refs = candidate_refs(rr)
+    if len(refs) != 1 or refs[0].normal() != ref.normal():
+        return False
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(content[start:end])))
+    match = _IBID_VERSE_RE.fullmatch(anchor)
+    if match is None or (match['verse_label'] and match['second']):
+        return False
+    tokens = [re.sub(r'[^א-ת]', '', match[n]) for n in ('first', 'second') if match[n]]
+    if (len(match['ibids'].split()) == 2 and len(tokens) != 1
+            or not all(_is_canonical_numeral(token) for token in tokens)
+            or list(ref.sections[-len(tokens):]) != [_numeral(token) for token in tokens]):
+        return False
+    words = clause_before(content, start)
+    for word in words:
+        word = _plain_quotes(word).strip('(),;:.')
+        if (_CITED_WRITING_RE.fullmatch(word)
+                or re.fullmatch(r'ו?(?:עיין|ראה|ספר|בספר|חידושי|בחידושי|ירושלמי)', word)
+                or re.fullmatch(r'ו?[בכלמד]?(?:קונטרס|קונט\')', word)):
+            return False
+        # Unknown writer acronyms cannot borrow this existing-candidate rule.
+        if re.search(r'[א-ת]["\'][א-ת]', word):
+            variants = {word[n:] for n in range(3)
+                        if n == 0 or re.fullmatch(r'[ובכלמדשה]{1,2}', word[:n])}
+            common = _RELATIVE_DISCOURSE_ABBREVIATIONS | {'הקב"ה', 'רבש"ע', 'ד"א', 'זש"ה', 'א"ר', 'ז"ה'}
+            if not variants & common and not _is_canonical_numeral(re.sub(r'[^א-ת]', '', word)):
+                return False
+    verse = _hebrew_ref_words(ref.normal())
+    before, after = adjoining_quote_words(content, start, end)
+    prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start]).rstrip(' ([')
+    if '<' in prefix or '>' in prefix:
+        return False
+    # Square brackets can contain an editor's corrected quotation, as in
+    # Aggadat Bereshit136. Retain them for validation of the existing candidate;
+    # a prior parenthesized citation still ends the adjoining evidence.
+    cut = max(prefix.rfind(mark) for mark in '()')
+    editorial = hebrew_quote_words(prefix[cut + 1:])[-8:]
+    for quote in (before[-8:], after[:8], editorial):
+        # Ordered support tolerates omitted articles/abbreviated divine names,
+        # without rewriting the quote, numbers, or upstream candidate.
+        for i, one in enumerate(quote):
+            for two in quote[i + 1:]:
+                if one != two and any(one == word and two in verse[j + 1:]
+                                      for j, word in enumerate(verse)):
+                    return True
+    return False
+
+
+def abbreviated_biblical_ibid_ref(linker, rr, content, start, end, ref_factory):
+    """Resolve a short, explicitly abbreviated and addressed ibid quotation.
+
+    Unlike the general four-word evidence, the ENTIRE phrase must be globally
+    unique, immediately followed by וגו׳/וגומר, and contained in one existing
+    base-Bible candidate with the printed verse number. No chapter is invented.
+    """
+    if (ref_factory is None or not has_raw_part_type(rr, 'IBID')
+            or has_raw_part_type(rr, 'NAMED') or has_raw_part_type(rr, 'DH')):
+        return None
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(content[start:end])))
+    match = _IBID_VERSE_RE.fullmatch(anchor)
+    if match is None or (match['verse_label'] and match['second']):
+        return None
+    ibids = match['ibids'].split()
+    if not ((ibids == ['שם', 'שם'] and match['second'] is None)
+            or (ibids == ['שם'] and match['second'] is not None)):
+        return None
+    tokens = [re.sub(r'[^א-ת]', '', match[n]) for n in ('first', 'second') if match[n]]
+    if not all(_is_canonical_numeral(token) for token in tokens):
+        return None
+    numbers = [_numeral(token) for token in tokens]
+    refs = candidate_refs(rr)
+    if not refs or any(_top_category(r.index) != 'Tanakh'
+                       or getattr(r.index, 'dependence', None) for r in refs):
+        return None
+    prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start]).rstrip(' ([')
+    if '<' in prefix or '>' in prefix:
+        return None
+    ellipsis = re.search(r'\s+וג(?:ו[\'"׳״]|ומר)\s*[,;]?\s*$', prefix)
+    if ellipsis is None:
+        return None
+    before = prefix[:ellipsis.start()]
+    cut = max(before.rfind(mark) for mark in ',.;:!?()[]')
+    intros = list(_QUOTE_INTRO_RE.finditer(before))
+    intros += list(re.finditer(
+        r'(?<![א-ת])(?:ו?שנא[\'"׳״]|(?:מה\s+)?שכתיב|שכתוב)(?![א-ת])', before))
+    if intros:
+        cut = max(cut, max(intro.end() for intro in intros) - 1)
+    quoted = before[cut + 1:]
+    words = hebrew_quote_words(quoted)
+    if not 2 <= len(words) <= 8:
+        return None
+    # A conventional expansion in Aggadat Bereshit: "את יד ימינו" for
+    # Genesis48:14's "את ימינו". This exact expansion is the sole variant;
+    # arbitrary word deletion could erase a negation or change the subject.
+    variants = {words}
+    if words == ('וישלח', 'ישראל', 'את', 'יד', 'ימינו'):
+        variants.add(('וישלח', 'ישראל', 'את', 'ימינו'))
+    found = {}
+    for variant in variants:
+        phrase = ' ' + ' '.join(variant) + ' '
+        hits = []
+        for title, corpus in _tanakh_quote_books():
+            at = corpus.find(phrase)
+            if at >= 0:
+                hits.append(title)
+                if corpus.find(phrase, at + 1) >= 0:
+                    hits.append(title)
+        if len(hits) != 1:
+            continue
+        for ref in refs:
+            if (ref.index.title != hits[0] or len(ref.sections) != 2
+                    or list(ref.sections) != list(ref.toSections)
+                    or list(ref.sections[-len(numbers):]) != numbers):
+                continue
+            if phrase not in ' ' + ' '.join(_hebrew_ref_words(ref.normal())) + ' ':
+                continue
+            # Remove only the exact positively identified quote, retaining all
+            # author/work attributions that precede it in the same clause.
+            original = ' ' + ' '.join(words) + ' '
+            unquoted = unquoted_clause_words(clause_before(content, start), {original})
+            if not clause_names_elsewhere(linker, unquoted, ref, ref.index.title):
+                found[ref.normal()] = ref
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
 def contextual_ibid_ref(linker, rr, content, start, end, antecedent, ref_factory, *, gap=None):
     """Recover only an explicit address using the immediately preceding validated target.
 
@@ -3711,7 +4166,7 @@ def contextual_ibid_ref(linker, rr, content, start, end, antecedent, ref_factory
             or list(antecedent.sections) != list(antecedent.toSections)):
         return None
     match = _IBID_VERSE_RE.fullmatch(anchor)
-    if match is None:
+    if match is None or (match['verse_label'] and match['second']):
         return None
     tokens = [re.sub(r"[^א-ת]", "", match[name]) for name in ("first", "second") if match[name]]
     if not all(_is_canonical_numeral(token) for token in tokens):
@@ -4012,6 +4467,268 @@ def is_mishnah_chapter_misread(target_ref: str, anchor_text: str) -> bool:
         and "משנה" not in anchor_text
         and bool(_MISHNAH_CHAPTER_MISREAD_RE.search(anchor_text))
     )
+
+
+# Availability belongs to the final target, including legacy and relative paths.
+# Cache by type and normal form so transport batches do not repeat Mongo queries.
+_TARGET_TEXT_CACHE = collections.OrderedDict()
+_EXPLICIT_TARGET_RANGE_RE = re.compile(r" \d+[ab]?(?::\d+[ab]?)*-\d+[ab]?(?::\d+[ab]?)*$")
+
+
+def target_has_text(ref) -> bool:
+    key = type(ref), ref.normal()
+    if key in _TARGET_TEXT_CACHE:
+        _TARGET_TEXT_CACHE.move_to_end(key)
+        return _TARGET_TEXT_CACHE[key]
+    # is_empty() on an out-of-bounds range can report False: validate endpoints
+    # independently instead of treating any text in its parent as range evidence.
+    try:
+        # A resolver-created virtual Ref can print a normal form that its schema
+        # cannot parse back (four Nefesh David addresses in the published payload).
+        # Schema-backed refs must round-trip before exporting that canonical key.
+        canonical = True
+        if getattr(ref, "index_node", None) is not None:
+            parsed = type(ref)(key[1])
+            canonical = parsed.normal() == key[1]
+            ref = parsed
+        available = canonical and not ref.is_empty()
+        if available and ref.is_range():
+            start_exists = not ref.starting_ref().is_empty()
+            end_exists = not ref.ending_ref().is_empty()
+            # A canonical whole daf ("Ramban on Shabbat 122") implicitly spans
+            # both amudim; one may have no commentary. It is still a valid scope
+            # when the other has text. Explicit numeric ranges require both ends.
+            available = ((start_exists and end_exists) if _EXPLICIT_TARGET_RANGE_RE.search(key[1])
+                         else (start_exists or end_exists))
+    except Exception as error:
+        # Some upstream alt-structure nodes have an invalid reversed boundary.
+        # That is an unusable citation; database/transport failures still fail the book.
+        if not any(cls.__name__ == "InputError" and cls.__module__ == "sefaria.system.exceptions"
+                   for cls in type(error).__mro__):
+            raise
+        available = False
+    _TARGET_TEXT_CACHE[key] = available
+    if len(_TARGET_TEXT_CACHE) > 65_536:
+        _TARGET_TEXT_CACHE.popitem(last=False)
+    return available
+
+
+@functools.lru_cache(maxsize=4096)
+def _chapter_content_bounds(normal: str) -> str | None:
+    from sefaria.model import Ref
+
+    scope = Ref(normal)
+    leaves = scope.all_segment_refs()
+    if not leaves or len(leaves) > 10_000:
+        return None
+    available = [leaf for leaf in leaves if scope.contains(leaf) and target_has_text(leaf)]
+    if not available:
+        return None
+    result = available[0].to(available[-1])
+    # This is strictly an intersection with the declared chapter, never a move
+    # to the first line of its parent or to text after the requested range.
+    if not scope.contains(result) or not target_has_text(result):
+        return None
+    return result.normal()
+
+
+def _chapter_marker(text):
+    return (_CHAPTER_LEAD_RE.match(text) or re.match(
+        r'ו?[במ]?(?:[רס]?פ["״][א-ת]+|ריש|סוף|שלהי)(?![א-ת])', text))
+
+
+@functools.lru_cache(maxsize=1)
+def _bavli_chapter_books():
+    from sefaria.model import library
+    from sefaria.model.schema import NonUniqueTerm
+
+    books = []
+    for index in library.get_indexes_in_category("Bavli", include_dependant=False, full_records=True):
+        if not _bavli_tractate_itself(index):
+            continue
+        aliases = set(index.nodes.all_node_titles("he"))
+        # Linker terms also carry the printed abbreviations (ב"מ, ר"ה, גטין).
+        # Use only templates consisting of one term that identifies this book.
+        for template in index.nodes.serialize().get("match_templates", []):
+            slugs = template.get("term_slugs", [])
+            if len(slugs) == 1:
+                term = NonUniqueTerm.init(slugs[0])
+                if term is not None:
+                    aliases.update(term.get_titles("he"))
+        books.append((index.title, tuple(sorted(aliases)), _book_chapters(index.title)))
+    return tuple(books)
+
+
+@functools.lru_cache(maxsize=1)
+def _chapter_alias_works():
+    aliases = collections.defaultdict(set)
+    for title, _, chapters in _bavli_chapter_books():
+        for _, names in chapters:
+            for name in names:
+                words = name.split()
+                # Printed chapter names can abbreviate a longer canonical title:
+                # Gittin's "הזורק גט" also competes with Shabbat's "הזורק".
+                for end in range(1, len(words) + 1):
+                    aliases[" ".join(words[:end])].add(title)
+    return aliases
+
+
+def chapter_book_is_proven(ref, anchor, tail, source_ref=None) -> bool:
+    """A chapter ordinal/shared name does not independently identify its tractate.
+
+    A tractate just outside the NER span still belongs to the address ("פרק שני
+    דגיטין"). Otherwise require a chapter name unique across canonical Bavli
+    tractates, or a relative chapter in the citing work's own tractate.
+    """
+    books = _bavli_chapter_books()
+    bases = set(getattr(ref.index, "base_text_titles", None) or ())
+    target = {title for title, _, _ in books if title in bases}
+    if len(target) != 1:
+        return False
+    def plain(text):
+        return _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", text)))
+    text = plain(anchor)
+    after = plain(tail).lstrip(" )] ")
+    # Only the immediately following ד<title> (or במסכת title) can extend
+    # the address. Do not mistake a later comparison to another work for it.
+    explicit = set()
+    for title, aliases, _ in books:
+        for alias in aliases:
+            escaped = re.escape(plain(alias))
+            if (re.search(rf'(?<![א-ת])(?:ו?[במדל])?{escaped}(?![א-ת])', text)
+                    or re.match(rf'(?:ד|במסכת\s+){escaped}(?![א-ת])', after)):
+                explicit.add(title)
+    if explicit:
+        return explicit == target
+    # A source's printed relative locator can refer to its own base tractate;
+    # an arbitrary resolver ibid cannot manufacture this evidence.
+    if (source_ref is not None and bases & set(getattr(source_ref.index, "base_text_titles", None) or ())
+            and source_ref.is_talmud() and source_ref.sections and ref.sections):
+        if (re.search(r'(?<![א-ת])ו?לעיל(?![א-ת])', text)
+                and ref.toSections[0] < source_ref.sections[0]):
+            return True
+        if (re.search(r'(?<![א-ת])ו?(?:לקמן|להלן)(?![א-ת])', text)
+                and ref.sections[0] > source_ref.toSections[0]):
+            return True
+    words = [word.strip("()[],:;.") for word in text.split()]
+    anchor_words = len(words)
+    words += [word.strip("()[],:;.") for word in after.split()[:3]]
+    names = set().union(*(chapter_lead_names(" ".join(words[i:j]))
+                          for i in range(min(anchor_words, 16))
+                          for j in range(i + 1, min(len(words), i + 8) + 1)))
+    aliases = _chapter_alias_works()
+    matches = [(len(name.split()), title) for name in names for title in aliases.get(name, ())]
+    if not matches:
+        return False
+    longest = max(length for length, _ in matches)
+    return {title for length, title in matches if length == longest} == target
+
+
+def named_chapter_content_ref(ref, rr, anchor, ref_factory, *, content=None, end=None, source_ref=None):
+    """Repair empty boundaries only for an independently named canonical chapter.
+
+    Sefaria copies Bavli chapter bounds to its commentaries, whose first/last
+    comment may be absent. Do not treat that as a malformed printed segment:
+    keep the actual text INSIDE the chapter. An explicit numeric range has no
+    such evidence and must retain both endpoints or stay omitted.
+    """
+    if (ref_factory is None or _top_category(ref.index) != "Talmud"
+            or not ref.is_range() or ref.is_segment_level()
+            or not getattr(ref.index, "base_text_titles", None)):
+        return None
+    parts = getattr(rr.raw_entity, "raw_ref_parts", ())
+    if any(getattr(getattr(part, "type", None), "name", None) == "NUMBERED"
+           and not _chapter_marker(_plain_quotes(getattr(part, "text", ""))) for part in parts):
+        return None
+    words = [word.strip("()[],:;.") for word in
+             _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", anchor))).split()]
+    if len(words) > 16 or not any(_chapter_marker(word) for word in words):
+        return None
+    spelled = set().union(*(chapter_lead_names(" ".join(words[i:j]))
+                            for i in range(len(words)) for j in range(i + 1, min(len(words), i + 8) + 1)))
+    if not any(whole.normal() == ref.normal() and spelled & names
+               for whole, names in _book_chapters(ref.index.title)):
+        return None
+    tail = "" if content is None or end is None else content[end:]
+    if not chapter_book_is_proven(ref, anchor, tail, source_ref):
+        return None
+    normal = _chapter_content_bounds(ref.normal())
+    return None if normal is None else ref_factory(normal)
+
+
+def base_code_has_commentary_address(ref, anchor: str) -> bool:
+    # A se'if katan belongs to a commentator, not to the Shulchan Arukh itself.
+    # Do not guess the commentator or remove the prefix and invent a base se'if.
+    return getattr(getattr(ref, "index", None), "title", "").startswith("Shulchan Arukh,") and bool(re.search(
+        r'(?<![א-ת])ו?[בלמכ]?(?:ס[\"\']ק|סק[\"\']|סעיף\s+קטן)', _plain_quotes(anchor)))
+
+
+_CODE_NOTE_ADDRESS_RE = re.compile(
+    r"ו?ב?(?P<part>יו[\"]ד|חו[\"]מ)\s+"
+    r"(?:(?:סימן|סי['\"]?)\s+)?(?P<chapter>[א-ת'\"]{1,7})\s+"
+    r"(?:ס[\"]ק\s*|סק[\"]?\s*|סעיף\s+קטן\s+)(?P<note>[א-ת'\"]{1,7})")
+_CODE_NOTE_AUTHOR_RE = re.compile(
+    r"(?<![א-ת])ו?[כשה]?(?:ה)?(?P<author>ש[\"]ך|ט[\"]ז)"
+    r"(?:\s+ז[\"]ל)?(?:\s+שם)?(?:\s+בסי'\s+הנ[\"]ל)?$")
+
+
+def explicit_code_commentary_ref(ref, content, start, end, ref_factory):
+    """Recover a named Shakh/Taz with its own printed siman and se'if katan.
+
+    The full anchor must spell the code, both canonical numbers and the note
+    marker. A directly attributed, unambiguous author must precede it. Never
+    subtract100 from the resolver's result or infer an author from a source book.
+    """
+    if ref_factory is None or not getattr(getattr(ref, "index", None), "title", "").startswith("Shulchan Arukh,"):
+        return None
+    def plain(text):
+        return _NIQQUD_RE.sub("", _plain_quotes(_QUOTE_HTML_TAG_RE.sub(" ", text)))
+    anchor = plain(content[start:end]).strip(" ()[]")
+    address = _CODE_NOTE_ADDRESS_RE.fullmatch(anchor)
+    if address is None:
+        return None
+    before = plain(content[:start]).rstrip(" ([")
+    cut = max(before.rfind(mark) for mark in ".:;()[]")
+    before = before[cut + 1:].strip()
+    author = _CODE_NOTE_AUTHOR_RE.search(before)
+    if author is None:
+        return None
+    lead = before[:author.start()].strip()
+    if lead and not re.search(r"(?:כתב|ועיין|ועי'|ולא|קושית|קושיית)$", lead):
+        return None  # e.g. "הבית יוסף והש\"ך": more than one attributed work
+    letters = [re.sub(r"[^א-ת]", "", address[k]) for k in ("chapter", "note")]
+    # These are the existing strict canonical numerals (below400). Other spellings
+    # stay omitted rather than expanding the accepted address language implicitly.
+    if not all(_is_canonical_numeral(n) for n in letters):
+        return None
+    chapter, note = map(_numeral, letters)
+    part = {"יו\"ד": "Yoreh De'ah", 'חו\"מ': "Choshen Mishpat"}[address["part"]]
+    if ref.index.title != f"Shulchan Arukh, {part}":
+        return None
+    title = {"ש\"ך": "Siftei Kohen", 'ט\"ז': "Turei Zahav"}[author["author"]]
+    title = f"{title} on Shulchan Arukh, {part}"
+    try:
+        candidate = ref_factory(f"{title} {chapter}:{note}")
+    except Exception:
+        return None
+    if (candidate.index.title != title or candidate.sections != [chapter, note]
+            or candidate.toSections != candidate.sections or not target_has_text(candidate)):
+        return None
+    return candidate
+
+
+def has_unproven_code_number(rr, ref) -> bool:
+    """Do not turn common prose/halakhot abbreviations into Rambam segments.
+
+    Bare לא / כ׳ / מה״נ may be prose, unlike explicitly labelled הלכה כ׳.
+    Omit the ambiguous reading; a coincidentally existing segment proves no number.
+    """
+    if not getattr(getattr(ref, "index", None), "title", "").startswith("Mishneh Torah,"):
+        return False
+    return any(getattr(getattr(part, "type", None), "name", None) == "NUMBERED"
+               and _NIQQUD_RE.sub("", _plain_quotes(getattr(part, "text", ""))).strip()
+               in {"לא", "כ'", 'מה"נ'}
+               for part in getattr(rr.raw_entity, "raw_ref_parts", ()))
 
 
 def is_implausible_citation_target(target_ref: str, anchor_text: str) -> bool:
