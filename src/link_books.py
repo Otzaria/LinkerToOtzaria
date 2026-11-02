@@ -2143,7 +2143,9 @@ def process_batch(
         # (each adds one extra UTF-16 unit) — convert exactly, on the rare lines only.
         has_non_bmp = any(ord(c) > 0xFFFF for c in content)
         marker_end = leading_hebrew_numeral_marker_end(content)
-        for rr in recoverable_citations(linker, doc.resolved_refs, content):
+        relative_source = context_object if bk.source_name == "Sefaria" else None
+        for rr in recoverable_citations(linker, doc.resolved_refs, content, relative_source,
+                                        context_ref_factory):
             try:
                 # Failures are fetched only for recovery from the text; they must not
                 # reset the "שם" antecedent.
@@ -2155,6 +2157,11 @@ def process_batch(
                     # A citation this book drops is not an antecedent for the next "שם".
                     last_ref = None
                 start, end = rr.raw_entity.span.range
+                # A model span may stop at the numeral in "יד: ושם". Recover
+                # the printed amud before checking a relative address, including
+                # failed resolutions for which there is no Ref to narrow yet.
+                if relative:
+                    end = relative_address_end(content, start, end)
                 # Sefaria's reading of the citation before this one, whatever we emit for it.
                 preceding = None if previous is None else (
                     content[previous[1]:start] if previous[0] == line_index and previous[1] <= start
@@ -2174,14 +2181,21 @@ def process_batch(
                 own_ibid = False
                 supported_biblical = False
                 source_relative = explicit_own_relative_ref(
-                    linker, rr, content, start, end, context_object, context_ref_factory)
+                    linker, rr, content, start, end, relative_source, context_ref_factory)
                 if source_relative is not None:
                     ref, relative = source_relative[0], False
                 else:
-                    scoped = explicit_relative_address(content[start:end], context_object, context_ref_factory)
-                    if scoped is not None and (ref is None or ref.index.title == scoped[0].index.title):
+                    scoped = explicit_relative_address(content[start:end], relative_source, context_ref_factory)
+                    strict_scope = (getattr(getattr(relative_source, "index", None), "title", "").startswith(
+                        "Tosafot on ") or bool(re.search(r"(?<![א-ת])בסמוך(?![א-ת])", content[start:end])))
+                    if strict_scope and scoped is not None and any(
+                            not _in_tractate(candidate, scoped[0].index.title) for candidate in candidate_refs(rr)):
+                        continue
+                    if strict_scope and scoped is not None and (ref is None or ref.index.title == scoped[0].index.title):
                         # A successful upstream base-text guess must pass the same
-                        # work-identity proof as a failed/ambiguous recovery.
+                        # work-identity proof as a failed/ambiguous recovery in
+                        # the scopes audited for that guard. Other commentaries'
+                        # established base targets retain their legacy validation.
                         continue
                 if ref is None and not failed:
                     own_daf = own_tractate_daf_ref(
@@ -2911,8 +2925,8 @@ class _TextRebuiltCitation:
         self.raw_entity, self.ref = raw, ref
 
 
-def recoverable_citations(linker, citations, content):
-    """Split a failed, comma-separated list of independently explicit Bible refs.
+def recoverable_citations(linker, citations, content, source_ref=None, ref_factory=None):
+    """Recover chapter-led Bavli addresses and independently explicit Bible lists.
 
     Every group must resolve without source or ibid context. No commentator,
     relative address, range, or omitted title is stripped to manufacture a group.
@@ -2920,6 +2934,10 @@ def recoverable_citations(linker, citations, content):
     never enter the legacy ibid history.
     """
     for rr in citations:
+        chapter_dapim = explicit_chapter_dapim(linker, rr, content, source_ref, ref_factory)
+        if chapter_dapim:
+            yield from chapter_dapim
+            continue
         rebuilt = split_explicit_verses(linker, rr, content) if getattr(rr, "resolution_failed", False) else ()
         yield from rebuilt or (rr,)
 
@@ -3254,7 +3272,7 @@ def chapter_led_citation(linker, rr, context_ref):
 
 
 # A mark after a daf, past spaces and tags ("מד</small>:"): "." for amud a, ":" or "ע"ב" for amud b.
-_AMUD_AFTER_RE = re.compile(r'(?:\s|<[^>]*>)*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
+_AMUD_AFTER_RE = re.compile(rf'(?:\s|{_QUOTE_HTML_TAG})*(?:(?P<mark>[.:])|ע["״](?P<side>[אב]))')
 
 
 def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
@@ -3449,12 +3467,12 @@ def _amud_ref(tractate: str, daf: int, side: str, ref_factory):
 # "פ"ב." / "פ"ק." abbreviate פרק ב / פרק קמא, not a daf.
 _CHAPTER_ABBREVIATION_RE = re.compile(r"פ[\"'״׳]")
 # The address may open a parenthesis after the word: "לעיל (דף לו:)" (Otzaria/otzaria#3450).
-_RELATIVE_WORD = r"[וד]?(?:לקמן|לעיל|להלן)(?:\s*\(\s*|\s+)"
+_RELATIVE_WORD = r"[וד]?(?:לקמן|לעיל|להלן)(?:\s+בסמוך)?(?:\s*\(\s*|\s+)"
 _UNTITLED_DAF = r"[א-ת]{1,3}|[א-ת]{1,2}[\"״][א-ת]|[א-ת]['׳]"
 # One daf address: "יא:", "דף כ"ג.", "ב,א" or "צה ע"ב".
 _DAF_ADDRESS = (
     rf"(?P<prefix>דף\s+|ד['׳]\s*)?(?P<daf>{_UNTITLED_DAF})"
-    r"(?:(?P<mark>[.:])|\s*,\s*(?P<comma>[אב])|\s+ע[\"״](?P<amud>[אב]))")
+    r"(?:\s*(?P<mark>[.:])|\s*,\s*(?P<comma>[אב])|\s+ע[\"״](?P<amud>[אב]))")
 # The whole anchor: "לקמן יא:", "לעיל דף כ"ג.", "לעיל ב,א", "לקמן צה ע"ב", or "לקמן ע"ב".
 _UNTITLED_RELATIVE_RE = re.compile(
     rf"{_RELATIVE_WORD}(?:{_DAF_ADDRESS}|ע[\"״](?P<only>[אב]))")
@@ -3642,6 +3660,20 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
     if commentary_qualifier_after(content, end) or has_raw_part_type(rr, "DH"):
         return False
     words = clause_before(content, start)
+    # A coordinated new Gemara quotation has its own governing clause. This
+    # applies only with a verified chapter locator: an earlier "מע\"ז" or the
+    # prose "ידיעה בסוף ... ואמר נמי" must not govern that new quotation.
+    # A bare "בגיטין הא אמרינן" still keeps its explicit foreign tractate.
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(content[start:end]))
+    chapter_lead = anchor.split('(', 1)[0].strip()
+    located = (_chapter_marker(chapter_lead) and any(
+        chapter.overlaps(target) for chapter in named_chapters(chapter_lead, target)))
+    if located:
+        for i in range(len(words) - 2, 1, -1):
+            pair = words[i:i + 2]
+            if pair == ['ואמר', 'נמי'] or pair == ['והא', 'דאמר']:
+                words = words[i:]
+                break
     if not clause_names_elsewhere(linker, words, target, target.index.title):
         return True
     if len(words) > 512:
@@ -3755,7 +3787,9 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
 
 def explicit_relative_address(anchor, source_ref, ref_factory):
     """The printed own-tractate address; this alone proves no cited work."""
-    if not getattr(getattr(source_ref, 'index', None), 'title', '').startswith('Tosafot on '):
+    if (getattr(source_ref, 'index', None) is None or ref_factory is None
+            or len(_own_tractates(source_ref, ref_factory)) != 1
+            or not _is_talmud_source(source_ref, ref_factory)):
         return None
     anchor = _NIQQUD_RE.sub('', _plain_quotes(anchor))
     recovered = (own_tractate_relative_ref(anchor, source_ref, ref_factory)
@@ -3775,16 +3809,30 @@ def explicit_relative_address(anchor, source_ref, ref_factory):
     return recovered
 
 
+def relative_address_end(content, start, end):
+    """Include a cut-off amud mark only before a closing bracket or 'ושם'."""
+    anchor = _plain_quotes(content[start:end])
+    numeral = re.search(rf'(?:^|[\s(])({_UNTITLED_DAF})$', anchor)
+    if numeral is None or not _is_canonical_numeral(re.sub(r'[^א-ת]', '', numeral[1])):
+        return end
+    mark = _AMUD_AFTER_RE.match(content, end)
+    if mark is None:
+        return end
+    tail = _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', content[mark.end():])).lstrip()
+    return mark.end() if re.match(r'[)\]]|ו?שם(?![א-ת])', tail) else end
+
+
 def explicit_own_relative_ref(linker, rr, content, start, end, source_ref, ref_factory):
     """One printed relative amud with independently checked source and ownership."""
     recovered = explicit_relative_address(content[start:end], source_ref, ref_factory)
     if recovered is None:
         return None
     target, direction = recovered
-    if any(not _in_tractate(candidate, target.index.title)
-           or list(candidate.sections[:1]) != list(target.sections)
-           or list(candidate.toSections[:1]) != list(target.toSections)
-           for candidate in candidate_refs(rr)):
+    # Upstream may interpret the printed numeral as a chapter-relative offset,
+    # or offer a whole daf when the amud mark fell outside its NER span. Its
+    # work identity still constrains us; its arithmetic must not veto the
+    # independently printed, direction-checked address.
+    if any(not _in_tractate(candidate, target.index.title) for candidate in candidate_refs(rr)):
         return None
     if commentary_qualifier_after(content, end):
         return own_relative_dh_ref(linker, rr, content, start, end, source_ref,
@@ -3890,7 +3938,8 @@ def clause_names_elsewhere(linker, words: list[str], target, tractate: str) -> b
     if any(re.search(r"(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו)(?![א-ת])", word)
            for word in words):
         return True  # an author's self-reference is not the underlying Gemara
-    if any(re.match(r"ו?[במ]?(?:פירש|פירוש|כתב|כתבו|חידושי|ספר)(?![א-ת])", word) for word in words):
+    if any(re.match(r"ו?[דכבשמל]?(?:פירש|פירשו|פירוש|כתב|כתבו|חידושי|ספר)(?![א-ת])", word)
+           for word in words):
         return True
     for i, word in enumerate(words):
         if _CHAPTER_LEAD_RE.match(word) and not any(
@@ -4535,6 +4584,95 @@ def _chapter_content_bounds(normal: str) -> str | None:
 def _chapter_marker(text):
     return (_CHAPTER_LEAD_RE.match(text) or re.match(
         r'ו?[במ]?(?:[רס]?פ["״][א-ת]+|ריש|סוף|שלהי)(?![א-ת])', text))
+
+
+def explicit_chapter_dapim(linker, rr, content, source_ref, ref_factory):
+    """Read a named chapter and its printed amud(s), without chapter-relative arithmetic.
+
+    'בפרק קמא דסוכה (יג, ב. יד, א)' names two absolute amudim, not an
+    offset from the chapter's beginning. An unnamed tractate requires a unique
+    chapter name across Bavli, or a directly paged own tractate. In particular a
+    Rif commentary's page is never used as a Bavli page (#3610).
+    """
+    if ref_factory is None or any(has_raw_part_type(rr, kind) for kind in ('RELATIVE', 'IBID', 'DH')):
+        return ()
+    raw = rr.raw_entity
+    start, end = raw.span.range
+    anchor = content[start:end]
+    if anchor.count('(') != 1:
+        return ()
+    opening = anchor.index('(')
+    lead = _NIQQUD_RE.sub('', _plain_quotes(anchor[:opening]))
+    if not _chapter_marker(lead):
+        return ()
+    # Parse the original string so every rebuilt anchor retains exact raw offsets.
+    body = anchor[opening + 1:].rstrip(' )')
+    addresses = []
+    cursor = 0
+    while cursor < len(body) and len(addresses) < 4:
+        spaces = re.match(r'\s*', body[cursor:]).end()
+        cursor += spaces
+        match = re.compile(_DAF_ADDRESS).match(body, cursor)
+        if match is None:
+            return ()
+        addresses.append((match, opening + 1 + cursor, opening + 1 + match.end()))
+        cursor = match.end()
+        if cursor == len(body):
+            break
+        separator = re.match(r'\s*[.;]\s*', body[cursor:])
+        if separator is None or cursor + separator.end() == len(body):
+            return ()
+        cursor += separator.end()
+    if not addresses or cursor != len(body):
+        return ()
+    explicit, unnamed, contenders = {}, {}, set()
+    lead_names = chapter_lead_names(lead)
+    for title, aliases, chapters in _bavli_chapter_books():
+        named_leads = []
+        for alias in aliases:
+            named = re.fullmatch(rf'(.+?)\s+ד?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}', lead)
+            if named:
+                named_leads.append(chapter_lead_names(named[1]))
+        for whole, names in chapters:
+            if lead_names & names:
+                unnamed.setdefault(title, []).append(whole)
+            if any(name == lead_name or name.startswith(lead_name + ' ')
+                   for name in names for lead_name in lead_names):
+                contenders.add(title)
+            if any(spelled & names for spelled in named_leads):
+                explicit.setdefault(title, []).append(whole)
+    choices = explicit or unnamed
+    if not explicit and len(contenders) > 1:
+        if not _is_talmud_source(source_ref, ref_factory):
+            return ()
+        own = _own_tractates(source_ref, ref_factory)
+        choices = {title: chapters for title, chapters in choices.items() if title in own}
+    if len(choices) != 1:
+        return ()
+    title, chapters = next(iter(choices.items()))
+    targets = [_address_ref(match, title, ref_factory) for match, _, _ in addresses]
+    if any(target is None or not any(chapter.overlaps(target) for chapter in chapters)
+           or not target_has_text(target) for target in targets):
+        return ()
+    if (commentary_qualifier_after(content, end)
+            or clause_names_elsewhere(linker, clause_before(content, start), targets[0], title)):
+        return ()
+    if len(targets) == 1 and not getattr(rr, 'resolution_failed', False) and not rr.is_ambiguous:
+        current = rr.ref
+        if (current is not None and current.index.title == title
+                and current.sections[:1] == targets[0].sections
+                and current.toSections[:1] == targets[0].toSections):
+            return ()  # preserve an already correct, possibly more precise segment
+    from sefaria.model.linker.ref_part import RawRef
+
+    result = []
+    for i, (target, (_, left, right)) in enumerate(zip(targets, addresses)):
+        left = left if i else 0
+        span = raw.span.doc.subspan(slice(start + left, start + right))
+        parts = [part.realign_to_new_raw_ref(raw.span, span) for part in raw.raw_ref_parts
+                 if left <= part.span.range[0] and part.span.range[1] <= right]
+        result.append(_TextRebuiltCitation(RawRef(span, raw.lang, parts), target))
+    return tuple(result)
 
 
 @functools.lru_cache(maxsize=1)

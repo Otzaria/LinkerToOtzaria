@@ -505,11 +505,14 @@ class WorkerMemoryTest(unittest.TestCase):
                 ]})()]
 
         linker = Linker()
-        records, _ = link_books.process_batch(
-            linker, link_books.BookKey("Sefaria", "רש\"י על גיטין"),
-            [(7, content, "Rashi on Gittin 3a:14:1")], lambda _line: None,
-            context_ref_factory=TalmudRef,
-        )
+        # This transport fake has no title trie; ownership is covered by the
+        # real clause fixtures in test_relative_discourse/chapter_daf_recovery.
+        with mock.patch.object(link_books, "relative_clause_is_clear", return_value=True):
+            records, _ = link_books.process_batch(
+                linker, link_books.BookKey("Sefaria", "רש\"י על גיטין"),
+                [(7, content, "Rashi on Gittin 3a:14:1")], lambda _line: None,
+                context_ref_factory=TalmudRef,
+            )
         self.assertTrue(linker.with_failures)
         self.assertEqual(
             [(r.start, r.target_ref, r.relative_direction, r.context_ref) for r in records],
