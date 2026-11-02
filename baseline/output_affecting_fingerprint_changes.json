@@ -38,7 +38,7 @@
     },
     {
       "from": "dump=44e55916743983b8;engine_src=94e1b594c52357fd;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0",
-      "to": "dump=44e55916743983b8;engine_src=5d8ed3a18589ad34;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0",
+      "to": "dump=44e55916743983b8;engine_src=1960ece716b27035;gpu-server=d9da16119e9c0de64224d7b187cd999b2ead4bad;he_ref_ner=37ff5191562e8655;he_subref_ner=4480a8acec08bae0;python_runtime=d4dc6ca766526322;sefaria=59291d9f8754de0062711bc1cd49214b0e618fc5;sefaria_patch=9417fd1aba7bf248;policy=drop;bavli=0",
       "review": "v36 chapter/daf recovery: restore cut-off printed amud marks before relative validation; resolve direct Bavli commentary relatives against the printed source-proven tractate; scope coordinated native quotations only with a verified chapter; read unique named chapters and explicitly named tractate/chapter daf lists as absolute addresses, with independent anchors. Retain work, chapter, direction, text availability, canonical numeral, author and DH guards. Recorded AMD NER and production-patched real-resolver acceptance covers the reported source lines and preservation controls. Output-affecting: full relink required in production; never adopt the old fingerprint as output-neutral."
     }
   ]

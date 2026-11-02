@@ -3662,8 +3662,6 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
     if commentary_qualifier_after(content, end) or has_raw_part_type(rr, "DH"):
         return False
     words = clause_before(content, start)
-    if any(_SELF_WRITING_RE.search(_NIQQUD_RE.sub('', word)) for word in words):
-        return False
     # A coordinated new Gemara quotation has its own governing clause. This
     # applies only with a verified chapter locator: an earlier "מע\"ז" or the
     # prose "ידיעה בסוף ... ואמר נמי" must not govern that new quotation.
@@ -3678,7 +3676,8 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
             if pair == ['ואמר', 'נמי'] or pair == ['והא', 'דאמר']:
                 words = words[i:]
                 break
-    if not clause_names_elsewhere(linker, words, target, target.index.title):
+    self_writing = any(_SELF_WRITING_RE.search(_NIQQUD_RE.sub('', word)) for word in words)
+    if not self_writing and not clause_names_elsewhere(linker, words, target, target.index.title):
         return True
     if len(words) > 512:
         return False
@@ -3690,7 +3689,8 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
                 i == len(words) - 1 and raw_anchor.startswith('ד')):
             native.append(i)
     last_native = max(native, default=-1)
-    writers = [i for i, word in enumerate(words) if _CITED_WRITING_RE.fullmatch(word)]
+    writers = [i for i, word in enumerate(words)
+               if _CITED_WRITING_RE.fullmatch(word) or _SELF_WRITING_RE.search(word)]
     # A governing "פירש לעיל" stays a commentary even if its later text quotes Gemara.
     if any(i > last_native for i in writers):
         return False

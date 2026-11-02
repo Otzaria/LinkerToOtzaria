@@ -257,6 +257,14 @@ class ChapterDafRecoveryTest(unittest.TestCase):
             refs=['Rashba on Shabbat 40a'], source='Rashba on Shabbat 39b:6', context_type='CURRENT_BOOK')
         self.assertEqual([r.target_ref for r in rows], ['Rashba on Shabbat 40a'])
 
+    def test_a_prior_self_explanation_can_introduce_a_separate_gemara_citation(self):
+        for before in ('לפי מה שפירשנו ועוד נראה לפרש ההיא ', 'כתבתיה אבל אמרינן '):
+            anchor = 'דלקמן (דף כו.'
+            rows = self.records(before + anchor + ') גבי העלם שבועה', anchor,
+                [('RELATIVE', 'דלקמן'), ('NUMBERED', 'דף כו.')],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 26a'])
+
 
 if __name__ == '__main__':
     unittest.main()
