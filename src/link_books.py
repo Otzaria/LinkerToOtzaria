@@ -3647,6 +3647,8 @@ _NATIVE_CITATION_VERB_RE = re.compile(
     r'ו?[דכבש]?(?:אמרינן|אמר|קאמר|פריך|תנא|תנן|תניא|משמע|מוכח|מייתי|כדאמר|כדמוכח)')
 _CITED_WRITING_RE = re.compile(
     r'ו?[דכבשמל]?(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו|כתב|כתבו|פירש|פירשו|פירוש|לפרש|מפרש|מפרשים|פי[\"\']|כמ[\"]ש|כמש[\"]כ)')
+_SELF_WRITING_RE = re.compile(
+    r'(?:כתבתי|כתבנו|פירשתי|פירשנו|ביארתי|ביארנו)(?:ה)?(?![א-ת])')
 
 
 def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target):
@@ -3660,6 +3662,8 @@ def relative_clause_is_clear(linker, rr, content, start, end, source_ref, target
     if commentary_qualifier_after(content, end) or has_raw_part_type(rr, "DH"):
         return False
     words = clause_before(content, start)
+    if any(_SELF_WRITING_RE.search(_NIQQUD_RE.sub('', word)) for word in words):
+        return False
     # A coordinated new Gemara quotation has its own governing clause. This
     # applies only with a verified chapter locator: an earlier "מע\"ז" or the
     # prose "ידיעה בסוף ... ואמר נמי" must not govern that new quotation.
@@ -4654,8 +4658,10 @@ def explicit_chapter_dapim(linker, rr, content, source_ref, ref_factory):
     if any(target is None or not any(chapter.overlaps(target) for chapter in chapters)
            or not target_has_text(target) for target in targets):
         return ()
+    words = clause_before(content, start)
     if (commentary_qualifier_after(content, end)
-            or clause_names_elsewhere(linker, clause_before(content, start), targets[0], title)):
+            or any(_SELF_WRITING_RE.search(_NIQQUD_RE.sub('', word)) for word in words)
+            or clause_names_elsewhere(linker, words, targets[0], title)):
         return ()
     if len(targets) == 1 and not getattr(rr, 'resolution_failed', False) and not rr.is_ambiguous:
         current = rr.ref

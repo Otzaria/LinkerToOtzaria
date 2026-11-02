@@ -62,6 +62,9 @@ def main():
         for expected in row['expected']:
             assert (expected['anchor'], expected['target_ref']) in actual, (
                 row['title'], row['index'], 'missing expected citation', expected, sorted(actual))
+        for forbidden in row.get('forbidden_links', []):
+            assert (forbidden['anchor'], forbidden['target_ref']) not in actual, (
+                row['title'], row['index'], 'unproven work identity', forbidden)
         count += len(records)
         print(f"PASS {row['title']}:{row['index']} ({len(records)} links)", flush=True)
     print(f"PASS {len(data['cases'])} recorded source lines, {count} valid links", flush=True)

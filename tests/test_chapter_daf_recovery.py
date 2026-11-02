@@ -183,7 +183,8 @@ class ChapterDafRecoveryTest(unittest.TestCase):
     def test_a_named_writer_or_following_dh_blocks_chapter_reconstruction(self):
         anchor = 'בפרק שבועת העדות (דף לה.'
         parts = [('NAMED', 'בפרק שבועת העדות'), ('NUMBERED', 'דף לה.')]
-        for before, after in [('פירשתי ', ')'), ('וכמו שכתב ', ')'), ('', ') בד"ה אחר')]:
+        for before, after in [('פירשתי ', ')'), ('כתבתיה וכן ', ')'), ('ביארנוה וכן ', ')'),
+                              ('וכמו שכתב ', ')'), ('', ') בד"ה אחר')]:
             self.assertEqual(self.records(before + anchor + after, anchor, parts,
                                           source='Ran on Shevuot 18a:7'), [])
 
