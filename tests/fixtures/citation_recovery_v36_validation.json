@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "4b913a3",
+  "engine_src": "1960ece716b27035",
+  "engine_file_sha256": "59a36cef95b7e94a16bf0bebf394b3e0a455395dcbad8676bfd137762d15c0bb",
+  "source_snapshot_sha256": "315f5cbdbfdd3460be7fe8ef0061e3ce4a57070bc9be928badd4ece7d4a836c6",
+  "raw_ner_bundle_sha256": "0387c583ae7c337469053dfa1003040e7f119a5f0e28219b93468976de3d422a",
+  "books": [
+    {
+      "book": "תוספות על שבועות",
+      "lines": 618,
+      "source_book_hash": "f793f7f2d4996adf",
+      "before": 501,
+      "after": 504,
+      "changed_lines": [
+        18,
+        29,
+        254
+      ]
+    },
+    {
+      "book": "משנה תורה, הלכות חגיגה",
+      "lines": 37,
+      "source_book_hash": "110ad6a0925cac06",
+      "before": 39,
+      "after": 39,
+      "changed_lines": []
+    },
+    {
+      "book": "ר\"ן על שבועות",
+      "lines": 810,
+      "source_book_hash": "d450ab2a398ea866",
+      "before": 267,
+      "after": 273,
+      "changed_lines": [
+        43,
+        81,
+        215,
+        333,
+        356,
+        512
+      ]
+    },
+    {
+      "book": "רשב״א על שבת",
+      "lines": 1167,
+      "source_book_hash": "97e29a470e37675f",
+      "before": 976,
+      "after": 1022,
+      "changed_lines": [
+        13,
+        73,
+        311,
+        321,
+        338,
+        352,
+        356,
+        364,
+        395,
+        411,
+        413,
+        456,
+        486,
+        609,
+        610,
+        634,
+        668,
+        720,
+        761,
+        788,
+        792,
+        794,
+        821,
+        846,
+        864,
+        876,
+        894,
+        907,
+        919,
+        926,
+        1025,
+        1034,
+        1039,
+        1050,
+        1051,
+        1074,
+        1089,
+        1116,
+        1146,
+        1147,
+        1149,
+        1151,
+        1156
+      ]
+    },
+    {
+      "book": "פסקי תוספות על ברכות",
+      "lines": 399,
+      "source_book_hash": "7791d79fb1045dd8",
+      "before": 17,
+      "after": 17,
+      "changed_lines": []
+    },
+    {
+      "book": "אגדת בראשית",
+      "lines": 307,
+      "source_book_hash": "f8a50e172b9eaaa5",
+      "before": 1782,
+      "after": 1782,
+      "changed_lines": []
+    },
+    {
+      "book": "אמרי דעת על משלי",
+      "lines": 1217,
+      "source_book_hash": "312283c69fa5c317",
+      "before": 4,
+      "after": 4,
+      "changed_lines": []
+    }
+  ],
+  "before": 3586,
+  "after": 3641,
+  "unchanged": 3583,
+  "added_records": 58,
+  "replaced_records": 3,
+  "unrelated_omissions": 0,
+  "recorded_acceptance": {
+    "source_lines": 12,
+    "links": 53
+  },
+  "tests": {
+    "python": "3.12",
+    "macos": {
+      "total": 561,
+      "passed": 548,
+      "skipped": 13
+    },
+    "linux": {
+      "total": 561,
+      "passed": 560,
+      "skipped": 1
+    }
+  }
+}
