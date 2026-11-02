@@ -116,7 +116,7 @@ class ProcessHygieneTest(unittest.TestCase):
         )
         status = types.SimpleNamespace(si_code=os.CLD_EXITED, si_status=7)
         with mock.patch.object(incremental.sys, "platform", "linux"), \
-                mock.patch.object(incremental.os, "waitid", return_value=status) as waitid:
+                mock.patch.object(incremental.os, "waitid", return_value=status, create=True) as waitid:
             self.assertEqual(incremental._poll_engine_without_reaping(proc), 7)
         waitid.assert_called_once_with(
             os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
