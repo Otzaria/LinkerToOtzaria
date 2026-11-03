@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "description": "Compact immutable replay and independent QA evidence; detailed per-record audit payloads are external artifacts.",
+  "baseline": {
+    "commit": "4b913a3",
+    "source_sha256": "2844129586a4e7e522ad0b3ebfa24673bc741e85b7753dc52eaaf0a0db6ab307",
+    "published_source_manifest_sha256": "803e2c8414f83e8824e8cc2e736491f6dab3a7d45ca0dc5116b5d180eb3528fe"
+  },
+  "candidate": {
+    "source_commit": "6eea256bf9019e915622249c18658cbd8fa4e223",
+    "source_sha256": "2d5276ef7326626a589b46aa3106c5593cc32370191b36f7b5495d623e174587",
+    "engine_src": "02533813acd3443b"
+  },
+  "pins": {
+    "captured": "2026-11-02",
+    "host": "Windows runner, AMD ROCm",
+    "sefaria_commit": "59291d9f8754de0062711bc1cd49214b0e618fc5",
+    "sefaria_patch": "9417fd1aba7bf248",
+    "gpu_server_commit": "d9da16119e9c0de64224d7b187cd999b2ead4bad",
+    "he_ref_ner": "37ff5191562e8655",
+    "he_subref_ner": "4480a8acec08bae0",
+    "additional_capture": {
+      "captured": "2026-11-03",
+      "host": "Windows runner, AMD ROCm",
+      "source_rows": 78764,
+      "bundle_sha256": "08bf1fc838e084a5b6b4d00498614e9721bb44d8397072b94760433f6c828f97"
+    },
+    "expanded_capture": {
+      "captured": "2026-11-03",
+      "host": "Windows runner, AMD ROCm",
+      "source_rows": 16734,
+      "complete_books": 18,
+      "bundle_sha256": "08a0ad3c09545b596663891664740ff3b1838fc050701e046067292491312179"
+    },
+    "combined_recorded_ner_sha256": "59354c9fd70529ba9a661037fd9d4896feba807b164ed0a137803742697d65ba"
+  },
+  "scope": {
+    "items": 143,
+    "source_rows": 95498,
+    "complete_v36_books": 141,
+    "complete_v36_source_rows": 95488,
+    "targeted_source_rows": 10,
+    "complete_tosafot_books": 36,
+    "expanded_complete_books": 18,
+    "expanded_source_rows": 16734,
+    "source_item_counts": {
+      "Sefaria": 119,
+      "DictaToOtzaria": 11,
+      "MoreBooks": 5,
+      "OnYourWayToOtzaria": 1,
+      "KSK": 3,
+      "National-LibraryToOtzaria": 2,
+      "pninimToOtzaria": 1,
+      "Ben-YehudaToOtzaria": 1
+    }
+  },
+  "totals": {
+    "before": 38170,
+    "after": 38795,
+    "unchanged": 37869,
+    "added": 629,
+    "removed": 4,
+    "changed": 297
+  },
+  "complete_v36_totals": {
+    "before": 38157,
+    "after": 38782,
+    "unchanged": 37856,
+    "added": 629,
+    "removed": 4,
+    "changed": 297
+  },
+  "tests": {
+    "macos": {
+      "total": 623,
+      "passed": 610,
+      "skipped": 13,
+      "log_sha256": "309684829055e62576c095b2a087994b38c6128013b2ea73e5b065a76915c3f0"
+    },
+    "linux": {
+      "total": 623,
+      "passed": 622,
+      "skipped": 1,
+      "skip_reason": "optional jsonschema dependency",
+      "log_sha256": "68fd30654c2c36cb8a82995ad69fb8a9980a8136d1202f53b1a462347e5e5fe4"
+    },
+    "independent_attribution": {
+      "total": 44,
+      "passed": 44,
+      "skipped": 0
+    },
+    "standalone_real_resolver": {
+      "cases": 140,
+      "valid_links": 441,
+      "expected_anchors": 145,
+      "log_sha256": "dd355d0d458b80a5a2c088afcd2a8233e1cc9c72e4d3bd33d1a475864d917c0f"
+    },
+    "saved_complete_book_records": {
+      "cases": 140,
+      "records": 444,
+      "expected_anchors": 146,
+      "full_replay_only_anchors": 1,
+      "forbidden_targets": 49,
+      "forbidden_anchor_target_pairs": 10,
+      "original_preservation_records_exact": 9
+    }
+  },
+  "independent_qa": {
+    "verdict": "APPROVED_NO_KNOWN_BLOCKERS",
+    "report_sha256": "5c9dc9aac488ed0246a37323ea74b019fc6a3aa1e073e69340ec84364d49c9be",
+    "all_differences": 930,
+    "residual_omissions": 4,
+    "final_delta_records": 10,
+    "method": "All final differences were contextually classified across successive audits. Final ten ownership targets and all four omissions re-inspected; immutable identities, every changed anchor/hash and all saved record controls independently verified. Full paragraphs read for ownership/ambiguity cases; unchanged baseline links were not all semantically reread.",
+    "saved_records_compared_vs_previous": 38795,
+    "changed_target_fields_vs_previous": 10,
+    "other_saved_records_exactly_equal": 38785,
+    "all_other_fields_identical": true
+  },
+  "omission_outcomes": [
+    {
+      "title": "רשב״א על שבת",
+      "line": 456,
+      "anchor": "בפרק קמא דסוכה (יג, ב. יד, א",
+      "old_target": "Sukkah 20a",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong collapsed Sukkah20a is replaced by separately printed13b and14a."
+    },
+    {
+      "title": "תוספות על מנחות",
+      "line": 1128,
+      "anchor": "בפ' כל המנחות",
+      "old_target": "Menachot 2a:1-13a:6",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong chapter1 Menachot2a-13a contradicts attached55a; own55a and9a remain."
+    },
+    {
+      "title": "תוספות על עבודה זרה",
+      "line": 133,
+      "anchor": "שבת דף סה",
+      "old_target": "Shabbat 65",
+      "outcome": "ACCEPTED_ANCHOR_REPLACEMENT",
+      "reason": "Same citation survives with corrected anchor including printed dot and TosafotShabbat65a."
+    },
+    {
+      "title": "ר\"ן על נדרים",
+      "line": 1398,
+      "anchor": "בפ' ד' נדרים",
+      "old_target": "Nedarim 32b:10-45a:3",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong ordinal chapter4 range32b-45a contradicts printed22a; RanNedarim22a remains."
+    }
+  ],
+  "key_controls": [
+    {
+      "title": "מאירי על יבמות",
+      "line": 534,
+      "target": "Meiri on Yevamot 13a",
+      "scope": "required in complete-book replay; isolated cold resolver may abstain"
+    },
+    {
+      "title": "מאירי על יבמות",
+      "line": 1130,
+      "target": "Meiri on Chagigah 4b",
+      "scope": "wrong upstream Chagigah2 corrected from the printed address"
+    },
+    {
+      "title": "תוספות על בכורות",
+      "line": 18,
+      "target": "Tosafot on Gittin 7b",
+      "scope": "validate base chapter before selecting commentary"
+    }
+  ],
+  "expanded_books": [
+    {
+      "title": "דור רביעי על חולין",
+      "source_rows": 3132,
+      "source_book_hash": "c3744531ddbcdb6f"
+    },
+    {
+      "title": "מאירי על יבמות",
+      "source_rows": 1948,
+      "source_book_hash": "33ec00b88fdd3a27"
+    },
+    {
+      "title": "פני יהושע על בבא מציעא",
+      "source_rows": 1006,
+      "source_book_hash": "21ca04ce92065b5e"
+    },
+    {
+      "title": "פני יהושע על בבא קמא",
+      "source_rows": 1605,
+      "source_book_hash": "83e062db9edd153d"
+    },
+    {
+      "title": "פני יהושע על ביצה",
+      "source_rows": 518,
+      "source_book_hash": "0cc31746a0b51938"
+    },
+    {
+      "title": "פני יהושע על ברכות",
+      "source_rows": 725,
+      "source_book_hash": "2b8414a76ab2f0cc"
+    },
+    {
+      "title": "פני יהושע על גיטין",
+      "source_rows": 1256,
+      "source_book_hash": "292b67635dcfb727"
+    },
+    {
+      "title": "פני יהושע על חולין",
+      "source_rows": 72,
+      "source_book_hash": "c6e2898aa8e71ef1"
+    },
+    {
+      "title": "פני יהושע על יומא",
+      "source_rows": 44,
+      "source_book_hash": "790805b3f6809c4d"
+    },
+    {
+      "title": "פני יהושע על כתובות",
+      "source_rows": 1915,
+      "source_book_hash": "c5113fe84acbd136"
+    },
+    {
+      "title": "פני יהושע על מגילה",
+      "source_rows": 197,
+      "source_book_hash": "9b786eac4eae9707"
+    },
+    {
+      "title": "פני יהושע על מכות",
+      "source_rows": 116,
+      "source_book_hash": "30570a3e0b918d83"
+    },
+    {
+      "title": "פני יהושע על סוכה",
+      "source_rows": 460,
+      "source_book_hash": "df1d67df707513f4"
+    },
+    {
+      "title": "פני יהושע על פסחים",
+      "source_rows": 718,
+      "source_book_hash": "1c56053a3934da77"
+    },
+    {
+      "title": "פני יהושע על קידושין",
+      "source_rows": 1373,
+      "source_book_hash": "add488388af777c1"
+    },
+    {
+      "title": "פני יהושע על ראש השנה",
+      "source_rows": 436,
+      "source_book_hash": "8cbabbd33c79f020"
+    },
+    {
+      "title": "פני יהושע על שבועות",
+      "source_rows": 100,
+      "source_book_hash": "d80a0cf7e09a57c7"
+    },
+    {
+      "title": "פני יהושע על שבת",
+      "source_rows": 1113,
+      "source_book_hash": "d81f29bcf343a98c"
+    }
+  ],
+  "artifacts": {
+    "full_replay_report_archive": {
+      "name": "citation-review10-final-reports.tar.gz",
+      "sha256": "c9441ec94be75ae76ba10eb821644dffba44def4f3d4fdb4a367b6028dbc5dc8"
+    },
+    "independent_qa_report": {
+      "name": "qa-citation-review10-final.json",
+      "sha256": "5c9dc9aac488ed0246a37323ea74b019fc6a3aa1e073e69340ec84364d49c9be"
+    },
+    "fixture": {
+      "path": "tests/fixtures/citation_cases_v36.json.gz",
+      "compressed_bytes": 122534,
+      "compressed_sha256": "6906f086601f13cd96028ac6516706a5a1e3b4d1fe58da9f04408ec1828746ba",
+      "json_sha256": "bbbccac5921d63b7b41c57bd448185c3459877fc294378aa0736c373f08cd7b7"
+    }
+  },
+  "limits": [
+    "141 complete books matching v36 and two targeted dictionary selections, not the entire production library.",
+    "Recorded production NER with the pinned real resolver; no live NER request during replay.",
+    "441 links in isolated acceptance versus444 records in the same source paragraphs under full-book history; both control sets pass.",
+    "Detailed per-record reports are audit artifacts and are not shipped as test fixtures."
+  ],
+  "release_policy": {
+    "output_affecting": true,
+    "full_relink_required": true,
+    "output_neutral_adoption_allowed": false,
+    "production_relink_run": false,
+    "merged": false
+  }
+}
