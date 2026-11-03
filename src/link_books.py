@@ -2262,6 +2262,12 @@ def process_batch(
                             and (text_rebuilt or failed and regrouped is None)
                             and _bavli_tractate_itself(ref.index)):
                         continue
+                    if attribution and not base_source and _bavli_tractate_itself(ref.index):
+                        ref, end = attributed_daf_address(ref, content, start, end, context_ref_factory)
+                        anchor_text = content[start:end]
+                        if not existing_base_address_agrees(ref, anchor_text, context_ref_factory,
+                                                           prefix=content[:start], following=content[end:]):
+                            continue
                     if (attribution in ('self', 'other') and getattr(source_index, 'base_text_titles', None)
                             and _top_category(source_index) == 'Talmud'
                             and _bavli_tractate_itself(ref.index)):
@@ -2269,8 +2275,7 @@ def process_batch(
                         ownership_fallback = True
                     # Completing a cut-off relative span must not hide the
                     # same mark from the legacy whole-daf narrowing path.
-                    marked = amud_marked_daf(ref, content, start, min(raw_end, end), context_ref_factory,
-                                            allow_closed_period=ownership_fallback or self_commentary)
+                    marked = amud_marked_daf(ref, content, start, min(raw_end, end), context_ref_factory)
                     # The citation is where its daf and its named chapter meet. Only a
                     # chapter-led citation needs that; a parenthesized address stands alone.
                     if chapters and marked is None:
@@ -2296,7 +2301,7 @@ def process_batch(
                         # Preserve both successful resolver candidates and the
                         # pre-existing parenthesized/chapter recovery paths.
                         # New text-rebuilt guesses have no established link.
-                        if (text_rebuilt or original_ref is None and regrouped is None
+                        if (text_rebuilt or original_ref is None and regrouped is None and source_relative is None
                                 or not existing_base_address_agrees(ref, content[start:relative_address_end(
                                     content, start, end)], context_ref_factory,
                                     prefix=content[:start], following=content[end:])):
@@ -2390,7 +2395,8 @@ def process_batch(
                 if self_commentary_ref is not None:
                     ref, target_ref = self_commentary_ref, self_commentary_ref.normal()
                     relative_direction = self_citation_direction(content, start, end)
-                elif (not base_source and not text_rebuilt and (original_ref is not None or regrouped is not None)
+                elif (not base_source and not text_rebuilt
+                        and (original_ref is not None or regrouped is not None or source_relative is not None)
                         and _bavli_tractate_itself(getattr(ref, 'index', None))):
                     named_commentary = named_commentary_citation_ref(
                         ref, content, start, end, context_ref_factory)
@@ -3376,7 +3382,7 @@ def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
 _WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")
 
 
-def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory, *, allow_closed_period=False):
+def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
     """(Ref, end) of amud b after a whole-daf anchor, past spaces and HTML tags.
 
     The NER cuts "נא:" before the mark when "ושם" follows (Otzaria/otzaria#2490). Only ":"
@@ -3386,9 +3392,7 @@ def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory, *, all
     if ref_factory is None or end >= len(content):
         return None
     written = _AMUD_AFTER_RE.match(content, end)
-    if written is None or (written["mark"] != ":" and not (
-            allow_closed_period and written["mark"] == "."
-            and relative_address_end(content, start, end) == written.end())):
+    if written is None or written["mark"] != ":":
         return None
     marked_end = written.end()
     if not _HTML_TAG_RE.sub("", content[marked_end:]).strip():
@@ -3399,8 +3403,7 @@ def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory, *, all
     tokens = _HTML_TAG_RE.sub("", content[start:end]).split()
     if not tokens or int(match.group(2)) not in _hebrew_number(tokens[-1]):
         return None
-    marked = _amud_ref(match.group(1), int(match.group(2)),
-                       'ב' if written['mark'] == ':' else 'א', ref_factory)
+    marked = _amud_ref(match.group(1), int(match.group(2)), "ב", ref_factory)
     return None if marked is None else (marked, marked_end)
 
 
@@ -3863,7 +3866,12 @@ def citation_local_attribution(content, start, end):
     words = before + lead
     own = [i for i, word in enumerate(words) if is_self_writing(word)]
     if not own:
-        return 'ambiguous' if postfix_ambiguous else None
+        cited_locator = any(re.fullmatch(r'ו?(?:כתב|כתבו|פירש|פירשו|פירוש|פי["\'])', word)
+                            and len(before) - i <= 6 and all(w in {
+                                'לעיל', 'לקמן', 'להלן', 'שם', 'התם', 'בסמוך', 'כבר'}
+                                for w in before[i + 1:])
+                            for i, word in enumerate(before))
+        return 'ambiguous' if postfix_ambiguous or cited_locator else None
     at = own[-1]
     gap = words[at + 1:]
     outside_gap = before[at + 1:] if at < len(before) else gap
@@ -3970,12 +3978,28 @@ def named_commentary_citation_ref(target, content, start, end, ref_factory):
         and target_has_text(commentary)) else None
 
 
+def attributed_daf_address(target, content, start, end, ref_factory):
+    """Normalize a printed attributed amud before checking either ownership path."""
+    end = relative_address_end(content, start, end)
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(_QUOTE_HTML_TAG_RE.sub(' ', content[start:end]))))
+    matches = list(re.finditer(rf'(?<![א-ת]){_DAF_ADDRESS}', anchor))
+    whole = _WHOLE_DAF_RE.fullmatch(target.normal())
+    if whole and len(matches) == 1 and matches[0].end() == len(anchor):
+        printed = _address_ref(matches[0], target.index.title, ref_factory)
+        if (printed is not None and target.sections[0] <= printed.sections[0]
+                and printed.toSections[0] <= target.toSections[0]):
+            target = printed
+    return target, end
+
+
 def existing_base_address_agrees(target, anchor, ref_factory, *, prefix='', following=''):
     """Ownership fallback cannot preserve a contradictory or collapsed daf."""
     open_location = _QUOTE_HTML_TAG_RE.sub(' ', anchor).rstrip().endswith('(')
     anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(_QUOTE_HTML_TAG_RE.sub(' ', anchor))))
     words = _attribution_tokens(anchor)
     before = _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', prefix))).rstrip(' ([')
+    if re.search(r'(?:^|\s)ו?(?:עי[\'\"]|עיין|ראה)$', before):
+        before = ''  # עי' is an instruction to look, not an Eruvin alias
     for book, aliases, _ in _bavli_chapter_books():
         if book != target.index.title:
             for alias in aliases:
@@ -4361,6 +4385,16 @@ def explicit_own_relative_ref(linker, rr, content, start, end, source_ref, ref_f
                   or chapter_located_relative_ref(content[start:end], source_ref, ref_factory))
         if current is None:
             if legacy is None or legacy[0].normal() != target.normal():
+                return None
+            prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start])
+            before = _attribution_tokens(' '.join(clause_before(prefix, len(prefix))))
+            if any(_EXTERNAL_ATTRIBUTION_RE.fullmatch(word) for word in before):
+                return None
+            scope = [word for word in before
+                     if not is_self_writing(word) and not _CITED_WRITING_RE.fullmatch(word)]
+            if (not any(is_self_writing(word) for word in before)
+                    and any(re.fullmatch(r'ו?(?:כתב|כתבו|פירש|פירשו|פירוש|פי["\'])', word) for word in before)
+                    and clause_names_elsewhere(linker, scope, target, target.index.title)):
                 return None
             current = target
         elif current.index.title != target.index.title:

@@ -73,6 +73,10 @@ class LocalAttributionTest(unittest.TestCase):
                 source='Tosafot on Shevuot 19a:1:1', context_type='CURRENT_BOOK')
             self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a:3'])
             self.assertEqual(rows[0].relative_direction, 'above')
+            rows = self.records('כתבתי ' + relative + ')', relative,
+                [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')],
+                source='Tosafot on Shevuot 19a:1:1', context_type='CURRENT_BOOK')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
 
     def test_named_commentary_upgrade_drops_gemara_segments_and_preserves_utf16_anchor(self):
         anchor = 'בפ"ק (דף ב.'
@@ -127,6 +131,13 @@ class LocalAttributionTest(unittest.TestCase):
             rows = self.records(anchor + mark + ') פרש"י', anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')], refs=['Shevuot 2'])
             self.assertEqual([r.target_ref for r in rows], [target])
+        rows = self.records('כתבתי ' + anchor + '.)', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')], refs=['Shevuot 2b'])
+        self.assertEqual(rows, [])
+        for anchor in ('בפ"ק (דף ב', 'בפ"ק (דף ב.'):
+            rows = self.records('כתבתי ' + anchor + ('.)' if anchor.endswith('ב') else ')'), anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', anchor.split('(')[1])], refs=['Shevuot 2'])
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
 
     def test_unqualified_tosafot_followed_by_a_new_clause_can_be_upgraded(self):
         anchor = 'בפ"ק (דף ב.'
@@ -227,6 +238,20 @@ class LocalAttributionTest(unittest.TestCase):
             [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], source='Rashi on Shevuot 19a:1')
         self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
         self.assertEqual(rows[0].relative_direction, 'above')
+        rows = self.records('פירשו ' + anchor + ')', anchor,
+            [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], source='Tosafot on Shevuot 19a:1:1')
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_look_instruction_before_an_explicit_tractate_is_not_an_eruvin_alias(self):
+        books = list(helpers.BOOKS)
+        title, aliases, chapters = books[-1]
+        books[-1] = title, aliases + ("עי'",), chapters
+        anchor = 'בשבועות (דף ב.'
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=tuple(books)):
+            for command in ("עי'", "ועי'", 'עיין', 'ועיין', 'ראה', 'וראה'):
+                rows = self.records(command + ' ' + anchor + ') ברש"י ד"ה אחר', anchor,
+                    [('NAMED', 'בשבועות'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+                self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 2a'], command)
 
     def test_coordinated_and_negative_postfix_writers_do_not_own_a_native_citation(self):
         anchor = 'בפ"ק (דף ב.'
