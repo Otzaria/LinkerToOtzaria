@@ -1,193 +1,128 @@
-# Citation recovery after v36
+# Citation recovery and work ownership after v36
 
-This change addresses the remaining linker cases in the owner's `ai.md`, against
-`main` at `4b913a3`. It changes emitted links and requires a **full relink**. Do not
-adopt the previous engine fingerprint as output-neutral.
+The final candidate is pinned to source SHA256 `b1c2fb59656b889d2cafcb629acce56d6557916bd16d825a0247bf78e0b511d2` and
+`engine_src=bb8b528aac4de527`. It repairs the reported citation recovery failures and
+keeps ordinary Gemara quotations separate from authors referring to their own
+commentaries. The final evidence is in
+`tests/fixtures/citation_review_v36_validation.json`.
 
-## Reported cases
+## Resolution behavior
 
-| Source, zero-based line | Printed citation | Result |
-| --- | --- | --- |
-| Tosafot Shevuot, 18 | `בספ"ב (לקמן דף יט:)` | `Shevuot 19b` |
-| Tosafot Shevuot, 18 | `בפ"ב (לקמן דף יד: ושם)` | `Shevuot 14b` |
-| Tosafot Shevuot, 29 | `בפ"ג (לקמן דף כא: ושם)` | `Shevuot 21b` |
-| Tosafot Shevuot, 254 | `בפ"ק (לעיל דף ב.)` | `Shevuot 2a`, replacing `Tosafot on Shevuot 2a` |
-| Ran on Shevuot, 512 | `בפרק שבועת העדות (דף לה.)` | `Shevuot 35a` |
-| Rashba Shabbat, 456 | `בפרק קמא דסוכה (יג, ב. יד, א)` | Separate anchors for `Sukkah 13b` and `Sukkah 14a`, replacing `Sukkah 20a` |
-| Rashba Shabbat, 321 | `לקמן בסמוך (מ, א)` | `Shabbat 40a`, replacing `Rashba on Shabbat 40a` |
+- Restore a cut-off printed amud mark only with visible closing-parenthesis or
+  `ושם` evidence; retain the original UTF-16 anchor and whole-daf narrowing.
+- Read absolute chapter/daf addresses in either printed order, including lists.
+  Require a unique chapter in the named tractate, membership of each printed daf
+  in that chapter, canonical targets and actual target text. Each list member
+  retains its own address and raw anchor.
+- Determine ownership locally. A new native quotation predicate ends a prior
+  self-explanation. A direct postfix `פי' רש"י` or `פירש בקונטרס` qualifies the
+  cited work, as does an attached `מפורש בתוספות`; a coordinated `ורש"י פירש` or comparative `כדפירש בקונטרס` starts
+  another explanation and cannot delete the preceding Gemara quotation.
+- Recognize Hebrew and Aramaic self-writing, `כדפי'`, editorial brackets, precise
+  chapter locators and attached postfix writing such as `הארכתי שם`/`הבאתי שם`.
+  A proof FROM Gemara and a subordinate `שהוכחתי ממנה` remain distinct from
+  writing one's own discussion there. Communal legal `כתבינן` does not mean the
+  author wrote a commentary; explicitly comparative `כדכתבינן` can.
+- Retarget a proven self-citation to a real direct commentary of the same author
+  at the printed address. Preserve precise offered own candidates. Do not copy
+  Gemara segments into commentaries, equate Rif and Bavli pagination, collapse
+  lists/ranges, or bypass chapter/direction checks.
+- A new unnamed ordinal chapter cannot default to the source tractate while the
+  paragraph continues an explicitly cited foreign tractate. Ordinary words such
+  as `ביצה` do not supply this evidence: a cited alias needs printed daf syntax.
+  Ambiguous ownership cannot manufacture a new bare-Gemara target.
+- Preserve successful unchanged candidates' legacy ibid role across batches and
+  checkpoints. New reconstructions do not seed that history; a rejected citation
+  supplies no antecedent. A sole existing ibid candidate can independently retain
+  its exact printed amud when a quoted, globally unique chapter proves its work
+  and contains that amud. This exception does not seed legacy history.
+- Preserve base-Gemara behavior and the published `[במ]?` writer-prefix guard.
+  Paragraph counters never provide Bavli pagination. Hidden HTML attributes
+  never supply writer or address evidence.
 
-The daf target includes its opening Mishnah where appropriate; `Shevuot 2a` is
-not a reference to the independently numbered *Mishnah Shevuot* book.
+## Final validation
 
-## Evidence and constraints
+- CPython 3.12, 604 tests: macOS 591 passed / 13 skipped; Linux 603 passed /
+  one optional `jsonschema` skip.
+- Real resolver acceptance: 100 complete recorded source lines, 349 valid links,
+  103 required anchors and 11 anchored negative controls, plus forbidden targets.
+- Immutable replay: 125 items, 78,764 source rows; 123 complete books match the
+  published v36 source hashes (78,754 rows), plus two dictionary selections
+  (10 rows).
+- Baseline engine `4b913a3`: 34,451 records. Candidate: 34,966 records;
+  34,231 records unchanged exactly, 607 added, 92 omitted, 128 targets corrected.
+  Within the 123 complete books: 34,438 -> 34,953 records, with 34,218 unchanged
+  and the same difference counts.
+  Of the 92 omissions, 65 explicitly cite another commentary, 26 are own-text
+  or duplicate-anchor abstentions, and one removes a misread collapsed address
+  replaced by separate correct anchors.
+- Final contextual audit covers all 827 differences. Independent QA rechecked
+  all 14 differences from the preceding reviewed candidate and all 92 residual
+  omissions. The original eight preservation cases retain all nine exact
+  baseline records, including offsets, hashes and target metadata.
 
-The initial fixture `tests/fixtures/citation_cases_v36.json` contained twelve complete
-source lines and their actual raw NER responses, captured on the Windows AMD/ROCm
-runner on 2026-11-02; the review follow-up expands it as described below. The recorded normalization is checked before replay, and the real
-production-patched Sefaria resolver is used without a running NER service.
-Hand-specified expectations cover the failures above, the existing Sanhedrin and
-Bava Metzia recoveries, Tosafot's own explicitly qualified DH, the inflected
-self-reference at Rashba Shabbat 720, the existing Gemara reference after a prior
-self-explanation at Tosafot Shevuot 255, and all seven
-`שם שם` references to Genesis 48 in Agadat Bereishit line 17. The twelve source lines
-produce 53 validated links. Every emitted canonical target, source hash, UTF-16
-anchor and unique anchor key is checked.
+The replay uses recorded production NER captured on the Windows AMD/ROCm runner,
+with identical model, Sefaria dump and resolver-patch pins. It executes an
+immutable source copy and binds cached artifacts to the input bytes and the
+executed engine bytes. Every emitted record is checked for canonical target,
+target text, raw UTF-16 bounds, source hash and unique anchor key. The full source
+book hashes identify 123 complete matching v36 books; the remaining two items are
+selected dictionary rows, not complete books. All 36 available complete books
+whose titles begin `תוספות על` are included. The inventory and exact counts are
+recorded in the machine report.
 
-A cut-off amud mark is accepted only immediately before a closing bracket or
-`ושם`; quoted HTML attributes cannot supply that evidence. Relative addresses
-still require a canonical numeral, a valid source position, the correct direction,
-and the citing tractate's identity. A native quotation predicate (including `כדאמרינן`, `דתנן`, `כדתניא`,
-`ואמר נמי` and `והא דאמר`) can begin a new governing clause only when the
-citation names a verified chapter. An adjacent foreign-work or writer locator
-is retained. Governing self-references and DH qualifiers still veto a bare
-Gemara reconstruction.
+Independent QA inspected every changed-record anchor with surrounding source
+context, opened full paragraphs for ambiguous cases, verified identities and
+coverage, and rechecked the final replay delta after its findings were fixed.
+The review method and per-record outcomes are recorded with the validation.
+This is contextual review of every difference, not a claim that every long
+source paragraph or every target passage was manually read in full.
 
-A chapter/daf citation supplies absolute addresses. The tractate must be explicitly
-named, established by the directly paged source, or proven by a globally unique
-Bavli chapter name, including competing longer chapter names. A Rif commentary's
-page is never treated as the underlying Bavli page. Every member of a split list
-must lie in the named chapter and have text. Existing precise correct segment
-references are preserved. Newly recovered failed citations do not seed either
-resolver or legacy emitted-reference history. Replacing a successful upstream
-citation clears the previous legacy antecedent, so a later ambiguous `שם` cannot
-select that stale work. The last validated address still travels in the separate
-preceding-citation checkpoint state; resolver history itself remains untouched.
+The recorded acceptance cases include the original Tosafot Shevuot18/29/254,
+RanShevuot512, RashbaShabbat321/456 and Genesis48 reports. They also protect all
+ordinary Gemara examples in the later review, TosafotShevuot374/503/554, original
+own-commentary history, KerenOraNedarim305 with its actual heading stack, postfix
+writers, legal/proof predicates, implicit foreign chapters, coordinated own
+lists, quoted variants and all concrete independent QA counterexamples.
 
-## Initial complete-book comparison (2026-11-02)
+## Reproduction and limits
 
-The final engine replayed seven complete books, 4,555 source rows. Each book's
-hash exactly matches the committed v36 snapshot baseline. Raw NER was captured
-on the AMD runner; both engines resolved the same responses with the production
-Sefaria patch. All 976 baseline Rashba records also match the published v36
-payload exactly.
+From the pinned, production-patched Sefaria project directory:
 
-| Book | Source rows | Previous links | New links |
-| --- | ---: | ---: | ---: |
-| תוספות על שבועות | 618 | 501 | 504 |
-| משנה תורה, הלכות חגיגה | 37 | 39 | 39 |
-| ר"ן על שבועות | 810 | 267 | 273 |
-| רשב״א על שבת | 1,167 | 976 | 1,022 |
-| פסקי תוספות על ברכות | 399 | 17 | 17 |
-| אגדת בראשית | 307 | 1,782 | 1,782 |
-| אמרי דעת על משלי | 1,217 | 4 | 4 |
+```sh
+PYTHONPATH=. .venv/bin/python /path/to/repo/scripts/verify_citation_cases.py
+```
 
-Across the sample: 3,586 → 3,641 links; 3,583 existing records retained exactly,
-58 added records and three replaced records. The replacements are precisely the
-three incorrect targets in the reported Tosafot/Rashba cases; the Sukkah list now
-has two separate anchors. There are no unrelated omissions. All source hashes,
-canonical targets, UTF-16 anchors and unique anchor keys were validated.
-
-All 47 literal `לעיל/לקמן דף X` occurrences in Tosafot Shevuot were checked:
-44 link, and the three remaining omissions are the two explicit Rashi citations
-and the foreign-tractate `סט:` citation identified in the owner's report.
-Other abbreviated or unproven forms can still remain unlinked.
-
-Every changed source line and all added targets were reviewed in context. In
-particular the inflected self-reference at Rashba 720 remains outside Gemara
-reconstruction, while its subsequent explicit Gemara quotation can link normally.
-Machine-readable counts, source hashes and the engine identity are recorded in
-`tests/fixtures/citation_recovery_v36_validation.json`.
-
-## Initial local test environments (2026-11-02)
-
-The final suite ran on CPython 3.12 in both environments:
-
-- macOS: 561 tests, 548 passed, 13 platform/optional-dependency skips.
-- Linux ARM64: 561 tests, 560 passed, one optional `jsonschema` skip. The
-  committed-engine fingerprint contract also ran in this isolated git checkout.
-
-The Linux process-observation fixture explicitly creates its mocked `os.waitid`
-attribute so it also runs on macOS Python 3.12, where that function is absent.
-
-## Reproduce
-
-The ordinary dependency-free suite runs from this repository:
+The ordinary suite needs no Sefaria service:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-For the real-engine acceptance test, use the pinned Sefaria checkout with this
-repository's `ci/sefaria_resolver.patch`, its Python environment and the pinned
-Mongo dump. From the Sefaria project directory:
+`scripts/compare_citation_replay.py` compares baseline and candidate using the same
+recorded NER. It validates artifacts, supports bounded shards and exact
+input/engine-bound resumption, and writes differences with full source lines.
+Use `--published-book-hashes` to distinguish complete release books from selected
+rows. Earlier November2 evidence remains separately identified in
+`tests/fixtures/citation_recovery_v36_validation.json`; it certifies the earlier
+engine only.
 
-```sh
-PYTHONPATH=. .venv/bin/python /absolute/path/to/LinkerToOtzaria/scripts/verify_citation_cases.py
-```
+Some references remain conservatively omitted when the own commentary is empty,
+the printed location or inherited work cannot be proved, or an explicit own
+writing list cannot be safely reconstructed. For example, the printed `שם
+(עה, א)` in RashbaShevuot175 is not reconstructed as RashbaGittin75a merely from
+a distant earlier mention. RashiShevuot1538 also abstains from turning the
+author’s own causal explanation into bare Gemara when its location grammar is
+unproved. MeiriTaanit23a/28a and RashbaChullin92a have no available
+own-commentary text in the pinned dump. A full-library correctness claim cannot
+be inferred from this sample.
 
-The replay reads the recorded model responses and makes no live NER requests.
-The fixture records the Sefaria/model/server identities used for capture.
+This output-affecting change requires a **full relink** after merge. Do not adopt
+the old fingerprint as output-neutral. No production relink was run here and the
+PR was not merged. Compare the resulting full-library output with v36 before
+publishing the DB.
 
-## Issues outside linker output
-
-The owner's recheck already found #2695, #3453, #3029 and #2366 corrected. The
-Genesis preservation cases above explicitly protect #2695.
-#3480's originally reported wrong-daf behavior was not reproduced; the suspicious
-nearby Rashba reference at line 321 is corrected here.
-
-For #3252 the emitted DB anchor and target are correct; `<i data-commentator>`
-tags between the visible words require application-side rendering work. #2530,
-#3710, #1509, #3626, #3854 and #3264 concern commentator attachment or display.
-This linker PR does not close those application/build issues. Validation of a
-sample, even complete books, does not certify every citation in the full corpus.
-
-## Review follow-up (2026-11-03)
-
-The follow-up addresses the owner's second `ai.md` review:
-
-- One shared first-person predicate handles Hebrew inflections and Aramaic
-  `כדפרישית`, `כדפרישנא`, `כדכתיבנא`, `כדפרשינן`, `כתבתיו`, `פירשתיו` and
-  `בארנו`. It is used by the relative/absolute and existing-candidate ownership
-  checks, including already successful sole base candidates and bare chapters.
-  A prior self-explanation may still introduce a distinct Gemara quote.
-- Verified-chapter quotation boundaries use the native-predicate grammar rather
-  than two literal word pairs; directly governing authors and tractates remain.
-- Both `בפרק X דמסכת Y (דף)` and `במסכת Y בפרק X (דף)` work. A shortened chapter
-  requires an explicit tractate and exactly one matching chapter in that work.
-  The actual Rashba Shabbat321 NER includes `בהדיא` before the tractate and uses
-  `המביא` for `המביא כדי יין`; the acceptance fixture now requires Beitzah32a.
-- Absolute chapter recovery shares the complete ownership check, avoiding a
-  false foreign-work attribution from the unfinished title prefix `תורה` in
-  `דבר תורה`. Unknown writer acronyms and complete foreign titles still veto it.
-- Successful replacements clear stale legacy ibid context; newly added failed
-  citations keep the former history behavior. Tests cover both and a following
-  ambiguous ibid. The Rashi/Gittin transport test exercises the actual clause
-  guard with a title-trie fixture instead of mocking the guard's answer.
-- The broader replay caught a valid Keren Ora Nedarim305 link suppressed by the
-  initial PR: `והוא לטעמיה אזיל דפירש לעיל` describes Rav Huna's Gemara view,
-  not a commentator writing. The prefixed third-person veto was narrowed back
-  to the published rule, while shared first-person and named-writer checks remain.
-  Its real replay derives Nedarim27a from the source's actual heading stack and
-  requires the printed Nedarim24a link.
-- The strict existing-target veto has a named helper, and global chapter-name
-  competition uses the existing `_chapter_alias_works()` index.
-
-`scripts/compare_citation_replay.py` compares whole books against identical
-recorded NER in the production-patched resolver. It writes every difference with
-its full source context, verifies every record's canonical target/text, source
-hash, exact UTF-16 anchor and uniqueness, and supports bounded shards and exact
-input/engine-bound resumption. `--published-book-hashes` distinguishes full books
-matching a release from targeted source rows. A report is evidence for review;
-it does not automatically establish the intended work of every new link.
-
-The full relink after merge must be compared with v36 across **every book before
-publishing the resulting DB**, including sampling additions from previously
-unaudited authors. The sampled replay here is not a substitute for that release
-comparison, and there is no output-neutral fingerprint adoption.
-
-The expanded acceptance fixture contains **32 actual source lines and86 validated links**. It includes Rashi's own Shevuot31a target (not a Gemara replacement),
-Hebrew/Aramaic self-reference negatives in Ran/Rashbam/Rashba, the mistaken bare
-chapter after Ran's `פירשתיו`, native quotation positives from Bava Batra/Gittin,
-and preservation controls in Zevachim/Ketubot. The additional20 rows were captured
-on the AMD runner on2026-11-03 with the same pinned server/models. Source heading
-rows for the non-Sefaria case are included; no page position is invented.
-
-Additional preservation cases cover Rashba's native `מפרשינן`, a coordinated
-`ולעיל (...) נמי אמרינן`, and `ומיהו בפרק X (...) משמע`. The latter two start a
-new quotation while retaining adjacent work/writer attributions. A completed
-Aramaic self-reference remains distinct from the present native discussion.
-Cut-off span completion also preserves the original mark position for whole-daf
-narrowing, so an existing commentary amud cannot silently widen to a full daf.
-The replay tool binds artifact caches to the bytes actually loaded, and the final
-large replay uses an immutable engine copy; exploratory candidate caches were
-discarded before that replay.
+Application-side commentator attachment/display issues remain separate. For
+#3252 the source DB target/anchor is correct; rendering must handle intervening
+`<i data-commentator>` tags. #2530/#3710/#1509/#3626/#3854/#3264 concern display or
+commentator attachment; this linker PR does not close those issues.
