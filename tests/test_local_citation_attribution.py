@@ -42,7 +42,8 @@ class LocalAttributionTest(unittest.TestCase):
             rows = self.records(anchor + ')' + tail, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
             self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
-        for tail in (' פי\' רש"י', ' פרש"י', ' פירש בקונטרס'):
+        for tail in (' פי\' רש"י', ' פרש"י', ' פירש בקונטרס',
+                     ' פי\' רש"י לא יצא', ' פרש"י לא יצא'):
             rows = self.records(anchor + ')' + tail, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
             self.assertEqual(rows, [])

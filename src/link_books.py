@@ -3766,7 +3766,9 @@ def citation_local_attribution(content, start, end):
         # A new coordinated subject compares explanations; it does not own
         # the preceding Gemara quotation. A negative explanation is likewise
         # a contrast, not the cited work's positive attribution.
-        if (not after[0].startswith('ו') and 'לא' not in after[:3] and
+        negative_writer = (bool(_EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]))
+                           and len(after) > 1 and after[1] == 'לא')
+        if (not after[0].startswith('ו') and not negative_writer and
                 ((_EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]) and (
                     after[0].startswith('ב') or any(
                         _WRITING_ATTRIBUTION_RE.fullmatch(w) or w == 'ד"ה' for w in after[1:])))
@@ -3775,7 +3777,7 @@ def citation_local_attribution(content, start, end):
                 or re.fullmatch(r'פרש["\']י', after[0]))):
             return 'other'
         if not after[0].startswith('ו') and _EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]):
-            postfix_ambiguous = 'לא' not in after[:3]
+            postfix_ambiguous = not negative_writer
         if (len(after) > 1 and
                 (_POSTFIX_SELF_WRITING_RE.fullmatch(after[0]) and after[1] in ('שם', 'התם')
                  or after[0] in ('נרחיב', 'ונרחיב') and after[1] == 'בה'
