@@ -229,6 +229,16 @@ class LocalAttributionTest(unittest.TestCase):
         self.assertIsNone(lb.own_commentary_self_ref(rr, Ref('Gittin 2a'), text, 7, len(text),
                                                    Ref('Tosafot on Shevuot 3a:1:1'), Ref))
 
+    def test_an_explicit_foreign_tractate_inside_parentheses_keeps_its_own_commentary(self):
+        with mock.patch.dict(Ref.BASES, {'Tosafot on Gittin': ['Gittin']}):
+            for anchor in ('בפרק קמא (גיטין דף ב:', 'בפרק קמא (גיטין דף ב:)'):
+                text = 'כתבתי ' + anchor
+                rr = citation(text, anchor, [('NAMED', 'בפרק קמא'), ('NAMED', 'גיטין'),
+                    ('NUMBERED', 'דף ב:')], refs=[Ref('Gittin 2b')])
+                actual = lb.own_commentary_self_ref(rr, Ref('Gittin 2b'), text, *rr.raw_entity.span.range,
+                                                   Ref('Tosafot on Shevuot 3a:1:1'), Ref)
+                self.assertEqual(actual.normal(), 'Tosafot on Gittin 2b')
+
     def test_an_independent_printed_self_address_repairs_the_page_without_stale_ibid(self):
         anchor = 'בשבועות דף ב.'
         text = 'כתבתי ' + anchor + ')'

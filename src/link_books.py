@@ -4155,7 +4155,7 @@ def own_commentary_self_ref(rr, target, content, start, end, source_ref, ref_fac
     if whole:
         numeric.append(whole.start())
     chapter_lead = anchor[:min(numeric)].strip().rstrip(' (') if numeric else anchor.split('(', 1)[0]
-    locator = locator_before + chapter_lead.split()
+    locator = _attribution_tokens(' '.join(locator_before) + ' ' + chapter_lead)
     if source_base != [printed.index.title]:
         explicit_work = any(
             re.fullmatch(rf'ו?[במדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}',
