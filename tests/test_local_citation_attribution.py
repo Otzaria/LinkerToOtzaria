@@ -133,7 +133,7 @@ class LocalAttributionTest(unittest.TestCase):
             self.assertEqual([r.target_ref for r in rows], [target])
         rows = self.records('כתבתי ' + anchor + '.)', anchor,
             [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')], refs=['Shevuot 2b'])
-        self.assertEqual(rows, [])
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
         for anchor in ('בפ"ק (דף ב', 'בפ"ק (דף ב.'):
             rows = self.records('כתבתי ' + anchor + ('.)' if anchor.endswith('ב') else ')'), anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', anchor.split('(')[1])], refs=['Shevuot 2'])
@@ -200,6 +200,102 @@ class LocalAttributionTest(unittest.TestCase):
         anchor = 'בפרק קמא'
         text = anchor + ' מפורש בתוספות'
         self.assertIsNone(lb.named_commentary_citation_ref(target, text, 0, len(anchor), Ref))
+
+    def test_existing_address_numbers_are_not_tractate_or_chapter_aliases(self):
+        for anchor, target in (('שבועות דל"ט ע"ב', 'Shevuot 39b'),
+                               ('שבועות דל"ט.', 'Shevuot 39a'),
+                               ('שבועות דל"ט:', 'Shevuot 39b'),
+                               ('שבועות פ"ח ע"ב', 'Shevuot 88b'),
+                               ('שבועות פ"ח.', 'Shevuot 88a'),
+                               ('שבועות פ"ח:', 'Shevuot 88b'),
+                               ('שבועות דף ע"ב', 'Shevuot 72'),
+                               ('שבועות ע"ז א\'', 'Shevuot 77a')):
+            self.assertTrue(lb.existing_base_address_agrees(Ref(target), anchor, Ref), anchor)
+        books = list(helpers.BOOKS)
+        title, aliases, chapters = books[-1]
+        books[-1] = title, aliases + ('ע"ז', 'ס"ח'), chapters
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=tuple(books)):
+            self.assertTrue(lb.existing_base_address_agrees(Ref('Shevuot 77a'), 'שבועות ע"ז א\'', Ref))
+            self.assertTrue(lb.existing_base_address_agrees(Ref('Shevuot 68'), 'בשבועות דף ס"ח', Ref))
+
+    def test_an_implicit_own_chapter_cannot_upgrade_a_foreign_upstream_work_guess(self):
+        anchor = 'בפרק קמא (דף ב.'
+        text = 'כתבתי ' + anchor + ')'
+        rr = citation(text, anchor, [('NAMED', 'בפרק קמא'), ('NUMBERED', 'דף ב.')], refs=[Ref('Gittin 2a')])
+        actual = lb.own_commentary_self_ref(rr, Ref('Gittin 2a'), text, *rr.raw_entity.span.range,
+                                          Ref('Tosafot on Shevuot 3a:1:1'), Ref)
+        self.assertEqual(actual.normal(), 'Tosafot on Shevuot 2a')
+        text = 'כתבתי במקום אחר (דף ב.)'
+        self.assertIsNone(lb.own_commentary_self_ref(rr, Ref('Gittin 2a'), text, 7, len(text),
+                                                   Ref('Tosafot on Shevuot 3a:1:1'), Ref))
+
+    def test_an_independent_printed_self_address_repairs_the_page_without_stale_ibid(self):
+        anchor = 'בשבועות דף ב.'
+        text = 'כתבתי ' + anchor + ')'
+        first = citation(text, anchor, [('NAMED', 'בשבועות'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 3a')])
+        stale = citation('שם', 'שם', [('IBID', 'שם')], refs=[Ref('Shevuot 3a:4')])
+        self.linker.bulk_link = lambda inputs, **_k: [NS(resolved_refs=[first if t == text else stale]) for t in inputs]
+        book = lb.BookKey('Sefaria', 'ספר')
+        batch = [(7, text, 'Tosafot on Shevuot 19a:1:1'), (8, 'שם', 'Tosafot on Shevuot 19a:1:1')]
+        history = lb.IbidContext()
+        history.resolve = lambda _linker, invoke: invoke()
+        first_rows, _ = lb.process_batch(self.linker, book, batch[:1], self.fail,
+            context_ref_factory=Ref, ibid_context=history)
+        self.assertEqual([r.target_ref for r in first_rows], ['Tosafot on Shevuot 2a'])
+        self.assertIsNone(history.last_emitted_ref)
+        self.assertIsNone(history.previous_citation[4])
+        state = history.state(book, 0, batch[:1], 'a' * 64)
+        resumed = lb.IbidContext()
+        resumed.resolve = lambda _linker, invoke: invoke()
+        resumed.restore_state(state, Ref, book, 0, batch[:1], 'a' * 64)
+        rows, _ = lb.process_batch(self.linker, book, batch[1:], self.fail,
+            context_ref_factory=Ref, ibid_context=resumed)
+        self.assertEqual(rows, [])
+
+    def test_own_dh_is_proven_independently_without_changing_base_ibid_history(self):
+        first_anchor, dh_anchor = 'בפ"ק (לעיל דף ב.', 'שם ד"ה והא'
+        texts = ['פירשנו ' + first_anchor + ')', 'פירשתי ' + dh_anchor, 'שם']
+        segment = Ref('Tosafot on Shevuot 2a:1:1')
+        segment.text = lambda _lang: NS(as_string=lambda: 'והא דאמרינן - פירוש הדברים')
+        citations = [
+            citation(texts[0], first_anchor, [('NAMED', 'בפ"ק'), ('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 2a')]),
+            citation(texts[1], dh_anchor, [('IBID', 'שם'), ('DH', 'ד"ה והא')], refs=[segment]),
+            citation(texts[2], 'שם', [('IBID', 'שם')], refs=[Ref('Shevuot 2a:4')]),
+        ]
+        by_text = dict(zip(texts, citations))
+        self.linker.bulk_link = lambda inputs, **_k: [NS(resolved_refs=[by_text[t]]) for t in inputs]
+        book = lb.BookKey('Sefaria', 'ספר')
+        batch = [(i, text, 'Tosafot on Shevuot 19a:1:1') for i, text in enumerate(texts)]
+        def history():
+            result = lb.IbidContext()
+            result.resolve = lambda _linker, invoke: invoke()
+            return result
+        with mock.patch.object(Ref, 'all_segment_refs', lambda _ref: [segment], create=True):
+            whole, _ = lb.process_batch(self.linker, book, batch, self.fail,
+                context_ref_factory=Ref, ibid_context=history())
+            self.assertEqual([r.target_ref for r in whole],
+                ['Tosafot on Shevuot 2a', segment.normal(), 'Shevuot 2a:4'])
+            for boundary in (1, 2):
+                left_history = history()
+                left, _ = lb.process_batch(self.linker, book, batch[:boundary], self.fail,
+                    context_ref_factory=Ref, ibid_context=left_history)
+                state = left_history.state(book, 0, batch[:boundary], 'a' * 64)
+                resumed = history()
+                resumed.restore_state(state, Ref, book, 0, batch[:boundary], 'a' * 64)
+                right, _ = lb.process_batch(self.linker, book, batch[boundary:], self.fail,
+                    context_ref_factory=Ref, ibid_context=resumed)
+                self.assertEqual([r.to_dict() for r in left + right], [r.to_dict() for r in whole])
+            attached_dh = 'ושם ד"ה והא'
+            text = 'פירשנו ' + first_anchor + ' ' + attached_dh + ') וכדאמר שם'
+            first = citation(text, first_anchor, [('NAMED', 'בפ"ק'), ('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 2a')])
+            dh = citation(text, attached_dh, [('IBID', 'ושם'), ('DH', 'ד"ה והא')], refs=[segment])
+            native = citation(text, 'וכדאמר שם', [('IBID', 'שם')], refs=[Ref('Shevuot 2a:4')])
+            self.assertNotEqual(lb.citation_local_attribution(text, *dh.raw_entity.span.range), 'self')
+            self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[first, dh, native])]
+            rows, _ = lb.process_batch(self.linker, book, [(7, text, 'Tosafot on Shevuot 19a:1:1')],
+                self.fail, context_ref_factory=Ref, ibid_context=history())
+            self.assertEqual([r.target_ref for r in rows],
+                ['Tosafot on Shevuot 2a', segment.normal(), 'Shevuot 2a:4'])
 
     def test_a_chapter_fallback_cannot_contradict_its_attached_printed_daf(self):
         anchor = 'בפרק קמא'
