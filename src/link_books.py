@@ -3687,7 +3687,7 @@ _RELATIVE_DISCOURSE_ABBREVIATIONS = frozenset({
     'ת"ל', 'כר"ע', 'ר"ע', 'דל"ל', 'דה"נ', 'ה"מ', 'בד"א', 'אע"פ', 'כה"ג', 'ב"ד', 'ס"ל',
 })
 _NATIVE_CITATION_VERB_RE = re.compile(
-    r'(?P<prefix>ו?[דכבשמ]{0,2})(?:אמרינן|אמרו|אמר|קאמר|פריך|תנא|תנן|תניא|משמע|מוכח|מייתי|איתא|גרסינן|אשכחן|מפורש|מפרשינן|קתני|מצינו|פוסק|מסיק|מסקינן|קיי["״]ל)')
+    r'(?P<prefix>ו?[דכבשמ]{0,2})(?:אמרינן|אמרו|אמר|קאמר|פריך|תנא|תנן|תניא|משמע|מוכח|מייתי|איתא|גרסינן|אשכחן|מפורש|מפרשינן|קתני|מצינו|פוסק|מסיק|מסקינן|פסלינן|קיי["״]ל)')
 _CITED_WRITING_RE = re.compile(
     r'ו?[דכבשמל]?(?:כתב|כתבו|פירש|פירשו|פירוש|לפרש|מפרש|מפרשים|פי[\"\']|כמ[\"]ש|כמש[\"]כ)')
 _SELF_WRITING_RE = re.compile(
@@ -3701,9 +3701,9 @@ _ATTRIBUTION_BREAKS = frozenset({
     'וההיא', 'ואמר', 'ואמרינן', 'ואיתא', 'ואשכחן', 'והאמר', 'ואף', 'ואם',
 })
 _EXTERNAL_ATTRIBUTION_RE = re.compile(
-    r'ו?[בכלמד]?(?:רש[\"\']י|ר[\"\']ת|קונטרס|קונט\')')
+    r'ו?[בכלמד]?(?:רש[\"\']י|ר[\"\']ת|קונטרס|קונט\'|תוספות|תוס[\"\'])')
 _WRITING_ATTRIBUTION_RE = re.compile(
-    r'ו?[כדשבמל]{0,3}(?:פירש|פרש|כתב|פי[\"\']|פרש[\"\']י)')
+    r'ו?[כדשבמל]{0,3}(?:פירש|פרש|כתב|מפורש|פי[\"\']|פרש[\"\']י)')
 
 
 _POSTFIX_SELF_WRITING_RE = re.compile(
@@ -3723,7 +3723,7 @@ def self_locator_gap_is_clear(words):
         if words[i] == 'סמוך' and words[i + 1] in ('לתחילתו', 'לסופו'):
             del words[i:i + 2]
     neutral = {'שם', 'התם', 'לעיל', 'לקמן', 'להלן', 'למעלה', 'למטה', 'בסמוך',
-               'טעם', 'לה', 'נמי', 'כבר', 'וכן', 'בארוכה', 'באורך', 'בקצרה',
+               'טעם', 'טעמא', 'זה', 'לה', 'נמי', 'כבר', 'וכן', 'בארוכה', 'באורך', 'בקצרה',
                'בפירקין', 'בפרקין', 'פירקין', 'פרקין', 'ברישמכילתין', 'ברישמכלתין',
                'במקומו', 'במקומה', 'באריכות', 'בסוף', 'בריש', 'בשלהי'}
     if words[:2] in (['דבר', 'זה'], ['ענין', 'זה'], ['דינין', 'אלו']):
@@ -3780,6 +3780,8 @@ def citation_local_attribution(content, start, end):
         if closing_location and re.search(_DAF_ADDRESS, _plain_quotes(closing_location[0])):
             attached = closing_location
     native_after = tokens(tail[attached.end():] if attached else tail)[:8]
+    if attached:
+        after = native_after[:4]
     postfix_ambiguous = False
     if after:
         # A new coordinated subject compares explanations; it does not own
@@ -5119,7 +5121,10 @@ def explicit_chapter_dapim(linker, rr, content, source_ref, ref_factory):
             return ()
         own = _own_tractates(source_ref, ref_factory)
         previous_works = preceding_printed_tractates(content, start)
-        if attribution != 'self' and previous_works and not previous_works <= set(own):
+        offered = None if getattr(rr, 'resolution_failed', False) or rr.is_ambiguous else _pick_ref(rr)
+        offered_work = (offered is not None and _bavli_tractate_itself(offered.index)
+                        and offered.index.title in own)
+        if attribution != 'self' and not offered_work and previous_works and not previous_works <= set(own):
             return ()  # "ומפ"ק" can continue the explicitly cited foreign tractate
         choices = {title: chapters for title, chapters in choices.items() if title in own}
     if len(choices) != 1:

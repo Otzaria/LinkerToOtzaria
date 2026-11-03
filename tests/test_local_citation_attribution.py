@@ -93,6 +93,30 @@ class LocalAttributionTest(unittest.TestCase):
             rows = self.records(prefix + anchor + ')', anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')])
             self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+        for context, expected in ((None, ['Shevuot 2a']), ('CURRENT_BOOK', [])):
+            rows = self.records('בגיטין (דף ב.) וכדאיתא ' + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 3a'], context_type=context)
+            self.assertEqual([r.target_ref for r in rows], expected)
+
+    def test_postfix_commentary_after_parenthetical_qualifier_is_not_gemara(self):
+        anchor = 'בפ"ק (דף ב.'
+        for tail in (' מפורש בתוספות', ' (גז"ש) מפורש בתוספות'):
+            rows = self.records(anchor + ')' + tail, anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual(rows, [])
+        rows = self.records(anchor + ') (גז"ש) מפורש בגמרא', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_local_self_objects_and_independent_native_rejection_keep_their_work(self):
+        anchor = 'בפ"ק (דף ב.'
+        for prefix in ('וכבר כתבתי זה ', 'הא פרישנא טעמא '):
+            rows = self.records(prefix + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+        rows = self.records('כדפי\' שם בקונטרס הא דפסלינן התם ' + anchor + ')', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
 
     def test_editorial_self_writing_and_precise_chapter_location_retain_ownership(self):
         for prefix, anchor in (('(כדאמרינן) [כדכתבינן] ', 'בפ"ק (דף ב.'),
