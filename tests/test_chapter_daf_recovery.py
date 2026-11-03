@@ -11,6 +11,7 @@ from test_recovery_evidence import lb, citation, Raw, NS
 class Ref:
     BASES = {
         'Tosafot on Shevuot': ['Shevuot'],
+        'Rashi on Shevuot': ['Shevuot'],
         'Rashba on Shabbat': ['Shabbat'],
         'Ran on Shevuot': ['Rif Shevuot'],
         'Rif Shevuot': [],
@@ -18,7 +19,7 @@ class Ref:
 
     def __init__(self, text):
         title, daf, amud, segment = re.fullmatch(
-            r'(.+?)(?: (\d+)([ab])(?::([\d:]+))?)?', text).groups()
+            r'(.+?)(?: (\d+)([ab])?(?::([\d:]+))?)?', text).groups()
         if title not in {'Shevuot', 'Sukkah', 'Shabbat', 'Gittin', *self.BASES}:
             raise ValueError(text)
         base = self.BASES.get(title, [])
@@ -26,10 +27,12 @@ class Ref:
                         dependence='Commentary' if base else None,
                         categories=['Talmud', 'Bavli'] + (['Rishonim on Talmud'] if base else [])
                         + ['Seder Moed'], get_title=lambda _: title)
-        self.sections = [] if daf is None else [2 * int(daf) - (amud == 'a')]
+        self.sections = [] if daf is None else [2 * int(daf) - (amud != 'b')]
         if segment:
             self.sections += [int(n) for n in segment.split(':')]
         self.toSections = self.sections[:]
+        if daf and amud is None:
+            self.toSections[0] = 2 * int(daf)
         self.value = text
 
     def normal(self):
@@ -65,12 +68,15 @@ BOOKS = (
     )),
     ('Sukkah', ('סוכה',), ((Chapter('Sukkah', 3, 40), {'פרק קמא', 'פ"ק'}),)),
     ('Shabbat', ('שבת',), ((Chapter('Shabbat', 3, 40), {'פרק קמא', 'פ"ק'}),)),
+    ('Gittin', ('גיטין',), ((Chapter('Gittin', 3, 40), {'פרק קמא', 'פ"ק'}),)),
 )
 
 
 class ChapterDafRecoveryTest(unittest.TestCase):
     def setUp(self):
         lb._TARGET_TEXT_CACHE.clear()
+        lb._chapter_alias_works.cache_clear()
+        self.addCleanup(lb._chapter_alias_works.cache_clear)
         self.addCleanup(mock.patch.stopall)
         module = types.ModuleType('sefaria.model.linker.ref_part')
         module.RawRef = Raw
@@ -79,8 +85,14 @@ class ChapterDafRecoveryTest(unittest.TestCase):
         mock.patch.object(lb, '_bavli_chapter_books', return_value=BOOKS).start()
         mock.patch.object(lb, '_book_chapters', side_effect=lambda title: next(
             (chapters for book, _, chapters in BOOKS if title == book), ())).start()
+        def continuation(phrase, **_):
+            if phrase == 'בגיטין':
+                return {'leaf': [NS(ref=lambda: Ref('Gittin'))]}, None
+            if phrase == 'תורה':
+                return {}, None  # incomplete ordinary-word title prefix
+            return None, None
         self.linker = NS(_ref_resolver=NS(get_ref_part_title_trie=lambda: NS(
-            get_continuations=lambda *_a, **_k: (None, None))))
+            get_continuations=continuation)))
 
     def records(self, text, anchor, parts, refs=(), source='Tosafot on Shevuot 3a:1:1',
                 book_source='Sefaria', context_type=None):
@@ -174,6 +186,14 @@ class ChapterDafRecoveryTest(unittest.TestCase):
         self.assertLessEqual(rows[0].end, rows[1].start)
         self.assertTrue(all(r.source_hash == lb.content_hash(text) for r in rows))
 
+    def test_self_reference_list_retains_each_members_independent_printed_daf(self):
+        anchor = 'בפ"ב (יד, ב. יט, א'
+        text = 'כתבתי ' + anchor + ')'
+        rows = self.records(text, anchor, [('NAMED', 'בפ"ב'), ('NUMBERED', 'יד, ב'),
+            ('NUMBERED', 'יט, א')])
+        self.assertEqual([r.target_ref for r in rows],
+                         ['Tosafot on Shevuot 14b', 'Tosafot on Shevuot 19a'])
+
     def test_ambiguous_chapter_in_rif_commentary_cannot_use_its_unrelated_pagination(self):
         anchor = 'בפרק קמא (דף יג, ב'
         self.assertEqual(self.records(anchor + ')', anchor,
@@ -202,7 +222,7 @@ class ChapterDafRecoveryTest(unittest.TestCase):
                             refs=['Sukkah 13b:5'], source='Rashba on Shabbat 52b:1')
         self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b:5'])
 
-    def test_rebuilt_list_preserves_legacy_history_and_checkpoints_the_last_printed_address(self):
+    def test_replacing_successful_list_clears_legacy_antecedent_and_checkpoints_printed_address(self):
         anchor = 'בפרק קמא דסוכה (יג, ב. יד, א'
         rr = citation(anchor, anchor, [('NAMED', 'בפרק קמא'), ('NAMED', 'דסוכה'),
                       ('NUMBERED', 'יג, ב'), ('NUMBERED', 'יד'), ('NUMBERED', 'א')],
@@ -217,13 +237,43 @@ class ChapterDafRecoveryTest(unittest.TestCase):
         rows, _ = lb.process_batch(self.linker, book, batch, self.fail,
                                     context_ref_factory=Ref, ibid_context=history)
         self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b', 'Sukkah 14a'])
-        self.assertEqual(history.last_emitted_ref.normal(), 'Shevuot 2a')
+        self.assertIsNone(history.last_emitted_ref)
         self.assertEqual([r.normal() for r in history.resolved_refs], ['Shevuot 2a'])
         state = history.state(book, 0, batch, 'a' * 64)
         restored = lb.IbidContext()
         restored.restore_state(state, Ref, book, 0, batch, 'a' * 64)
         self.assertEqual(restored.state(book, 0, batch, 'a' * 64), state)
         self.assertEqual(restored.previous_citation[4].normal(), 'Sukkah 14a')
+
+    def test_replaced_citation_cannot_leave_an_old_work_for_an_ambiguous_ibid(self):
+        anchor = 'בפרק קמא דסוכה (יג, ב. יד, א'
+        text = anchor + ') וכן (שם)'
+        first = citation(text, anchor, [('NAMED', 'בפרק קמא'), ('NAMED', 'דסוכה'),
+            ('NUMBERED', 'יג, ב'), ('NUMBERED', 'יד'), ('NUMBERED', 'א')], refs=[Ref('Sukkah 20a')])
+        following = citation(text, 'שם', [('IBID', 'שם')], refs=[Ref('Shevuot 2a'), Ref('Sukkah 20a')])
+        history = lb.IbidContext()
+        history.resolve = lambda _linker, invoke: invoke()
+        history.last_emitted_ref = Ref('Shevuot 2a')
+        self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[first, following])]
+        rows, _ = lb.process_batch(self.linker, lb.BookKey('Sefaria', 'רשבא על שבת'),
+            [(7, text, 'Rashba on Shabbat 52b:1')], self.fail,
+            context_ref_factory=Ref, ibid_context=history)
+        self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b', 'Sukkah 14a'])
+        self.assertIsNone(history.last_emitted_ref)
+
+    def test_an_added_failed_chapter_citation_does_not_reset_legacy_history(self):
+        anchor = 'בפרק קמא דסוכה (יג, ב'
+        first = citation(anchor, anchor, [('NAMED', 'בפרק קמא'), ('NAMED', 'דסוכה'),
+            ('NUMBERED', 'יג, ב')], failed=True)
+        history = lb.IbidContext()
+        history.resolve = lambda _linker, invoke: invoke()
+        history.last_emitted_ref = Ref('Shevuot 2a')
+        self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[first])]
+        rows, _ = lb.process_batch(self.linker, lb.BookKey('Sefaria', 'רשבא על שבת'),
+            [(7, anchor, 'Rashba on Shabbat 52b:1')], self.fail,
+            context_ref_factory=Ref, ibid_context=history)
+        self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b'])
+        self.assertEqual(history.last_emitted_ref.normal(), 'Shevuot 2a')
 
     def test_a_longer_competing_chapter_name_does_not_supply_unique_work_identity(self):
         competing = ('Gittin', ('גיטין',), ((Chapter('Gittin', 3, 160),
@@ -233,6 +283,162 @@ class ChapterDafRecoveryTest(unittest.TestCase):
             self.assertEqual(self.records(anchor, anchor,
                 [('NAMED', 'בפרק שבועת העדות'), ('NUMBERED', 'דף לה.')],
                 source='Ran on Shevuot 18a:7'), [])
+
+    def test_tractate_before_chapter_has_the_same_targets_and_raw_anchors(self):
+        for lead in ('במסכת סוכה בפרק קמא', 'בסוכה בפרק קמא', 'מסכת סוכה פרק קמא',
+                     'בהדיא במסכת סוכה בפרק קמא'):
+            anchor = lead + ' (יג, ב. יד, א'
+            text = '😀 וכדתניא ' + anchor + ')'
+            rows = self.records(text, anchor, [('NAMED', lead), ('NUMBERED', 'יג, ב'),
+                ('NUMBERED', 'יד'), ('NUMBERED', 'א')], source='Ran on Shevuot 18a:7')
+            self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b', 'Sukkah 14a'])
+            self.assertEqual([text.encode('utf-16-le')[2*r.start:2*r.end].decode('utf-16-le') for r in rows],
+                             [lead + ' (יג, ב', 'יד, א'])
+
+    def test_an_ordinary_word_title_prefix_does_not_name_a_foreign_work(self):
+        anchor = 'במסכת סוכה בפרק קמא (יג, ב'
+        text = 'וזיעה נמי דבר תורה מותרת כדאיתא ' + anchor + ')'
+        for source in ('Sefaria', 'DictaToOtzaria'):
+            rows = self.records(text, anchor, [('NAMED', 'במסכת סוכה'),
+                ('NAMED', 'בפרק קמא'), ('NUMBERED', 'יג, ב')], book_source=source)
+            self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b'])
+
+    def test_short_chapter_name_requires_explicit_tractate_and_unique_chapter(self):
+        book = ('Sukkah', ('סוכה',), ((Chapter('Sukkah', 3, 40), {'פרק המביא כדי יין'}),))
+        anchor = 'במסכת סוכה בפרק המביא (יג, ב'
+        parts = [('NAMED', 'במסכת סוכה'), ('NUMBERED', 'בפרק המביא'), ('NUMBERED', 'יג, ב')]
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=(book,)):
+            rows = self.records(anchor, anchor, parts)
+            self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b'])
+        competing = ('Sukkah', ('סוכה',), book[2] + (
+            (Chapter('Sukkah', 41, 80), {'פרק המביא גט'}),))
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=(competing,)):
+            self.assertEqual(self.records(anchor, anchor, parts), [])
+        for lead in ('במסכת סוכה בפרק', 'בפרק המביא'):
+            with mock.patch.object(lb, '_bavli_chapter_books', return_value=(book,)):
+                text = lead + ' (יג, ב'
+                self.assertEqual(self.records(text, text, [('NAMED', lead), ('NUMBERED', 'יג, ב')]), [])
+
+    def test_tractate_first_cannot_discard_writer_wrong_chapter_or_invalid_address(self):
+        for lead, before, body in (
+            ('במסכת סוכה בפרק שבועת העדות', '', 'לה, א'),
+            ('במסכת סוכה בפרק קמא', 'כדפרישנא ', 'יג, ב'),
+            ('במסכת סוכה בפרק קמא', '', 'מא, א'),
+            ('במסכת סוכה בפרק קמא', '', 'יג, ב. פנ, א'),
+        ):
+            anchor = lead + ' (' + body
+            self.assertEqual(self.records(before + anchor + ')', anchor,
+                [('NAMED', lead), ('NUMBERED', body)]), [], anchor)
+
+    def test_all_first_person_forms_block_absolute_and_relative_gemara_recovery(self):
+        for word in ('כדפרישית', 'כדפרישנא', 'כדכתיבנא', 'כדפרשינן',
+                     'כתבתיו', 'פירשתיו', 'בארנו', 'ובארנוה', 'כדביארתי', 'שכתבנוה',
+                     'הארכתי', 'אמרתי', 'שאמרנו', 'הבאתי', 'הבאנו', 'הוכחתי', 'כדכתבינן', 'אפרש', "כדפי'"):
+            with self.subTest(word=word):
+                anchor = 'בפרק שבועת העדות (דף לה.'
+                self.assertEqual(self.records(word + ' ' + anchor + ')', anchor,
+                    [('NAMED', 'בפרק שבועת העדות'), ('NUMBERED', 'דף לה.')],
+                    source='Ran on Shevuot 18a:7'), [])
+                anchor = 'לקמן (דף כו.'
+                rows = self.records(word + ' ' + anchor + ')', anchor,
+                    [('RELATIVE', 'לקמן'), ('NUMBERED', 'דף כו.')])
+                self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 26a'])
+                # The same evidence must veto an already resolved sole base
+                # candidate outside Tosafot, not just an ambiguous recovery.
+                rows = self.records(word + ' ' + anchor + ')', anchor,
+                    [('RELATIVE', 'לקמן'), ('NUMBERED', 'דף כו.')], refs=['Shevuot 26a'],
+                    source='Rashi on Shevuot 3a:1:1')
+                self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 26a'])
+
+    def test_aramaic_self_reference_keeps_an_offered_rashi_target(self):
+        # Rashi Shevuot36b cites his own explanation at31a, without a DH.
+        anchor = 'בפירקין לעיל (דף לא.'
+        text = 'והתם בב"ד כדפרישנא ' + anchor + '):'
+        rows = self.records(text, anchor, [('NAMED', 'בפירקין'), ('RELATIVE', 'לעיל'),
+            ('NUMBERED', 'דף לא.')], refs=['Rashi on Shevuot 31a'],
+            source='Rashi on Shevuot 36b:6:2', context_type='CURRENT_BOOK')
+        self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 31a'])
+
+    def test_a_bare_successful_chapter_cannot_evade_the_self_reference_guard(self):
+        anchor = 'בפרק שבועת העדות'
+        for source in ('Rashi on Shevuot 36b:6:2', 'Ran on Shevuot 18a:7'):
+            rows = self.records('פירשתיו ' + anchor, anchor, [('NAMED', anchor)],
+                refs=['Shevuot 35a'], source=source)
+            self.assertEqual(rows, [])
+
+    def test_third_person_sage_predicate_preserves_heading_based_gemara_recovery(self):
+        # Keren Ora Nedarim305: Rav Huna follows his own earlier Gemara view;
+        # 'דפירש' is not a first-person author or a named commentator.
+        anchor = 'לקמן (דף כו.'
+        text = 'והוא לטעמיה אזיל דפירש ' + anchor + ')'
+        rr = citation(text, anchor, [('RELATIVE', 'לקמן'), ('NUMBERED', 'דף כו.')], failed=True)
+        self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[rr])]
+        rows, _ = lb.process_batch(self.linker, lb.BookKey('DictaToOtzaria', 'ספר'),
+            [(7, text, 'Rashi on Shevuot 3a:1:1')], self.fail, context_ref_factory=Ref,
+            talmud_positions={7: Ref('Shevuot 3a')})
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 26a'])
+
+    def test_present_tense_native_discussion_is_not_a_completed_self_reference(self):
+        anchor = 'לעיל (דף ב.'
+        rows = self.records('ועוד דהא מפרשינן ' + anchor + ') משום דין זה', anchor,
+            [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], source='Tosafot on Shevuot 19a:1:1')
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_native_predicate_after_a_new_coordinated_citation_keeps_gemara_identity(self):
+        for before, anchor, after in (
+            ('כדפרישית שם ומיהו ', 'בפ"ק (לעיל דף ב.', ') משמע דכן הוא'),
+            ('ותירץ מורי בענין אחר ', 'ולעיל (דף ב.', ') נמי אמרינן הכי'),
+        ):
+            parts = [('RELATIVE', 'ולעיל' if anchor.startswith('ו') else 'לעיל'), ('NUMBERED', 'דף ב.')]
+            if anchor.startswith('בפ'):
+                parts.insert(0, ('NUMBERED', 'בפ"ק'))
+            rows = self.records(before + anchor + after, anchor, parts,
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+        for before in ('בגיטין ', 'כדפרישנא ', 'כתב רש"י '):
+            anchor = 'ולעיל (דף ב.'
+            rows = self.records(before + anchor + ') נמי אמרינן', anchor,
+                [('RELATIVE', 'ולעיל'), ('NUMBERED', 'דף ב.')], source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows],
+                ['Tosafot on Shevuot 2a'] if before == 'כדפרישנא ' else [], before)
+
+    def test_cut_off_mark_still_narrows_a_legacy_whole_commentary_daf(self):
+        anchor = 'לעיל (דף ב'
+        text = 'כדפרישנא ' + anchor + ': ושם)'
+        rows = self.records(text, anchor, [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב')],
+            refs=['Tosafot on Shevuot 2'], context_type='CURRENT_BOOK')
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2b'])
+
+    def test_native_quotation_predicates_share_the_verified_chapter_rule(self):
+        for verb in ('כדאמרינן', 'דתנן', 'כדתניא', 'וכדמוכח', 'דפריך', 'דקאמר',
+                     'דמשמע', 'כדמייתי', 'מדתנן', 'ומדתנן', 'ומדאמרינן',
+                     'והא דאמר', 'ואמר נמי'):
+            anchor = 'בפ"ק (לעיל דף ב.'
+            # Earlier foreign-work evidence belongs to a completed argument.
+            before = 'דגמרינן מע"ז שכל שחייבים על זדונו כרת חייבים על שגגתו חטאת ' + verb + ' '
+            rows = self.records(before + anchor + ')', anchor,
+                [('NUMBERED', 'בפ"ק'), ('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], verb)
+
+    def test_native_chapter_scope_does_not_depend_on_the_ner_chapter_boundary(self):
+        before = 'דגמרינן מע"ז שכל שחייבים על זדונו כרת חייבים על שגגתו חטאת כדתניא '
+        text = before + 'בפ"ק (לעיל דף ב.)'
+        for anchor in ('בפ"ק (לעיל דף ב.', 'לעיל דף ב.'):
+            parts = [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')]
+            if anchor.startswith('בפ'):
+                parts.insert(0, ('NUMBERED', 'בפ"ק'))
+            rows = self.records(text, anchor, parts, source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_a_new_predicate_does_not_erase_an_adjacent_work_or_writer(self):
+        for before in ('בגיטין דתנן ', 'דתנן כדפרישנא ', 'רש"י אמר ', 'כדאמרינן בארנו '):
+            anchor = 'בפ"ק (לעיל דף ב.'
+            rows = self.records(before + anchor + ')', anchor,
+                [('NUMBERED', 'בפ"ק'), ('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows],
+                ['Tosafot on Shevuot 2a'] if any(w in before for w in ('כדפרישנא', 'בארנו')) else [], before)
 
     def test_non_sefaria_paragraph_context_cannot_disambiguate_a_shared_chapter(self):
         anchor = 'בפרק קמא (דף יג, ב'

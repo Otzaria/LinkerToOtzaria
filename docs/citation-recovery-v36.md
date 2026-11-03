@@ -21,9 +21,9 @@ not a reference to the independently numbered *Mishnah Shevuot* book.
 
 ## Evidence and constraints
 
-The fixture `tests/fixtures/citation_cases_v36.json` contains twelve complete source
-lines and their actual raw NER responses, captured on the Windows AMD/ROCm runner
-on 2026-11-02. The recorded normalization is checked before replay, and the real
+The initial fixture `tests/fixtures/citation_cases_v36.json` contained twelve complete
+source lines and their actual raw NER responses, captured on the Windows AMD/ROCm
+runner on 2026-11-02; the review follow-up expands it as described below. The recorded normalization is checked before replay, and the real
 production-patched Sefaria resolver is used without a running NER service.
 Hand-specified expectations cover the failures above, the existing Sanhedrin and
 Bava Metzia recoveries, Tosafot's own explicitly qualified DH, the inflected
@@ -36,20 +36,24 @@ anchor and unique anchor key is checked.
 A cut-off amud mark is accepted only immediately before a closing bracket or
 `ושם`; quoted HTML attributes cannot supply that evidence. Relative addresses
 still require a canonical numeral, a valid source position, the correct direction,
-and the citing tractate's identity. A coordinated `ואמר נמי` / `והא דאמר` begins
-a new governing clause only when the citation itself names a verified chapter.
-Writer/self-reference and DH qualifiers remain relevant within that clause.
+and the citing tractate's identity. A native quotation predicate (including `כדאמרינן`, `דתנן`, `כדתניא`,
+`ואמר נמי` and `והא דאמר`) can begin a new governing clause only when the
+citation names a verified chapter. An adjacent foreign-work or writer locator
+is retained. Governing self-references and DH qualifiers still veto a bare
+Gemara reconstruction.
 
 A chapter/daf citation supplies absolute addresses. The tractate must be explicitly
 named, established by the directly paged source, or proven by a globally unique
 Bavli chapter name, including competing longer chapter names. A Rif commentary's
 page is never treated as the underlying Bavli page. Every member of a split list
 must lie in the named chapter and have text. Existing precise correct segment
-references are preserved. Rebuilt citations do not rewrite the resolver or legacy
-emitted-reference history; the last validated address still travels in the
-separate preceding-citation checkpoint state.
+references are preserved. Newly recovered failed citations do not seed either
+resolver or legacy emitted-reference history. Replacing a successful upstream
+citation clears the previous legacy antecedent, so a later ambiguous `שם` cannot
+select that stale work. The last validated address still travels in the separate
+preceding-citation checkpoint state; resolver history itself remains untouched.
 
-## Complete-book comparison
+## Initial complete-book comparison (2026-11-02)
 
 The final engine replayed seven complete books, 4,555 source rows. Each book's
 hash exactly matches the committed v36 snapshot baseline. Raw NER was captured
@@ -84,7 +88,7 @@ reconstruction, while its subsequent explicit Gemara quotation can link normally
 Machine-readable counts, source hashes and the engine identity are recorded in
 `tests/fixtures/citation_recovery_v36_validation.json`.
 
-## Local test environments
+## Initial local test environments (2026-11-02)
 
 The final suite ran on CPython 3.12 in both environments:
 
@@ -126,3 +130,64 @@ tags between the visible words require application-side rendering work. #2530,
 #3710, #1509, #3626, #3854 and #3264 concern commentator attachment or display.
 This linker PR does not close those application/build issues. Validation of a
 sample, even complete books, does not certify every citation in the full corpus.
+
+## Review follow-up (2026-11-03)
+
+The follow-up addresses the owner's second `ai.md` review:
+
+- One shared first-person predicate handles Hebrew inflections and Aramaic
+  `כדפרישית`, `כדפרישנא`, `כדכתיבנא`, `כדפרשינן`, `כתבתיו`, `פירשתיו` and
+  `בארנו`. It is used by the relative/absolute and existing-candidate ownership
+  checks, including already successful sole base candidates and bare chapters.
+  A prior self-explanation may still introduce a distinct Gemara quote.
+- Verified-chapter quotation boundaries use the native-predicate grammar rather
+  than two literal word pairs; directly governing authors and tractates remain.
+- Both `בפרק X דמסכת Y (דף)` and `במסכת Y בפרק X (דף)` work. A shortened chapter
+  requires an explicit tractate and exactly one matching chapter in that work.
+  The actual Rashba Shabbat321 NER includes `בהדיא` before the tractate and uses
+  `המביא` for `המביא כדי יין`; the acceptance fixture now requires Beitzah32a.
+- Absolute chapter recovery shares the complete ownership check, avoiding a
+  false foreign-work attribution from the unfinished title prefix `תורה` in
+  `דבר תורה`. Unknown writer acronyms and complete foreign titles still veto it.
+- Successful replacements clear stale legacy ibid context; newly added failed
+  citations keep the former history behavior. Tests cover both and a following
+  ambiguous ibid. The Rashi/Gittin transport test exercises the actual clause
+  guard with a title-trie fixture instead of mocking the guard's answer.
+- The broader replay caught a valid Keren Ora Nedarim305 link suppressed by the
+  initial PR: `והוא לטעמיה אזיל דפירש לעיל` describes Rav Huna's Gemara view,
+  not a commentator writing. The prefixed third-person veto was narrowed back
+  to the published rule, while shared first-person and named-writer checks remain.
+  Its real replay derives Nedarim27a from the source's actual heading stack and
+  requires the printed Nedarim24a link.
+- The strict existing-target veto has a named helper, and global chapter-name
+  competition uses the existing `_chapter_alias_works()` index.
+
+`scripts/compare_citation_replay.py` compares whole books against identical
+recorded NER in the production-patched resolver. It writes every difference with
+its full source context, verifies every record's canonical target/text, source
+hash, exact UTF-16 anchor and uniqueness, and supports bounded shards and exact
+input/engine-bound resumption. `--published-book-hashes` distinguishes full books
+matching a release from targeted source rows. A report is evidence for review;
+it does not automatically establish the intended work of every new link.
+
+The full relink after merge must be compared with v36 across **every book before
+publishing the resulting DB**, including sampling additions from previously
+unaudited authors. The sampled replay here is not a substitute for that release
+comparison, and there is no output-neutral fingerprint adoption.
+
+The expanded acceptance fixture contains **32 actual source lines and86 validated links**. It includes Rashi's own Shevuot31a target (not a Gemara replacement),
+Hebrew/Aramaic self-reference negatives in Ran/Rashbam/Rashba, the mistaken bare
+chapter after Ran's `פירשתיו`, native quotation positives from Bava Batra/Gittin,
+and preservation controls in Zevachim/Ketubot. The additional20 rows were captured
+on the AMD runner on2026-11-03 with the same pinned server/models. Source heading
+rows for the non-Sefaria case are included; no page position is invented.
+
+Additional preservation cases cover Rashba's native `מפרשינן`, a coordinated
+`ולעיל (...) נמי אמרינן`, and `ומיהו בפרק X (...) משמע`. The latter two start a
+new quotation while retaining adjacent work/writer attributions. A completed
+Aramaic self-reference remains distinct from the present native discussion.
+Cut-off span completion also preserves the original mark position for whole-daf
+narrowing, so an existing commentary amud cannot silently widen to a full daf.
+The replay tool binds artifact caches to the bytes actually loaded, and the final
+large replay uses an immutable engine copy; exploratory candidate caches were
+discarded before that replay.

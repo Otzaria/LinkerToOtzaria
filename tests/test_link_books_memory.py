@@ -505,9 +505,15 @@ class WorkerMemoryTest(unittest.TestCase):
                 ]})()]
 
         linker = Linker()
-        # This transport fake has no title trie; ownership is covered by the
-        # real clause fixtures in test_relative_discourse/chapter_daf_recovery.
-        with mock.patch.object(link_books, "relative_clause_is_clear", return_value=True):
+        # Supply the upstream title-trie interface and exercise the actual
+        # ownership guard, including the foreign tractate in the second span.
+        from types import SimpleNamespace
+        import types
+        linker._ref_resolver = SimpleNamespace(get_ref_part_title_trie=lambda:
+            SimpleNamespace(get_continuations=lambda *_a, **_k: (None, None)))
+        module = types.ModuleType('sefaria.model.linker.ref_part')
+        module.LEAF_TRIE_ENTRY = object()
+        with mock.patch.dict(sys.modules, {'sefaria.model.linker.ref_part': module}):
             records, _ = link_books.process_batch(
                 linker, link_books.BookKey("Sefaria", "רש\"י על גיטין"),
                 [(7, content, "Rashi on Gittin 3a:14:1")], lambda _line: None,

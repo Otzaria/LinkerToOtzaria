@@ -42,10 +42,15 @@ def main():
     count = 0
     for row in data['cases']:
         batch = [(row['index'], row['content'], row['context'])]
+        book = engine.BookKey(row['source'], row['title'])
+        headings = [(h['index'], h['content'], h['context']) for h in row.get('position_headings', [])]
+        assert all(index < row['index'] for index, _, _ in headings)
+        assert [index for index, _, _ in headings] == sorted({index for index, _, _ in headings})
+        positions = engine.talmud_positions(book, headings + batch, Ref) if headings else None
         records, _ = engine.process_batch(
-            linker, engine.BookKey(row['source'], row['title']), batch,
+            linker, book, batch,
             lambda message: (_ for _ in ()).throw(AssertionError(message)),
-            context_ref_factory=Ref)
+            context_ref_factory=Ref, talmud_positions=positions)
         actual, seen = set(), set()
         encoded = row['content'].encode('utf-16-le')
         for record in records:
