@@ -359,12 +359,12 @@ class ChapterDafRecoveryTest(unittest.TestCase):
             source='Rashi on Shevuot 36b:6:2', context_type='CURRENT_BOOK')
         self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 31a'])
 
-    def test_a_bare_successful_chapter_cannot_evade_the_self_reference_guard(self):
+    def test_an_established_chapter_without_a_proven_own_address_preserves_gemara(self):
         anchor = 'בפרק שבועת העדות'
         for source in ('Rashi on Shevuot 36b:6:2', 'Ran on Shevuot 18a:7'):
             rows = self.records('פירשתיו ' + anchor, anchor, [('NAMED', anchor)],
                 refs=['Shevuot 35a'], source=source)
-            self.assertEqual(rows, [])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 35a'])
 
     def test_third_person_sage_predicate_preserves_heading_based_gemara_recovery(self):
         # Keren Ora Nedarim305: Rav Huna follows his own earlier Gemara view;

@@ -2181,6 +2181,10 @@ def process_batch(
                 quoted_ibid = None
                 code_commentary = None
                 bounded_chapter = None
+                named_commentary = None
+                self_commentary = False
+                self_commentary_ref = None
+                ownership_fallback = False
                 own_ibid = False
                 chapter_ibid = False
                 supported_biblical = False
@@ -2188,7 +2192,6 @@ def process_batch(
                     linker, rr, content, start, end, relative_source, context_ref_factory)
                 preserves_own_history = (source_relative is not None and original_ref is not None
                     and not failed and not text_rebuilt
-                    and original_ref.index.title == getattr(getattr(relative_source, 'index', None), 'title', None)
                     and original_ref.normal() == source_relative[0].normal())
                 if source_relative is not None:
                     ref, relative = source_relative[0], False
@@ -2252,25 +2255,22 @@ def process_batch(
                     source_index = getattr(relative_source, 'index', None)
                     if (attribution in ('self', 'other') and not base_source
                             and not getattr(source_index, 'base_text_titles', None)
-                            and (failed or text_rebuilt or regrouped is not None)
+                            and (text_rebuilt or failed and regrouped is None)
                             and _bavli_tractate_itself(ref.index)):
                         continue  # a new recovery cannot erase a named, unplaced writer
-                    if (attribution == 'ambiguous' and (failed or text_rebuilt or regrouped is not None)
+                    if (attribution == 'ambiguous' and source_relative is None
+                            and (text_rebuilt or failed and regrouped is None)
                             and _bavli_tractate_itself(ref.index)):
                         continue
                     if (attribution in ('self', 'other') and getattr(source_index, 'base_text_titles', None)
                             and _top_category(source_index) == 'Talmud'
                             and _bavli_tractate_itself(ref.index)):
-                        own = (own_commentary_self_ref(rr, ref, content, start, end,
-                                                      relative_source, context_ref_factory)
-                               if attribution == 'self' else None)
-                        if own is None:
-                            continue
-                        ref, relative = own, False
-                        source_relative = (own, self_citation_direction(content, start, end))
+                        self_commentary = attribution == 'self'
+                        ownership_fallback = True
                     # Completing a cut-off relative span must not hide the
                     # same mark from the legacy whole-daf narrowing path.
-                    marked = amud_marked_daf(ref, content, start, min(raw_end, end), context_ref_factory)
+                    marked = amud_marked_daf(ref, content, start, min(raw_end, end), context_ref_factory,
+                                            allow_closed_period=ownership_fallback or self_commentary)
                     # The citation is where its daf and its named chapter meet. Only a
                     # chapter-led citation needs that; a parenthesized address stands alone.
                     if chapters and marked is None:
@@ -2284,6 +2284,23 @@ def process_batch(
                     if marked is not None:
                         ref, end = marked
                         anchor_text = content[start:end]
+                    if self_commentary:
+                        # Chapter membership belongs to the Gemara address.
+                        # Validate it before changing the work to its commentary.
+                        own = own_commentary_self_ref(rr, ref, content, start, end,
+                                                     relative_source, context_ref_factory)
+                        if own is not None:
+                            self_commentary_ref = own
+                            ownership_fallback = False
+                    if ownership_fallback:
+                        # Preserve both successful resolver candidates and the
+                        # pre-existing parenthesized/chapter recovery paths.
+                        # New text-rebuilt guesses have no established link.
+                        if (text_rebuilt or original_ref is None and regrouped is None
+                                or not existing_base_address_agrees(ref, content[start:relative_address_end(
+                                    content, start, end)], context_ref_factory,
+                                    prefix=content[:start], following=content[end:])):
+                            continue
                     target_ref = ref.normal()
                     if is_implausible_citation_target(target_ref, anchor_text):
                         continue
@@ -2366,13 +2383,27 @@ def process_batch(
                     # A rejected citation is not a book/address antecedent, even
                     # when Sefaria kept it in its private resolver history.
                     continue
+                history_ref = ref
+                # Upgrade only after the base citation passed every normal
+                # address, work, direction, ibid and availability check. A
+                # named writer is never evidence for a new Gemara recovery.
+                if self_commentary_ref is not None:
+                    ref, target_ref = self_commentary_ref, self_commentary_ref.normal()
+                    relative_direction = self_citation_direction(content, start, end)
+                elif (not base_source and not text_rebuilt and (original_ref is not None or regrouped is not None)
+                        and _bavli_tractate_itself(getattr(ref, 'index', None))):
+                    named_commentary = named_commentary_citation_ref(
+                        ref, content, start, end, context_ref_factory)
+                    if named_commentary is not None:
+                        ref, target_ref = named_commentary, named_commentary.normal()
+                        relative_direction = None
                 # Text-rebuilt targets stay out of the "שם" history, so later ibid
                 # picks match a run without them.
                 if (recovered is None and regrouped is None and spelled is None
                         and own_daf is None and contextual is None and quoted_ibid is None
                         and not text_rebuilt and code_commentary is None and bounded_chapter is None
                         and (source_relative is None or preserves_own_history) and not own_ibid and not chapter_ibid):
-                    last_ref = ref
+                    last_ref = history_ref
                 record_context = context_ref if relative_direction is not None else None
                 if has_non_bmp:
                     start += sum(1 for c in content[:start] if ord(c) > 0xFFFF)
@@ -2384,7 +2415,9 @@ def process_batch(
                     context_ref=record_context,
                     relative_direction=relative_direction,
                 ))
-                previous = (*previous[:4], ref)
+                # A display upgrade preserves the resolver's proven base
+                # antecedent; it must never seed a new commentary ibid chain.
+                previous = (*previous[:4], history_ref)
             except Exception as ce:
                 # A broken citation is OUR bug (resolver/normal()), not corpus noise —
                 # fail the book loudly (logged first) instead of silently losing a link.
@@ -3343,7 +3376,7 @@ def chapter_amud(ref, chapters, content: str, end: int, ref_factory):
 _WHOLE_DAF_RE = re.compile(r"^(.+) (\d+)$")
 
 
-def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
+def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory, *, allow_closed_period=False):
     """(Ref, end) of amud b after a whole-daf anchor, past spaces and HTML tags.
 
     The NER cuts "נא:" before the mark when "ושם" follows (Otzaria/otzaria#2490). Only ":"
@@ -3353,7 +3386,9 @@ def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
     if ref_factory is None or end >= len(content):
         return None
     written = _AMUD_AFTER_RE.match(content, end)
-    if written is None or written["mark"] != ":":
+    if written is None or (written["mark"] != ":" and not (
+            allow_closed_period and written["mark"] == "."
+            and relative_address_end(content, start, end) == written.end())):
         return None
     marked_end = written.end()
     if not _HTML_TAG_RE.sub("", content[marked_end:]).strip():
@@ -3364,7 +3399,8 @@ def amud_marked_daf(ref, content: str, start: int, end: int, ref_factory):
     tokens = _HTML_TAG_RE.sub("", content[start:end]).split()
     if not tokens or int(match.group(2)) not in _hebrew_number(tokens[-1]):
         return None
-    marked = _amud_ref(match.group(1), int(match.group(2)), "ב", ref_factory)
+    marked = _amud_ref(match.group(1), int(match.group(2)),
+                       'ב' if written['mark'] == ':' else 'א', ref_factory)
     return None if marked is None else (marked, marked_end)
 
 
@@ -3750,17 +3786,13 @@ def self_locator_gap_is_clear(words):
     return False
 
 
-def citation_local_attribution(content, start, end):
-    """Identify the writer governing this citation, not a word elsewhere in prose.
+def _attribution_tokens(text):
+    return [word.strip('(),;:.[]') for word in
+            _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', text))).split()]
 
-    Only a nearby self predicate followed by a locator qualifies. A new native
-    quotation predicate or a coordinating clause ends that attribution. The
-    immediately following writer predicate also qualifies the printed address.
-    """
-    def tokens(text):
-        return [word.strip('(),;:.[]') for word in
-                _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', text))).split()]
 
+def citation_postfix_words(content, start, end):
+    """Visible, immediately attached writer words shared by scope and upgrades."""
     tail = _QUOTE_HTML_TAG_RE.sub(' ', content[end:]).lstrip(' )]')
     # A cut-off mark may precede the closing parenthesis. Sentence punctuation
     # without that close must not lend the next sentence's writer to this one.
@@ -3771,7 +3803,7 @@ def citation_local_attribution(content, start, end):
                             _plain_quotes(tail))
     if continued_dh:
         tail = tail[continued_dh.end():]
-    after = tokens(tail)[:4]
+    after = _attribution_tokens(tail)[:4]
     # A chapter entity can end before its separate numeric parenthesis. Only
     # the immediately attached parenthesis may extend the citation for scope.
     attached = re.match(r'^\([^()]{1,80}\)\s*', tail)
@@ -3779,9 +3811,21 @@ def citation_local_attribution(content, start, end):
         closing_location = re.match(r'^[^()]{1,80}\)\s*', tail)
         if closing_location and re.search(_DAF_ADDRESS, _plain_quotes(closing_location[0])):
             attached = closing_location
-    native_after = tokens(tail[attached.end():] if attached else tail)[:8]
+    native_after = _attribution_tokens(tail[attached.end():] if attached else tail)[:8]
     if attached:
         after = native_after[:4]
+    return after, native_after
+
+
+def citation_local_attribution(content, start, end):
+    """Identify the writer governing this citation, not a word elsewhere in prose.
+
+    Only a nearby self predicate followed by a locator qualifies. A new native
+    quotation predicate or a coordinating clause ends that attribution. The
+    immediately following writer predicate also qualifies the printed address.
+    """
+    tokens = _attribution_tokens
+    after, native_after = citation_postfix_words(content, start, end)
     postfix_ambiguous = False
     if after:
         # A new coordinated subject compares explanations; it does not own
@@ -3871,6 +3915,106 @@ def self_citation_direction(content, start, end):
         return anchor_side
     prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start])
     return _relative_side(' '.join(clause_before(prefix, len(prefix))[-6:]))
+
+
+def named_commentary_citation_ref(target, content, start, end, ref_factory):
+    """Upgrade a validated Gemara address to its explicitly named direct commentary.
+
+    Failure leaves the existing Gemara link intact. Never infer a segment from
+    a Gemara segment, collapse a chapter range, or equate R"T or a different
+    Tosafot work with the ordinary Tosafot commentary.
+    """
+    if (ref_factory is None or not _bavli_tractate_itself(target.index)
+            or not target.sections or not target.toSections
+            or citation_local_attribution(content, start, end) != 'other'):
+        return None
+    if not existing_base_address_agrees(target, content[start:relative_address_end(
+            content, start, end)], ref_factory, prefix=content[:start], following=content[end:]):
+        return None
+    words, _ = citation_postfix_words(content, start, end)
+    families = set()
+    for i, word in enumerate(words[:3]):
+        if re.fullmatch(r'ו?[בכלמד]?(?:רש["\']י|קונטרס|קונט\')|פרש["\']י', word):
+            families.add('Rashi')
+        if re.fullmatch(r'ו?[בכלמד]?(?:תוספות|תוס["\'])', word):
+            # The following abbreviation/name can identify another work.
+            # Only an unqualified name, DH, or writing predicate is proven.
+            rest = words[i + 1:]
+            if rest[:1] == ['שם']:
+                rest = rest[1:]
+            coordinated_clause = bool(rest and rest[0].startswith('ו')
+                                      and not _EXTERNAL_ATTRIBUTION_RE.fullmatch(rest[0]))
+            if (rest and not re.fullmatch(r'[ברס]?ד["\']ה', rest[0])
+                    and not _WRITING_ATTRIBUTION_RE.fullmatch(rest[0]) and not coordinated_clause):
+                return None
+            families.add('Tosafot')
+    if len(families) != 1:
+        return None
+    first, last = target.sections[0], target.toSections[0]
+    title = next(iter(families)) + ' on ' + target.index.title
+    if first == last:
+        commentary = _amud_ref(title, (first + 1) // 2, 'א' if first % 2 else 'ב', ref_factory)
+    elif first % 2 and last == first + 1:
+        try:
+            commentary = ref_factory(f'{title} {(first + 1) // 2}')
+        except Exception as error:
+            if isinstance(error, (ValueError, IndexError)) or any(
+                    cls.__name__ == 'InputError' and cls.__module__ == 'sefaria.system.exceptions'
+                    for cls in type(error).__mro__):
+                return None
+            raise
+    else:
+        return None
+    return commentary if (commentary is not None
+        and _commented_tractates(commentary, ref_factory) == [target.index.title]
+        and target_has_text(commentary)) else None
+
+
+def existing_base_address_agrees(target, anchor, ref_factory, *, prefix='', following=''):
+    """Ownership fallback cannot preserve a contradictory or collapsed daf."""
+    open_location = _QUOTE_HTML_TAG_RE.sub(' ', anchor).rstrip().endswith('(')
+    anchor = _NIQQUD_RE.sub('', _plain_quotes(_bare_anchor(_QUOTE_HTML_TAG_RE.sub(' ', anchor))))
+    words = _attribution_tokens(anchor)
+    before = _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', prefix))).rstrip(' ([')
+    for book, aliases, _ in _bavli_chapter_books():
+        if book != target.index.title:
+            for alias in aliases:
+                name = rf'ו?[במדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}'
+                if (re.search(rf'(?:^|\s){name}$', before) or any(
+                        re.fullmatch(name, ' '.join(words[i:i + size]))
+                        for i in range(len(words)) for size in (1, 2, 3))):
+                    return False
+    addresses = [_address_ref(match, target.index.title, ref_factory) for match in
+                 re.finditer(rf'(?<![א-ת]){_DAF_ADDRESS}', anchor)]
+    if addresses:
+        return (all(address is not None for address in addresses)
+                and target.sections[:1] == addresses[0].sections
+                and target.toSections[:1] == addresses[-1].toSections)
+    whole = re.search(rf'(?<![א-ת])דף\s+({_UNTITLED_DAF})$', anchor)
+    if whole:
+        letters = re.sub(r'[^א-ת]', '', whole[1])
+        return (_is_canonical_numeral(letters) and bool(target.sections)
+                and (target.sections[0] + 1) // 2 == _numeral(letters)
+                and (target.toSections[0] + 1) // 2 == _numeral(letters))
+    if _chapter_marker(anchor):
+        # A chapter NER span may stop before its printed title continuation
+        # and daf: "פ' כל המנחות" + "באות מצה (לעיל נה.)". An established
+        # chapter guess cannot contradict that immediately attached address.
+        tail = _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', following)))
+        if open_location:
+            tail = '(' + tail
+        attached = re.match(r'^\s*([^().,:;]{0,60}?)\(([^()]{1,80})\)', tail)
+        if attached:
+            continuation, location = attached.groups()
+            if not continuation.strip() or named_chapters(anchor + ' ' + continuation, target):
+                printed = [_address_ref(match, target.index.title, ref_factory) for match in
+                           re.finditer(rf'(?<![א-ת]){_DAF_ADDRESS}', location)]
+                if printed and (len(printed) != 1 or printed[0] is None
+                        or not target.sections or not target.toSections
+                        or not target.sections[0] <= printed[0].sections[0]
+                        or not printed[0].toSections[0] <= target.toSections[0]):
+                    return False
+    return True  # e.g. a sole existing chapter range, with no printed daf
 
 
 def own_commentary_self_ref(rr, target, content, start, end, source_ref, ref_factory, *, printed_ref=None):
@@ -4199,11 +4343,43 @@ def explicit_own_relative_ref(linker, rr, content, start, end, source_ref, ref_f
     if any(not _in_tractate(candidate, target.index.title) for candidate in candidate_refs(rr)):
         return None
     attribution = citation_local_attribution(content, start, end)
-    if attribution == 'other':
-        return None
     if attribution == 'self':
         own = own_commentary_self_ref(rr, target, content, start, end, source_ref, ref_factory)
-        return None if own is None else (own, direction)
+        if own is not None:
+            current = _pick_ref(rr)
+            return (own if current is not None and own.normal() == current.normal()
+                    else target), direction
+    if attribution:
+        # Preserve a resolved base address or the existing independently
+        # proved relative path when its ownership cannot be upgraded. New
+        # text rebuilds and contradictory work/address candidates stay out.
+        if getattr(rr, 'text_rebuilt', False):
+            return None
+        current = None if getattr(rr, 'resolution_failed', False) or rr.is_ambiguous else _pick_ref(rr)
+        legacy = (own_tractate_relative_ref(content[start:end], source_ref, ref_factory)
+                  or untitled_relative_ref(content[start:end], source_ref, ref_factory)
+                  or chapter_located_relative_ref(content[start:end], source_ref, ref_factory))
+        if current is None:
+            if legacy is None or legacy[0].normal() != target.normal():
+                return None
+            current = target
+        elif current.index.title != target.index.title:
+            return None
+        elif current.sections[:1] != target.sections or current.toSections[:1] != target.toSections:
+            if (len(current.sections) == 1 and current.sections[0] % 2
+                    and current.toSections == [current.sections[0] + 1]
+                    and current.sections[0] <= target.sections[0] <= current.toSections[0]):
+                current = target  # the printed amud independently narrows a whole daf
+            else:
+                return None
+        words = _attribution_tokens(' '.join(clause_before(content, start)))
+        for book, aliases, _ in _bavli_chapter_books():
+            if book != target.index.title and any(
+                    re.fullmatch(rf'ו?[במדל]?{re.escape(_plain_quotes(alias))}',
+                                 ' '.join(words[i:i + size]))
+                    for alias in aliases for i in range(len(words)) for size in (1, 2, 3)):
+                return None
+        return current, direction
     current = getattr(rr, 'ref', None)
     if (not getattr(rr, 'is_ambiguous', False) and current is not None
             and current.index.title == source_ref.index.title

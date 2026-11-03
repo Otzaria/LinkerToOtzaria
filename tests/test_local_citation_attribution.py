@@ -1,7 +1,8 @@
 """Local ownership, preservation and independent QA counterexamples."""
 import unittest
 import test_chapter_daf_recovery as helpers
-from test_chapter_daf_recovery import Ref, lb, citation, NS
+from test_chapter_daf_recovery import Ref, lb, citation, NS, Chapter
+from unittest import mock
 
 
 class LocalAttributionTest(unittest.TestCase):
@@ -46,7 +47,7 @@ class LocalAttributionTest(unittest.TestCase):
                      ' פי\' רש"י לא יצא', ' פרש"י לא יצא', ' כתב רש"י'):
             rows = self.records(anchor + ')' + tail, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
-            self.assertEqual(rows, [])
+            self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 2a'])
 
     def test_own_work_proof_replaces_a_context_only_or_base_candidate(self):
         anchor = 'בפ"ק (דף ב.'
@@ -55,6 +56,177 @@ class LocalAttributionTest(unittest.TestCase):
                 rows = self.records("כדפי' " + anchor + ')', anchor,
                     [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=[target], context_type=context)
                 self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+
+    def test_unavailable_named_and_own_commentaries_preserve_the_existing_gemara(self):
+        anchor = 'בפ"ק (דף ב.'
+        original_empty = Ref.is_empty
+        with mock.patch.object(Ref, 'is_empty', lambda ref:
+                bool(ref.index.base_text_titles) or original_empty(ref)):
+            for before, tail in (('', ' פי\' רש"י'), ('', ' מפורש בתוספות'), ('כתבתי ', '')):
+                rows = self.records(before + anchor + ')' + tail, anchor,
+                    [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a:3'])
+                self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a:3'])
+                self.assertEqual(rows[0].source_hash, lb.content_hash(before + anchor + ')' + tail))
+            relative = 'לעיל (דף ב.'
+            rows = self.records('כתבתי ' + relative + ')', relative,
+                [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a:3'],
+                source='Tosafot on Shevuot 19a:1:1', context_type='CURRENT_BOOK')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a:3'])
+            self.assertEqual(rows[0].relative_direction, 'above')
+
+    def test_named_commentary_upgrade_drops_gemara_segments_and_preserves_utf16_anchor(self):
+        anchor = 'בפ"ק (דף ב.'
+        text = '😀 ' + anchor + ') פי\' רש"י'
+        rows = self.records(text, anchor, [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')],
+                            refs=['Shevuot 2a:7'])
+        self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 2a'])
+        self.assertEqual(text.encode('utf-16-le')[rows[0].start*2:rows[0].end*2].decode('utf-16-le'), anchor)
+
+    def test_other_tosafot_works_and_rabbenu_tam_cannot_become_ordinary_tosafot(self):
+        anchor = 'בפ"ק (דף ב.'
+        for tail in (' מפרש ר"ת', ' בתוס\' יו"ט', ' בתוס\' רי"ד',
+                     ' בתוספות ישנים', ' בתוספות הרא"ש', ' מפורש בתוספות רי"ד'):
+            rows = self.records(anchor + ')' + tail, anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], tail)
+
+    def test_named_upgrade_cannot_seed_an_ambiguous_ibid(self):
+        anchor = 'בפ"ק (דף ב.'
+        text = anchor + ') פי\' רש"י וכן שם'
+        first = citation(text, anchor, [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 2a')])
+        following = citation(text, 'שם', [('IBID', 'שם')],
+                             refs=[Ref('Rashi on Shevuot 2a:3'), Ref('Rashi on Shevuot 3a:3')])
+        self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[first, following])]
+        history = lb.IbidContext()
+        history.resolve = lambda _linker, invoke: invoke()
+        rows, _ = lb.process_batch(self.linker, lb.BookKey('Sefaria', 'ספר'),
+            [(7, text, 'Tosafot on Shevuot 3a:1:1')], self.fail,
+            context_ref_factory=Ref, ibid_context=history)
+        self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 2a'])
+        self.assertIsNone(history.last_emitted_ref)
+
+    def test_a_valid_base_ibid_is_upgraded_only_after_both_ibid_checks(self):
+        first_anchor, second_anchor = 'בשבועות (דף ב.', 'שם (דף ב.'
+        text = first_anchor + ') וכן ' + second_anchor + ') פרש"י'
+        first = citation(text, first_anchor, [('NAMED', 'בשבועות'), ('NUMBERED', 'דף ב.')],
+                         refs=[Ref('Shevuot 2a')])
+        second = citation(text, second_anchor, [('IBID', 'שם'), ('NUMBERED', 'דף ב.')],
+                          refs=[Ref('Shevuot 2a')])
+        self.linker.bulk_link = lambda *_a, **_k: [NS(resolved_refs=[first, second])]
+        rows, _ = lb.process_batch(self.linker, lb.BookKey('Sefaria', 'ספר'),
+            [(7, text, 'Tosafot on Shevuot 3a:1:1')], self.fail, context_ref_factory=Ref)
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a', 'Rashi on Shevuot 2a'])
+
+    def test_an_amud_mark_outside_the_entity_still_rejects_the_wrong_fallback(self):
+        anchor = 'בפ"ק (דף ב'
+        for tail in ('.) פי\' רש"י', '.) מפורש בתוספות', '.) פרש"י'):
+            rows = self.records(anchor + tail, anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')], refs=['Shevuot 2b'])
+            self.assertEqual(rows, [], tail)
+        for mark, target in (('.', 'Rashi on Shevuot 2a'), (':', 'Rashi on Shevuot 2b')):
+            rows = self.records(anchor + mark + ') פרש"י', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')], refs=['Shevuot 2'])
+            self.assertEqual([r.target_ref for r in rows], [target])
+
+    def test_unqualified_tosafot_followed_by_a_new_clause_can_be_upgraded(self):
+        anchor = 'בפ"ק (דף ב.'
+        rows = self.records(anchor + ') בתוס\' ולסברת המחבר', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+
+    def test_a_named_foreign_tractate_cannot_be_upgraded_in_the_offered_tractate(self):
+        anchor = 'בגיטין (דף ב.'
+        rows = self.records(anchor + ') פרש"י', anchor,
+            [('NAMED', 'בגיטין'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual(rows, [])
+        anchor = 'דף ב.'
+        rows = self.records('בגיטין (' + anchor + ') פרש"י', anchor,
+            [('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual(rows, [])
+        rows = self.records('כבר בגיטין נדון ענין אחר. בשבועות (' + anchor + ') פרש"י', anchor,
+            [('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Rashi on Shevuot 2a'])
+
+    def test_display_upgrade_preserves_base_ibid_history_across_checkpoint(self):
+        first_anchor, second_anchor, third_anchor = 'בשבועות (דף ב.', 'שם (דף ב.', 'ושם'
+        texts = [first_anchor + ')', second_anchor + ') פרש"י', third_anchor]
+        citations = [
+            citation(texts[0], first_anchor, [('NAMED', 'בשבועות'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 2a:1')]),
+            citation(texts[1], second_anchor, [('IBID', 'שם'), ('NUMBERED', 'דף ב.')], refs=[Ref('Shevuot 2a:1')]),
+            citation(texts[2], third_anchor, [('IBID', 'ושם')], refs=[Ref('Shevuot 2a:3'), Ref('Shevuot 3a:3')]),
+        ]
+        by_text = dict(zip(texts, citations))
+        self.linker.bulk_link = lambda inputs, **_k: [NS(resolved_refs=[by_text[t]]) for t in inputs]
+        book = lb.BookKey('Sefaria', 'ספר')
+        batch = [(i, text, 'Tosafot on Shevuot 3a:1:1') for i, text in enumerate(texts)]
+        def history():
+            result = lb.IbidContext()
+            result.resolve = lambda _linker, invoke: invoke()
+            return result
+        original_empty = Ref.is_empty
+        for missing in (False, True):
+            lb._TARGET_TEXT_CACHE.clear()
+            with mock.patch.object(Ref, 'is_empty', lambda ref:
+                    missing and ref.index.title.startswith('Rashi on ') or original_empty(ref)):
+                whole_history = history()
+                whole, _ = lb.process_batch(self.linker, book, batch, self.fail,
+                    context_ref_factory=Ref, ibid_context=whole_history)
+                self.assertEqual([r.target_ref for r in whole],
+                    ['Shevuot 2a:1', 'Shevuot 2a:1' if missing else 'Rashi on Shevuot 2a', 'Shevuot 2a:3'])
+                split = history()
+                left, _ = lb.process_batch(self.linker, book, batch[:2], self.fail,
+                    context_ref_factory=Ref, ibid_context=split)
+                state = split.state(book, 0, batch[:2], 'a' * 64)
+                resumed = history()
+                resumed.restore_state(state, Ref, book, 0, batch[:2], 'a' * 64)
+                right, _ = lb.process_batch(self.linker, book, batch[2:], self.fail,
+                    context_ref_factory=Ref, ibid_context=resumed)
+                self.assertEqual([r.to_dict() for r in left + right], [r.to_dict() for r in whole])
+
+    def test_existing_named_chapter_range_is_preserved_without_a_daf_upgrade(self):
+        target = Ref('Shevuot 2a:3')
+        target.toSections = [27, 4]
+        anchor = 'בפרק קמא'
+        text = anchor + ' מפורש בתוספות'
+        self.assertIsNone(lb.named_commentary_citation_ref(target, text, 0, len(anchor), Ref))
+
+    def test_a_chapter_fallback_cannot_contradict_its_attached_printed_daf(self):
+        anchor = 'בפרק קמא'
+        text = 'פירשתי ' + anchor + ' (לעיל דף לה.)'
+        rows = self.records(text, anchor, [('NAMED', anchor)], refs=['Shevuot 2a'],
+                            source='Tosafot on Shevuot 36b:1:1')
+        self.assertEqual(rows, [])
+        text = 'פירשתי ' + anchor + ' (לעיל דף ב.)'
+        rows = self.records(text, anchor, [('NAMED', anchor)], refs=['Shevuot 2a'],
+                            source='Tosafot on Shevuot 36b:1:1')
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+        for anchor, following in (('בפ"ק', ' (לעיל דף כט:) פרש"י'),
+                                  ('בפ"ק (', 'לעיל דף כט:) פרש"י')):
+            target = Ref('Shevuot 2a:3')
+            target.toSections = [27, 4]
+            self.assertFalse(lb.existing_base_address_agrees(target, anchor, Ref, following=following))
+
+    def test_existing_legacy_chapter_recovery_validates_base_before_self_upgrade(self):
+        anchor = 'בפ"ק (דף ב'
+        for missing in (False, True):
+            original_empty = Ref.is_empty
+            lb._TARGET_TEXT_CACHE.clear()
+            with (mock.patch.object(lb, 'parenthesized_address', return_value=None),
+                  mock.patch.object(lb, 'chapter_led_citation', return_value=(
+                      Ref('Shevuot 2'), (Chapter('Shevuot', 3, 27),))),
+                  mock.patch.object(Ref, 'is_empty', lambda ref:
+                      missing and ref.index.title.startswith('Tosafot on ') or original_empty(ref))):
+                rows = self.records('כתבתי ' + anchor + ':)', anchor,
+                    [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב')])
+                self.assertEqual([r.target_ref for r in rows],
+                    ['Shevuot 2b' if missing else 'Tosafot on Shevuot 2b'])
+
+    def test_a_legacy_relative_with_no_offered_ref_preserves_its_proven_base_address(self):
+        anchor = 'לעיל דף ב.'
+        rows = self.records('הא פרישנא טעמא משום דין אחר בפרק קמא (' + anchor + ')', anchor,
+            [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], source='Rashi on Shevuot 19a:1')
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+        self.assertEqual(rows[0].relative_direction, 'above')
 
     def test_coordinated_and_negative_postfix_writers_do_not_own_a_native_citation(self):
         anchor = 'בפ"ק (דף ב.'
@@ -103,7 +275,7 @@ class LocalAttributionTest(unittest.TestCase):
         for tail in (' מפורש בתוספות', ' (גז"ש) מפורש בתוספות'):
             rows = self.records(anchor + ')' + tail, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
-            self.assertEqual(rows, [])
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
         rows = self.records(anchor + ') (גז"ש) מפורש בגמרא', anchor,
             [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
         self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
@@ -207,7 +379,7 @@ class LocalAttributionTest(unittest.TestCase):
             rows = self.records(before + anchor + ')', anchor,
                 [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'],
                 source='Tosafot on Shevuot 19a:1:1', context_type='CURRENT_BOOK')
-            self.assertEqual(rows, [], before)
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], before)
 
     def test_gemara_self_reference_remains_in_its_own_base_work(self):
         anchor = 'לעיל (דף ב.'
