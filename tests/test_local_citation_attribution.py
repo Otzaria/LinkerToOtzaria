@@ -43,7 +43,7 @@ class LocalAttributionTest(unittest.TestCase):
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
             self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
         for tail in (' פי\' רש"י', ' פרש"י', ' פירש בקונטרס',
-                     ' פי\' רש"י לא יצא', ' פרש"י לא יצא'):
+                     ' פי\' רש"י לא יצא', ' פרש"י לא יצא', ' כתב רש"י'):
             rows = self.records(anchor + ')' + tail, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
             self.assertEqual(rows, [])
@@ -60,7 +60,7 @@ class LocalAttributionTest(unittest.TestCase):
         anchor = 'בפ"ק (דף ב.'
         for tail in (' ורש"י פירש בשמעתין', ' ור"ת מפרש בענין אחר',
                      " ובקונט' הביאה לעיל", ' ולר"ת אין נראה לפרש',
-                     ' ובקונטרס לא פירש כן', ' בקונטרס לא פירש כן'):
+                     ' ובקונטרס לא פירש כן', ' בקונטרס לא פירש כן', ' כדפירש בקונטרס'):
             text = 'כדתנן ' + anchor + ')' + tail
             rows = self.records(text, anchor,
                 [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
@@ -82,6 +82,63 @@ class LocalAttributionTest(unittest.TestCase):
         rows = self.records('שהבאתי לעיל וכן ' + anchor + ')', anchor,
             [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
         self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_printed_foreign_discussion_blocks_only_implicit_source_chapter_guess(self):
+        anchor = 'בפ"ק (דף ב.'
+        for prefix in ('בגיטין (דף ב.) וכן ', 'בגיטין (דף ב.) ' + 'דיון ' * 250 + 'כדתנן התם '):
+            rows = self.records(prefix + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')])
+            self.assertEqual(rows, [])
+        for prefix in ('ביצה היא מאכל וכן ', 'בגיטין (דף ב.) ובשבועות (דף ב.) וכן '):
+            rows = self.records(prefix + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
+    def test_editorial_self_writing_and_precise_chapter_location_retain_ownership(self):
+        for prefix, anchor in (('(כדאמרינן) [כדכתבינן] ', 'בפ"ק (דף ב.'),
+                               ('פירשתי בפ"ק סמוך לתחילתו ', 'לעיל (דף ב.')):
+            text = prefix + anchor + ')'
+            self.assertEqual(lb.citation_local_attribution(text, len(prefix), len(prefix) + len(anchor)), 'self')
+        anchor = 'בפ"ק (דף ב.'
+        rows = self.records(anchor + ') הבאתי שם ראיה', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+        rows = self.records(anchor + ' ושם ד"ה אמר) הבאתי שם ראיה', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+
+    def test_unknown_writing_location_or_own_list_cannot_mint_base_gemara(self):
+        anchor = 'בפ"ק (דף ב.'
+        for prefix in ('פירשתי במקום בלתי מוכר ', 'פירשתי בתוספות גיטין (דף ב.) וכן '):
+            rows = self.records(prefix + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')])
+            self.assertEqual(rows, [])
+
+    def test_native_conclusion_ends_prior_self_scope_across_its_printed_location(self):
+        anchor = 'ובמסכת סוכה בפרק קמא (יג, ב'
+        text = 'וטעמא פירשתי בריש פירקין (דף ב.) ' + anchor + ') מסיק דהא'
+        rows = self.records(text, anchor,
+            [('NAMED', 'ובמסכת סוכה בפרק קמא'), ('NUMBERED', 'יג, ב')], refs=['Sukkah 13b'])
+        self.assertEqual([r.target_ref for r in rows], ['Sukkah 13b'])
+        prefix = 'וטעמא פירשתי בריש פירקין (דף ב.) '
+        anchor = 'ובפרק קמא ('
+        text = prefix + anchor + 'סוכה דף יג:) מסיק דהא'
+        self.assertIsNone(lb.citation_local_attribution(text, len(prefix), len(prefix) + len(anchor)))
+
+    def test_a_quoted_unique_chapter_independently_preserves_an_existing_ibid_amud(self):
+        anchor = 'שם דף לה.'
+        text = 'דגריס בשילהי. שבועת העדות (' + anchor + ')'
+        rr = citation(text, anchor, [('IBID', 'שם'), ('NUMBERED', 'דף לה.')], refs=[Ref('Shevuot 35a')])
+        self.assertTrue(lb.chapter_ibid_is_proven(rr, Ref('Shevuot 35a'), text,
+                                                *rr.raw_entity.span.range, Ref))
+        for prefix, body, target in (('דגריס בפרק קמא (', anchor, 'Shevuot 35a'),
+                                     ('דגריס שבועת העדות (', 'שם', 'Shevuot 35a'),
+                                     ('פירש שבועת העדות (', anchor, 'Shevuot 35a'),
+                                     ('דגריס שבועת העדות (', anchor, 'Shevuot 26a')):
+            text = prefix + body + ')'
+            rr = citation(text, body, [('IBID', 'שם')], refs=[Ref(target)])
+            self.assertFalse(lb.chapter_ibid_is_proven(rr, Ref(target), text,
+                                                     *rr.raw_entity.span.range, Ref))
 
     def test_quoted_amud_and_whole_daf_self_addresses_keep_their_printed_scope(self):
         for anchor, target, expected in (
