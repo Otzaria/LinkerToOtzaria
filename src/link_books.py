@@ -3689,7 +3689,8 @@ _CITED_WRITING_RE = re.compile(
 _SELF_WRITING_RE = re.compile(
     r'(?:ו?[כדשבמל]{0,3}(?:כתבתי|כתבנו|פירשתי|פירשנו|ב[י]?ארתי|ב[י]?ארנו|'
     r'הארכתי|הארכנו|אמרתי|אמרנו|הבאתי|הבאנו|הוכחתי|הוכחנו)[הו]?'
-    r'|ו?[כדש]{0,3}(?:פרישית|פרישנא|כתיבנא|כתבינן|פרשינן|אפרש|נרחיב)'
+    r'|ו?[כדש]{0,3}(?:פרישית|פרישנא|כתיבנא|פרשינן|אפרש|נרחיב)'
+    r'|ו?כד?כתבינן'
     r'|ו?כד?פי[\"\'])')
 _ATTRIBUTION_BREAKS = frozenset({
     'אבל', 'אלא', 'ומיהו', 'מיהו', 'ואילו', 'והא',
@@ -3760,12 +3761,21 @@ def citation_local_attribution(content, start, end):
     # the immediately attached parenthesis may extend the citation for scope.
     attached = re.match(r'^\([^()]{1,80}\)\s*', tail)
     native_after = tokens(tail[attached.end():] if attached else tail)[:8]
+    postfix_ambiguous = False
     if after:
-        if (_EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0])
+        # A new coordinated subject compares explanations; it does not own
+        # the preceding Gemara quotation. A negative explanation is likewise
+        # a contrast, not the cited work's positive attribution.
+        if (not after[0].startswith('ו') and 'לא' not in after[:3] and
+                ((_EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]) and (
+                    after[0].startswith('ב') or any(
+                        _WRITING_ATTRIBUTION_RE.fullmatch(w) or w == 'ד"ה' for w in after[1:])))
                 or (_WRITING_ATTRIBUTION_RE.fullmatch(after[0]) and any(
                     _EXTERNAL_ATTRIBUTION_RE.fullmatch(w) for w in after[:3]))
-                or re.fullmatch(r'ו?פרש["\']י', after[0])):
+                or re.fullmatch(r'פרש["\']י', after[0]))):
             return 'other'
+        if not after[0].startswith('ו') and _EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]):
+            postfix_ambiguous = 'לא' not in after[:3]
         if (len(after) > 1 and
                 (_POSTFIX_SELF_WRITING_RE.fullmatch(after[0]) and after[1] in ('שם', 'התם')
                  or after[0] in ('נרחיב', 'ונרחיב') and after[1] == 'בה'
@@ -3778,7 +3788,7 @@ def citation_local_attribution(content, start, end):
     words = before + lead
     own = [i for i, word in enumerate(words) if is_self_writing(word)]
     if not own:
-        return None
+        return 'ambiguous' if postfix_ambiguous else None
     at = own[-1]
     gap = words[at + 1:]
     outside_gap = before[at + 1:] if at < len(before) else gap
@@ -3786,7 +3796,9 @@ def citation_local_attribution(content, start, end):
     comparative = (self_word.startswith('כ') and is_self_writing(self_word[1:])
                    or bool(re.fullmatch(r'כד?פי["\']', self_word))
                    or 'כמו' in words[max(0, at - 2):at])
-    if comparative and any(w.startswith('ו') and w not in ('ולעיל', 'ולקמן', 'ולהלן', 'ובסמוך')
+    weak_proof = any(stem in words[at] for stem in
+                     ('אמרתי', 'אמרנו', 'הבאתי', 'הבאנו', 'הוכחתי', 'הוכחנו'))
+    if (comparative or weak_proof) and any(w.startswith('ו') and w not in ('ולעיל', 'ולקמן', 'ולהלן', 'ובסמוך')
                            for w in gap):
         return None  # the completed "as I explained" does not own a new citation
     after_native = any(_NATIVE_CITATION_VERB_RE.fullmatch(w) for w in native_after)
@@ -3799,7 +3811,7 @@ def citation_local_attribution(content, start, end):
     # These predicates may introduce a quotation FROM Gemara. Preserve an
     # established candidate, but do not invent either work without an own-text
     # relative locator or a stronger writing predicate.
-    if (any(stem in words[at] for stem in ('אמרתי', 'אמרנו', 'הבאתי', 'הבאנו', 'הוכחתי', 'הוכחנו'))
+    if (weak_proof
             and not re.search(r'(?<![א-ת])ו?(?:לעיל|לקמן|להלן|למעלה|למטה|שם)(?![א-ת])',
                               ' '.join(gap))):
         return 'ambiguous'

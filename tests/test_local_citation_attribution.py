@@ -55,6 +55,33 @@ class LocalAttributionTest(unittest.TestCase):
                     [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=[target], context_type=context)
                 self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
 
+    def test_coordinated_and_negative_postfix_writers_do_not_own_a_native_citation(self):
+        anchor = 'בפ"ק (דף ב.'
+        for tail in (' ורש"י פירש בשמעתין', ' ור"ת מפרש בענין אחר',
+                     " ובקונט' הביאה לעיל", ' ולר"ת אין נראה לפרש',
+                     ' ובקונטרס לא פירש כן', ' בקונטרס לא פירש כן'):
+            text = 'כדתנן ' + anchor + ')' + tail
+            rows = self.records(text, anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], tail)
+        rows = self.records('כתבתי ' + anchor + ') ורש"י מפרש אחרת', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+
+    def test_communal_document_writing_is_not_the_authors_self_citation(self):
+        anchor = 'בפ"ק (דף ב.'
+        rows = self.records('לא כפריה כתבינן וכן ' + anchor + ')', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+        self.assertFalse(lb.is_self_writing('כתבינן'))
+        self.assertTrue(lb.is_self_writing('כדכתבינן'))
+
+    def test_completed_retrospective_proof_does_not_own_a_new_coordinated_citation(self):
+        anchor = 'בפ"ק (דף ב.'
+        rows = self.records('שהבאתי לעיל וכן ' + anchor + ')', anchor,
+            [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+        self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'])
+
     def test_quoted_amud_and_whole_daf_self_addresses_keep_their_printed_scope(self):
         for anchor, target, expected in (
             ("בפרק קמא (דף ב א'", 'Shevuot 2a', 'Tosafot on Shevuot 2a'),
