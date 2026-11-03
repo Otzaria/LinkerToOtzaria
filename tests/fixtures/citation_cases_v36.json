@@ -15257,9 +15257,18 @@
           }
         ]
       },
-      "expected": [],
-      "forbidden_targets": [
-        "Zevachim 36b:16-47a:11"
+      "expected": [
+        {
+          "anchor": "בזבחים פרק בית שמאי",
+          "target_ref": "Zevachim 36b:16-47a:11"
+        }
+      ],
+      "forbidden_targets": [],
+      "forbidden_links": [
+        {
+          "anchor": "ובזבחים פרק בית שמאי",
+          "target_ref": "Zevachim 36b:16-47a:11"
+        }
       ]
     },
     {
@@ -15379,12 +15388,7 @@
           }
         ]
       },
-      "expected": [
-        {
-          "anchor": "לעיל דף כט:",
-          "target_ref": "Rashi on Shevuot 29b"
-        }
-      ],
+      "expected": [],
       "forbidden_targets": [
         "Shevuot 29b"
       ]
