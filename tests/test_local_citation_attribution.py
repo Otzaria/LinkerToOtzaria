@@ -9,6 +9,127 @@ class LocalAttributionTest(unittest.TestCase):
     setUp = helpers.ChapterDafRecoveryTest.setUp
     records = helpers.ChapterDafRecoveryTest.records
 
+    def test_reconstructed_relatives_receive_the_same_proven_display_owner(self):
+        for predicate, owner in (
+                ('הארכתי בו לעיל בריש', 'Tosafot'),
+                ('כדפרישית בסוף', 'Tosafot'),
+                ('כמו שאבאר קצת לקמן בריש', 'Tosafot'),
+                ('כדפי\' בקונטרס בריש', 'Rashi'),
+                ('ובקונטרס פי\' לקמן בריש', 'Rashi')):
+            below = 'לקמן' in predicate
+            source = 'Tosafot on Shevuot 2a:1:1' if below else 'Tosafot on Shevuot 19a:1:1'
+            anchor = ('לקמן' if below else 'לעיל') + ' בפ"ק (דף ג.'
+            text = predicate + ' ' + anchor + ')'
+            rows = self.records(text, anchor, [('RELATIVE', anchor.split()[0]),
+                ('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ג.')], source=source)
+            self.assertEqual([r.target_ref for r in rows], [owner + ' on Shevuot 3a'], predicate)
+
+    def test_named_prefix_and_postfix_share_work_availability_and_address_guards(self):
+        anchor = 'בפ"ק (דף ב.'
+        for before in ('כדפי\' בקונטרס ', 'רש"י פירש ', 'ברש"י ', 'בקונטרס גופיה פירש ', 'כדכתב בתוספות '):
+            target = ('Tosafot' if 'תוספות' in before else 'Rashi') + ' on Shevuot 2a'
+            rows = self.records(before + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a:3'])
+            self.assertEqual([r.target_ref for r in rows], [target], before)
+        lb._TARGET_TEXT_CACHE.clear()
+        original_empty = Ref.is_empty
+        with mock.patch.object(Ref, 'is_empty', lambda ref:
+                bool(ref.index.base_text_titles) or original_empty(ref)):
+            rows = self.records('רש"י פירש ' + anchor + ')', anchor,
+                [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a:3'])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a:3'])
+
+    def test_prefix_author_cannot_cross_a_new_subject_or_borrow_a_qualified_work(self):
+        anchor = 'בפ"ק (דף ב.'
+        for before in ('רש"י פירש ואילו ', 'רש"י פירש אבל אמרינן ',
+                       'רש"י לא פירש ', 'פירש בתוספות ישנים ', 'פירש בתוספות רי"ד ',
+                       'פירש בתוספות הרא"ש ', 'פירש ר"ת '):
+            text = before + anchor + ')'
+            self.assertIsNone(lb.citation_prefix_commentary(text, len(before), len(before + anchor)), before)
+            rows = self.records(text, anchor, [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], before)
+
+    def test_a_new_writer_inside_the_entity_has_the_same_scope_as_outside(self):
+        text = 'פירש רש"י והרמב"ן כתב בפ"ק (דף ב.)'
+        for anchor in ('בפ"ק (דף ב.', 'והרמב"ן כתב בפ"ק (דף ב.'):
+            rows = self.records(text, anchor, [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], anchor)
+        anchor = 'בפ"ק (דף ב.'
+        for before in ('עיין ברש"י וכן ', 'רש"י פירש וכן ', 'פירש בקונטרס וכן '):
+            for predicate in ('אמרינן', 'נמי אמרינן'):
+                text = before + anchor + ') ' + predicate
+                for entity in (anchor, anchor + ') ' + predicate):
+                    rows = self.records(text, entity,
+                        [('NAMED', 'בפ"ק'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'])
+                    self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], (before, entity))
+
+    def test_self_upgrade_respects_a_known_chapter_on_either_side_of_the_entity(self):
+        text = 'כתבתי בפ"ק (דף לה.)'
+        for anchor in ('בפ"ק (דף לה.', 'דף לה.'):
+            rows = self.records(text, anchor, ([('NAMED', 'בפ"ק')] if anchor.startswith('בפ') else [])
+                + [('NUMBERED', 'דף לה.')], refs=['Shevuot 35a'], source='Tosafot on Shevuot 79a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 35a'], anchor)
+
+    def test_self_upgrade_cannot_borrow_a_known_chapter_from_a_foreign_work(self):
+        foreign = helpers.BOOKS + (('Gittin', ('גיטין',), ((Chapter('Gittin', 3, 40),
+                   {'פרק השולח', 'השולח'}),)),)
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=foreign):
+            lb._chapter_alias_works.cache_clear()
+            self.assertFalse(lb.self_locator_gap_is_clear(['בפרק', 'השולח'], target=Ref('Shevuot 2a')))
+            text = 'כתבתי בפרק השולח (דף ב.)'
+            for anchor in ('בפרק השולח (דף ב.', 'דף ב.'):
+                parts = ([('NAMED', 'בפרק השולח')] if anchor.startswith('בפרק') else [])
+                rows = self.records(text, anchor, parts + [('NUMBERED', 'דף ב.')],
+                    refs=['Shevuot 2a'], source='Tosafot on Shevuot 19a:1:1')
+                self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], anchor)
+
+    def test_a_title_prefix_is_not_a_complete_foreign_chapter_name(self):
+        foreign = helpers.BOOKS + (('Gittin', ('גיטין',), ((Chapter('Gittin', 3, 40),
+                   {'שני אחים', 'פרק שני אחים'}),)),)
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=foreign):
+            lb._chapter_alias_works.cache_clear()
+            anchor = 'בפרק שני (דף יד.'
+            rows = self.records('פירשתי ' + anchor + ')', anchor,
+                [('NAMED', 'בפרק שני'), ('NUMBERED', 'דף יד.')], refs=['Shevuot 14a'],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 14a'])
+
+    def test_editorial_amud_correction_requires_one_actual_opening_heading(self):
+        anchor = 'לעיל (דף ג:'
+        text = 'פי\' ' + anchor + ') [בד"ה הלכה ברורה שם ע"א]'
+        source, target = Ref('Tosafot on Shevuot 19a:1:1'), Ref('Shevuot 3b')
+        segment = Ref('Tosafot on Shevuot 3a:1:1')
+        with mock.patch.object(Ref, 'all_segment_refs', create=True, return_value=[segment]), \
+                mock.patch.object(Ref, 'text', create=True, return_value=NS(
+                    as_string=lambda: '<b>הלכה ברורה היא</b> ועוד ביאור')):
+            result = lb.editorial_commentary_dh_ref(target, text, 4, 4 + len(anchor), source, Ref)
+            self.assertEqual(result.normal(), segment.normal())
+            for predicate in ("פי'", 'פירשתי'):
+                content = predicate + ' ' + anchor + ') [בד"ה הלכה ברורה שם ע"א]'
+                rows = self.records(content, anchor, [('RELATIVE', 'לעיל'), ('NUMBERED', 'דף ג:')],
+                    refs=['Shevuot 3b'], source=source.normal())
+                self.assertEqual([r.target_ref for r in rows], [segment.normal()])
+            for modified in (text.replace('שם ע"א', 'שם'), text.replace('הלכה ברורה', 'דיבור אחר'),
+                             text.replace("פי'", 'אמרינן'), text.replace("פי'", 'רש"י פי\''),
+                             text.replace("פי'", 'הרמב"ן פי\'')):
+                at = modified.index(anchor)
+                self.assertIsNone(lb.editorial_commentary_dh_ref(
+                    target, modified, at, at + len(anchor), source, Ref), modified)
+            with mock.patch.object(Ref, 'all_segment_refs', return_value=[segment, segment]):
+                self.assertIsNone(lb.editorial_commentary_dh_ref(
+                    target, text, 4, 4 + len(anchor), source, Ref))
+            self.assertIsNone(lb.editorial_commentary_dh_ref(
+                target, text, 4, 4 + len(anchor), Ref('Tosafot on Shevuot 2a:1:1'), Ref))
+
+    def test_elliptical_chapter_names_require_a_local_edge_and_matching_printed_amud(self):
+        for gap in (['בריש', 'העדות'], ['בסוף', 'שבועת', 'העדות', 'זוטא']):
+            self.assertFalse(lb.self_locator_gap_is_clear(gap))
+            self.assertTrue(lb.self_locator_gap_is_clear(gap, target=Ref('Shevuot 35a')))
+            self.assertFalse(lb.self_locator_gap_is_clear(gap, target=Ref('Shevuot 2a')))
+        self.assertFalse(lb.self_locator_gap_is_clear(['העדות'], target=Ref('Shevuot 35a')))
+        self.assertFalse(lb.self_locator_gap_is_clear(
+            ['בריש', 'שבועת', 'העדות'], target=Ref('Shevuot 2a')))
+
     def test_distant_self_statement_does_not_change_an_independent_named_gemara(self):
         anchor = 'במסכת סוכה בפרק קמא (יג, ב'
         for predicate in ('כדאיתא', 'דגרסינן', 'כדאשכחן', 'אמרו', 'מפורש', 'קיי"ל', 'כדתנן'):

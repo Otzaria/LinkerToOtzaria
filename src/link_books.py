@@ -2402,14 +2402,31 @@ def process_batch(
                 # Upgrade only after the base citation passed every normal
                 # address, work, direction, ibid and availability check. A
                 # named writer is never evidence for a new Gemara recovery.
-                if self_commentary_ref is not None:
+                display_base = (not base_source and not text_rebuilt
+                    and (original_ref is not None or regrouped is not None
+                         or source_relative is not None or recovered is not None)
+                    and _bavli_tractate_itself(getattr(ref, 'index', None)))
+                if (display_base and self_commentary_ref is None
+                        and citation_local_attribution(content, start, end, target=ref) == 'self'):
+                    # Relative reconstruction reaches this point after the early
+                    # ownership branch. Apply the same proof to its validated
+                    # base address, without adding a new history antecedent.
+                    self_commentary_ref = own_commentary_self_ref(
+                        rr, ref, content, start, end, relative_source,
+                        context_ref_factory, work_antecedent=antecedent)
+                corrected_dh = (editorial_commentary_dh_ref(
+                    ref, content, start, end, relative_source, context_ref_factory)
+                    if display_base else None)
+                if corrected_dh is not None:
+                    ref, target_ref = corrected_dh, corrected_dh.normal()
+                    relative_direction = self_citation_direction(content, start, end)
+                    history_ref = None  # the printed correction supersedes the old amud
+                elif self_commentary_ref is not None:
                     ref, target_ref = self_commentary_ref, self_commentary_ref.normal()
                     relative_direction = self_citation_direction(content, start, end)
                     if history_ref is not None and _commented_tractates(ref, context_ref_factory) != [history_ref.index.title]:
                         history_ref = None  # a corrected work cannot preserve the wrong old antecedent
-                elif (not base_source and not text_rebuilt
-                        and (original_ref is not None or regrouped is not None or source_relative is not None)
-                        and _bavli_tractate_itself(getattr(ref, 'index', None))):
+                elif display_base:
                     named_commentary = named_commentary_citation_ref(
                         ref, content, start, end, context_ref_factory)
                     if named_commentary is not None:
@@ -3744,7 +3761,7 @@ _CITED_WRITING_RE = re.compile(
 _SELF_WRITING_RE = re.compile(
     r'(?:ו?[כדשבמל]{0,3}(?:כתבתי|כתבנו|פירשתי|פירשנו|ב[י]?ארתי|ב[י]?ארנו|'
     r'הארכתי|הארכנו|אמרתי|אמרנו|הבאתי|הבאנו|הוכחתי|הוכחנו)[הו]?'
-    r'|ו?[כדש]{0,3}(?:פרישית|פרישנא|כתיבנא|פרשינן|אפרש|נרחיב)'
+    r'|ו?[כדש]{0,3}(?:פרישית|פרישנא|כתיבנא|פרשינן|אפרש|אבאר|נרחיב)'
     r'|ו?כד?כתבינן'
     r'|ו?כד?פי[\"\'])')
 _ATTRIBUTION_BREAKS = frozenset({
@@ -3767,16 +3784,18 @@ def is_self_writing(word):
         _NIQQUD_RE.sub('', _plain_quotes(word)).strip('(),;:.[]')))
 
 
-def self_locator_gap_is_clear(words):
+def self_locator_gap_is_clear(words, *, target=None):
     """Consume actual location words, never prose merely starting with ב/מ/ד."""
     words = list(words)
+    while words and words[-1] in ('לעיל', 'לקמן', 'להלן', 'שם', 'התם'):
+        words.pop()
     for i in range(len(words) - 2, -1, -1):
         if words[i] == 'סמוך' and words[i + 1] in ('לתחילתו', 'לסופו'):
             del words[i:i + 2]
     neutral = {'שם', 'התם', 'לעיל', 'לקמן', 'להלן', 'למעלה', 'למטה', 'בסמוך',
                'טעם', 'טעמא', 'זה', 'לה', 'נמי', 'כבר', 'וכן', 'בארוכה', 'באורך', 'בקצרה',
                'בפירקין', 'בפרקין', 'פירקין', 'פרקין', 'ברישמכילתין', 'ברישמכלתין',
-               'במקומו', 'במקומה', 'באריכות', 'בסוף', 'בריש', 'בשלהי'}
+               'במקומו', 'במקומה', 'באריכות', 'בסוף', 'בריש', 'בשלהי', 'בו', 'קצת'}
     if words[:2] in (['דבר', 'זה'], ['ענין', 'זה'], ['דינין', 'אלו']):
         words = words[2:]
     at = 0
@@ -3788,8 +3807,34 @@ def self_locator_gap_is_clear(words):
     phrase = ' '.join(remaining)
     if re.match(r'^ו?מ(?:פרק|פ["\']|ריש|סוף|שלהי)', phrase):
         return False  # a proof FROM another discussion is not our writing there
-    if chapter_lead_names(phrase) & _chapter_alias_works().keys():
-        return True
+    names = chapter_lead_names(phrase)
+    chapter_works = set().union(*(_chapter_alias_works(False).get(name, set()) for name in names))
+    known_chapter = bool(names & _chapter_alias_works().keys())
+    if target is not None and chapter_works and target.index.title not in chapter_works:
+        return False
+    if target is not None and at and words[at - 1] in ('בריש', 'בסוף', 'בשלהי'):
+        chapters = _book_chapters(target.index.title)
+        exact = [chapter for chapter, aliases in chapters if names & aliases]
+        if exact:
+            return any(chapter.overlaps(target) for chapter in exact)
+        # Ellipsis is local to a printed address, never a new global chapter
+        # alias. 'בריש הדיינין' may abbreviate a longer canonical title.
+        # A descriptive size adjective may distinguish a short chapter name
+        # absent from metadata; the validated amud must still select one node.
+        shortened = remaining[:-1] if remaining[-1] in ('זוטא', 'רבתי', 'קטן', 'גדול') else remaining
+        abbreviation = ' '.join(shortened)
+        if (1 <= len(shortened) <= 4 and all(re.fullmatch(r'[א-ת]{2,}', w) for w in shortened)
+                and not any(_NATIVE_CITATION_VERB_RE.fullmatch(w) or w in _ATTRIBUTION_BREAKS
+                            for w in shortened)):
+            matching = [chapter for chapter, aliases in chapters if chapter.overlaps(target)
+                        and any(name.endswith(' ' + abbreviation) or name == abbreviation
+                                or len(shortened) < len(remaining) and name.startswith(abbreviation + ' ')
+                                for name in aliases)]
+            return len(matching) == 1
+        return False
+    if known_chapter:
+        chapters = named_chapters(phrase, target) if target is not None else ()
+        return not chapters or any(chapter.overlaps(target) for chapter in chapters)
     for _, aliases, chapters in _bavli_chapter_books():
         for alias in aliases:
             book = rf'ו?[בדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}'
@@ -3832,7 +3877,66 @@ def citation_postfix_words(content, start, end):
     return after, native_after
 
 
-def citation_local_attribution(content, start, end):
+def citation_prefix_commentary(content, start, end, *, target=None):
+    """A named writer and writing predicate directly governing a locator.
+
+    Do not scan a fixed window for a name: every intervening word must be a
+    location phrase. A new quotation, subject, negation or qualified Tosafot
+    title therefore cannot donate its author to the next citation.
+    """
+    prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start])
+    before = _attribution_tokens(' '.join(clause_before(prefix, len(prefix))))
+    anchor = _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', content[start:end]))
+    lead_text = anchor.split('(', 1)[0]
+    if '(' not in anchor:
+        address = _TRAILING_DAF_RE.search(lead_text)
+        if address and _is_canonical_numeral(re.sub(r'[^א-ת]', '', address['daf'])):
+            lead_text = lead_text[:address.start()]
+    lead = _attribution_tokens(lead_text)
+    # The entity may begin with its relative word or chapter, or inside the
+    # numeric parenthesis. Only prefix words identify the writer itself.
+    for i in range(len(before) - 1, -1, -1):
+        word = before[i]
+        family = ('Rashi' if re.fullmatch(r'ו?[בכלמד]?(?:רש["\']י|קונטרס|קונט\')|פרש["\']י', word)
+                  else 'Tosafot' if re.fullmatch(r'ו?[בכלמד]?(?:תוספות|תוס["\'])', word) else None)
+        if family is None:
+            continue
+        after = before[i + 1:]
+        preceding_predicate = bool(i and _WRITING_ATTRIBUTION_RE.fullmatch(before[i - 1]))
+        combined = bool(re.fullmatch(r'פרש["\']י', word))
+        if after[:1] in (['גופיה'], ['עצמו']):
+            after = after[1:]
+        following_predicate = bool(after and _WRITING_ATTRIBUTION_RE.fullmatch(after[0]))
+        if following_predicate:
+            after = after[1:]
+        elif not preceding_predicate and not combined and not word.startswith('ב'):
+            return None
+        if (not preceding_predicate and not following_predicate and not combined
+                and any(w.startswith('ו') for w in after + lead)):
+            return None  # a bare locative writer cannot cross a coordinated citation
+        _, following = citation_postfix_words(content, start, end)
+        # The entity's span may include prose after its numbered parenthesis;
+        # its parts need not cover that tail. Scope ends at the printed address,
+        # not at an arbitrary NER end offset.
+        closed_location = re.search(r'\([^()]+\)', anchor)
+        if closed_location:
+            following = _attribution_tokens(anchor[closed_location.end():]) + following
+        native_after = bool(following and (
+            _NATIVE_CITATION_VERB_RE.fullmatch(following[0])
+            or following[0] == 'נמי' and len(following) > 1
+               and _NATIVE_CITATION_VERB_RE.fullmatch(following[1])))
+        if native_after and any(w.startswith('ו') and w not in ('ולעיל', 'ולקמן', 'ולהלן')
+                                for w in after + lead):
+            return None  # a new Gemara quotation also ends explicit writing scope
+        if (len(before) - i > 8 or not self_locator_gap_is_clear(after + lead, target=target)
+                or any(_NATIVE_CITATION_VERB_RE.fullmatch(w) or w in _ATTRIBUTION_BREAKS
+                       for w in after + lead)):
+            return None
+        return family
+    return None
+
+
+def citation_local_attribution(content, start, end, *, target=None):
     """Identify the writer governing this citation, not a word elsewhere in prose.
 
     Only a nearby self predicate followed by a locator qualifies. A new native
@@ -3866,6 +3970,8 @@ def citation_local_attribution(content, start, end):
                  or after[0] in ('שם', 'ושם', 'התם') and _POSTFIX_SELF_WRITING_RE.fullmatch(after[1]))):
             return 'self'
 
+    if citation_prefix_commentary(content, start, end, target=target) is not None:
+        return 'other'
     visible_prefix = _QUOTE_HTML_TAG_RE.sub(' ', content[:start])
     # Printed locations do not end a coordinated writing list. Editorial
     # brackets retain their visible words (e.g. [כדכתבינן]).
@@ -3907,7 +4013,7 @@ def citation_local_attribution(content, start, end):
         return None
     if weak_proof and any(re.match(r'ו?מ(?:פרק|פ["\']|ריש|סוף|שלהי|ההיא)', word) for word in gap):
         return None  # bringing a proof FROM Gemara does not claim to write there
-    if not self_locator_gap_is_clear(outside_gap):
+    if not self_locator_gap_is_clear(outside_gap, target=target):
         return 'ambiguous'  # an unknown locator is no positive proof of Gemara
     # These predicates may introduce a quotation FROM Gemara. Preserve an
     # established candidate, but do not invent either work without an own-text
@@ -3946,13 +4052,14 @@ def named_commentary_citation_ref(target, content, start, end, ref_factory):
     """
     if (ref_factory is None or not _bavli_tractate_itself(target.index)
             or not target.sections or not target.toSections
-            or citation_local_attribution(content, start, end) != 'other'):
+            or citation_local_attribution(content, start, end, target=target) != 'other'):
         return None
     if not existing_base_address_agrees(target, content[start:relative_address_end(
             content, start, end)], ref_factory, prefix=content[:start], following=content[end:]):
         return None
     words, _ = citation_postfix_words(content, start, end)
-    families = set()
+    prefix_family = citation_prefix_commentary(content, start, end, target=target)
+    families = {prefix_family} if prefix_family else set()
     for i, word in enumerate(words[:3]):
         if re.fullmatch(r'ו?[בכלמד]?(?:רש["\']י|קונטרס|קונט\')|פרש["\']י', word):
             families.add('Rashi')
@@ -4156,6 +4263,18 @@ def own_commentary_self_ref(rr, target, content, start, end, source_ref, ref_fac
         numeric.append(whole.start())
     chapter_lead = anchor[:min(numeric)].strip().rstrip(' (') if numeric else anchor.split('(', 1)[0]
     locator = _attribution_tokens(' '.join(locator_before) + ' ' + chapter_lead)
+    # A printed daf cannot acquire this author's commentary when the very
+    # chapter governing it proves a different location. Check both sides of
+    # the NER boundary; preserve the ordinary base fallback on failed ownership.
+    for i in range(len(locator)):
+        lead = ' '.join(locator[i:])
+        works = set().union(*(_chapter_alias_works(False).get(name, set())
+                              for name in chapter_lead_names(lead)))
+        if works and printed.index.title not in works:
+            return None
+        chapters = named_chapters(lead, printed)
+        if chapters and not any(chapter.overlaps(printed) for chapter in chapters):
+            return None
     if source_base != [printed.index.title]:
         explicit_work = any(
             re.fullmatch(rf'ו?[במדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}',
@@ -4556,6 +4675,58 @@ def opening_commentary_dh(text):
         if 1 <= len(heading) <= 12:
             return heading
     return ()
+
+
+def editorial_commentary_dh_ref(target, content, start, end, source_ref, ref_factory):
+    """An attached editorial DH and explicit 'שם ע״א/ב' can correct an amud.
+
+    Require the same daf, a locally governing writing predicate, the source's
+    actual direct commentary and one exact opening heading on the printed
+    corrected side. Never search adjacent pages or guess a work from a DH.
+    """
+    if (ref_factory is None or source_ref is None
+            or not _bavli_tractate_itself(target.index) or not target.sections
+            or (target.sections[0] + 1) // 2 != (target.toSections[0] + 1) // 2
+            or _commented_tractates(source_ref, ref_factory) != [target.index.title]
+            or citation_prefix_commentary(content, start, end) is not None):
+        return None
+    tail = _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', content[end:])).lstrip(' )')
+    correction = re.match(r'^\[ב?ד["\']ה\s+([א-ת"\' ]+?)\s+שם\s+ע["\']([אב])\]\s*', tail)
+    if correction is None:
+        return None
+    dh = hebrew_quote_words(correction[1])
+    if not 1 <= len(dh) <= 5:
+        return None
+    before = _attribution_tokens(' '.join(clause_before(content, start)))
+    writers = [i for i, word in enumerate(before)
+               if is_self_writing(word) or _CITED_WRITING_RE.fullmatch(word)]
+    if not writers or not self_locator_gap_is_clear(before[writers[-1] + 1:]):
+        return None
+    if any(_EXTERNAL_ATTRIBUTION_RE.fullmatch(w)
+           or w in ('הרב', 'רבנו', 'רבינו', 'הגאון', 'ספר', 'חידושי', 'בחידושי')
+           or re.search(r'[א-ת]["\'][א-ת]', w)
+               and w not in _RELATIVE_DISCOURSE_ABBREVIATIONS
+               and not _is_canonical_numeral(re.sub(r'[^א-ת]', '', w)) for w in before):
+        return None
+    if not existing_base_address_agrees(target, content[start:end], ref_factory,
+                                       prefix=content[:start], following=content[end:]):
+        return None
+    daf = (target.sections[0] + 1) // 2
+    printed = _amud_ref(target.index.title, daf, correction[2], ref_factory)
+    direction = self_citation_direction(content, start, end)
+    if (printed is None or not target_has_text(printed)
+            or direction is None or _on_stated_side(printed, source_ref, direction) is None):
+        return None
+    chapter_lead = _plain_quotes(_bare_anchor(content[start:end])).split('(', 1)[0]
+    if _chapter_marker(chapter_lead) and not any(
+            chapter.overlaps(printed) for chapter in named_chapters(chapter_lead, printed)):
+        return None
+    own = _amud_ref(source_ref.index.title, daf, correction[2], ref_factory)
+    if own is None or not target_has_text(own):
+        return None
+    found = [segment for segment in own.all_segment_refs()
+             if opening_commentary_dh(segment.text('he').as_string())[:len(dh)] == dh]
+    return found[0] if len(found) == 1 else None
 
 
 def chapter_ibid_is_proven(rr, ref, content, start, end, ref_factory):
@@ -5517,8 +5688,8 @@ def _bavli_chapter_books():
     return tuple(books)
 
 
-@functools.lru_cache(maxsize=1)
-def _chapter_alias_works():
+@functools.lru_cache(maxsize=2)
+def _chapter_alias_works(include_prefixes=True):
     aliases = collections.defaultdict(set)
     for title, _, chapters in _bavli_chapter_books():
         for _, names in chapters:
@@ -5526,7 +5697,7 @@ def _chapter_alias_works():
                 words = name.split()
                 # Printed chapter names can abbreviate a longer canonical title:
                 # Gittin's "הזורק גט" also competes with Shabbat's "הזורק".
-                for end in range(1, len(words) + 1):
+                for end in range(1, len(words) + 1) if include_prefixes else (len(words),):
                     aliases[" ".join(words[:end])].add(title)
     return aliases
 
