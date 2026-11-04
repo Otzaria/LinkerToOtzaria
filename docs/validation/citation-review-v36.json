@@ -6,11 +6,6 @@
     "source_sha256": "2844129586a4e7e522ad0b3ebfa24673bc741e85b7753dc52eaaf0a0db6ab307",
     "published_source_manifest_sha256": "803e2c8414f83e8824e8cc2e736491f6dab3a7d45ca0dc5116b5d180eb3528fe"
   },
-  "candidate": {
-    "source_commit": "6eea256bf9019e915622249c18658cbd8fa4e223",
-    "source_sha256": "2d5276ef7326626a589b46aa3106c5593cc32370191b36f7b5495d623e174587",
-    "engine_src": "02533813acd3443b"
-  },
   "pins": {
     "captured": "2026-11-02",
     "host": "Windows runner, AMD ROCm",
@@ -53,69 +48,6 @@
       "pninimToOtzaria": 1,
       "Ben-YehudaToOtzaria": 1
     }
-  },
-  "totals": {
-    "before": 38170,
-    "after": 38795,
-    "unchanged": 37869,
-    "added": 629,
-    "removed": 4,
-    "changed": 297
-  },
-  "complete_v36_totals": {
-    "before": 38157,
-    "after": 38782,
-    "unchanged": 37856,
-    "added": 629,
-    "removed": 4,
-    "changed": 297
-  },
-  "tests": {
-    "macos": {
-      "total": 623,
-      "passed": 610,
-      "skipped": 13,
-      "log_sha256": "309684829055e62576c095b2a087994b38c6128013b2ea73e5b065a76915c3f0"
-    },
-    "linux": {
-      "total": 623,
-      "passed": 622,
-      "skipped": 1,
-      "skip_reason": "optional jsonschema dependency",
-      "log_sha256": "68fd30654c2c36cb8a82995ad69fb8a9980a8136d1202f53b1a462347e5e5fe4"
-    },
-    "independent_attribution": {
-      "total": 44,
-      "passed": 44,
-      "skipped": 0
-    },
-    "standalone_real_resolver": {
-      "cases": 140,
-      "valid_links": 441,
-      "expected_anchors": 145,
-      "log_sha256": "dd355d0d458b80a5a2c088afcd2a8233e1cc9c72e4d3bd33d1a475864d917c0f"
-    },
-    "saved_complete_book_records": {
-      "cases": 140,
-      "records": 444,
-      "expected_anchors": 146,
-      "full_replay_only_anchors": 1,
-      "forbidden_targets": 49,
-      "forbidden_anchor_target_pairs": 10,
-      "original_preservation_records_exact": 9
-    }
-  },
-  "independent_qa": {
-    "verdict": "APPROVED_NO_KNOWN_BLOCKERS",
-    "report_sha256": "5c9dc9aac488ed0246a37323ea74b019fc6a3aa1e073e69340ec84364d49c9be",
-    "all_differences": 930,
-    "residual_omissions": 4,
-    "final_delta_records": 10,
-    "method": "All final differences were contextually classified across successive audits. Final ten ownership targets and all four omissions re-inspected; immutable identities, every changed anchor/hash and all saved record controls independently verified. Full paragraphs read for ownership/ambiguity cases; unchanged baseline links were not all semantically reread.",
-    "saved_records_compared_vs_previous": 38795,
-    "changed_target_fields_vs_previous": 10,
-    "other_saved_records_exactly_equal": 38785,
-    "all_other_fields_identical": true
   },
   "omission_outcomes": [
     {
@@ -263,33 +195,142 @@
       "source_book_hash": "d81f29bcf343a98c"
     }
   ],
-  "artifacts": {
-    "full_replay_report_archive": {
-      "name": "citation-review10-final-reports.tar.gz",
-      "sha256": "c9441ec94be75ae76ba10eb821644dffba44def4f3d4fdb4a367b6028dbc5dc8"
-    },
-    "independent_qa_report": {
-      "name": "qa-citation-review10-final.json",
-      "sha256": "5c9dc9aac488ed0246a37323ea74b019fc6a3aa1e073e69340ec84364d49c9be"
-    },
-    "fixture": {
-      "path": "tests/fixtures/citation_cases_v36.json.gz",
-      "compressed_bytes": 122534,
-      "compressed_sha256": "6906f086601f13cd96028ac6516706a5a1e3b4d1fe58da9f04408ec1828746ba",
-      "json_sha256": "bbbccac5921d63b7b41c57bd448185c3459877fc294378aa0736c373f08cd7b7"
-    }
-  },
-  "limits": [
-    "141 complete books matching v36 and two targeted dictionary selections, not the entire production library.",
-    "Recorded production NER with the pinned real resolver; no live NER request during replay.",
-    "441 links in isolated acceptance versus444 records in the same source paragraphs under full-book history; both control sets pass.",
-    "Detailed per-record reports are audit artifacts and are not shipped as test fixtures."
-  ],
   "release_policy": {
     "output_affecting": true,
     "full_relink_required": true,
     "output_neutral_adoption_allowed": false,
     "production_relink_run": false,
     "merged": false
+  },
+  "candidate": {
+    "source_commit": "84075617664cdad85c817092de6516407392a127",
+    "source_sha256": "f5291e3c0b9c0a0e8833b06e11cbc3eef52f1aad702dedb834f79ddfcdd763ae",
+    "engine_src": "bbcf4ff94398e7e8"
+  },
+  "totals": {
+    "before": 38170,
+    "after": 38800,
+    "unchanged": 37856,
+    "added": 634,
+    "removed": 4,
+    "changed": 310
+  },
+  "complete_v36_totals": {
+    "before": 38157,
+    "after": 38787,
+    "unchanged": 37843,
+    "added": 634,
+    "removed": 4,
+    "changed": 310
+  },
+  "tests": {
+    "macos": {
+      "total": 636,
+      "passed": 623,
+      "skipped": 13,
+      "log_sha256": "20bf3c55bc2967327a9a8e0f9e1642bfd27ccef5893b8c6d72b03886ca1c8b5c"
+    },
+    "linux": {
+      "total": 636,
+      "passed": 635,
+      "skipped": 1,
+      "log_sha256": "b8a6f8b78c815555f3347a1321211f93d128a2cd4219ac0c09080345203c0876"
+    },
+    "independent_attribution": {
+      "total": 57,
+      "passed": 57,
+      "skipped": 0
+    },
+    "independent_scope_variants": {
+      "total": 1216,
+      "passed": 1216
+    },
+    "independent_postfix_variants": {
+      "total": 54,
+      "passed": 54
+    },
+    "standalone_real_resolver": {
+      "cases": 164,
+      "valid_links": 501,
+      "expected_anchors": 169,
+      "log_sha256": "cc72c6420e0e3dc435844282ebf89afc3eb0215620f8aacdc43da292015c1b51"
+    },
+    "saved_complete_book_records": {
+      "cases": 164,
+      "records": 504,
+      "expected_anchors": 170,
+      "full_replay_only_anchors": 1,
+      "forbidden_targets": 49,
+      "forbidden_anchor_target_pairs": 26,
+      "original_preservation_records_exact": 9,
+      "own_dh_rows_exact": 3
+    }
+  },
+  "independent_qa": {
+    "verdict": "APPROVED_NO_KNOWN_BLOCKERS",
+    "report_sha256": "ae6443c4d1c539ba94ea40c22c126962d68d0a21a66e0292694e8215ddd4ba6a",
+    "all_differences": 948,
+    "residual_omissions": 4,
+    "final_delta_records": 7,
+    "method": "All final differences classified across successive independent audits. All seven differences from the fully reviewed prior replay, all four residual omissions, every saved output record and all preservation controls checked on the final frozen source. Unchanged baseline links were not all semantically reread.",
+    "comparison_baseline": "review11",
+    "saved_records_before": 38802,
+    "saved_records_after": 38800,
+    "actual_record_deltas": 7,
+    "all_other_records_exactly_equal": true,
+    "surviving_target_only_changes": 5,
+    "new_wrong_owner_records_removed": 2,
+    "accepted_previous_deltas_preserved_exactly": 27,
+    "other_saved_records_exact_count": 38795
+  },
+  "general_rules": {
+    "source_book_or_row_exceptions_added": false,
+    "ownership": "Printed work/address and available direct commentary after base validation; writer scope independent of NER boundaries.",
+    "chapter_scope": "Positive marker and longest complete metadata phrase; current attached chapter retained across numeric-only NER; completed earlier citations separated only by an explicit coordinated location.",
+    "editorial_dh": "Same printed daf, explicit attached corrected amud and one actual opening heading; no neighbouring-page search.",
+    "missing_commentary": "Preserve independently proved existing Gemara address; do not manufacture a personal title alias."
+  },
+  "known_source_ambiguities": [
+    {
+      "title": "תוספות על בבא קמא",
+      "line": 1289,
+      "printed_daf": "Bava Kamma 20b",
+      "printed_chapter": "המניח",
+      "chapter_range": "Bava Kamma 27a:13-36a:8",
+      "result": "Bava Kamma 20b",
+      "interpretation": "Printed-address legacy fallback, not a semantic correction of the source numeral. The contradictory chapter cannot prove own20b and does not license guessing27b or a personal exception."
+    }
+  ],
+  "artifacts": {
+    "full_replay_report_archive": {
+      "name": "citation-review12-final-reports.tar.gz",
+      "sha256": "ba01441be98e334278d9b83f069de74d0947eb0e48604addb522f4ee158e7886"
+    },
+    "independent_qa_report": {
+      "name": "qa-citation-review12-final.json",
+      "sha256": "ae6443c4d1c539ba94ea40c22c126962d68d0a21a66e0292694e8215ddd4ba6a"
+    },
+    "fixture": {
+      "path": "tests/fixtures/citation_cases_v36.json.gz",
+      "compressed_bytes": 145004,
+      "compressed_sha256": "64506a4f357dd39ee3d52b70bcc4087459209910622e048d8965fe2474702017",
+      "json_sha256": "1029d54c4a65c83e57ec424e3335dc7a50bd348c587a86153860b2656c4218ef"
+    }
+  },
+  "limits": [
+    "141 complete books matching v36 and two targeted dictionary selections, not the entire production library.",
+    "Recorded production NER with pinned real production-patched resolver; no live NER request during replay.",
+    "501 links in isolated acceptance versus504 records in the same source paragraphs under full-book history; both control sets pass.",
+    "Chapter/daf contradictions in the printed source can retain the verified legacy printed base address; this is not a claim that the source numeral is correct.",
+    "Detailed per-record reports remain external audit artifacts, not shipped test fixtures."
+  ],
+  "delta_from_previous_pr_head": {
+    "commit": "2541da8",
+    "before": 38795,
+    "after": 38800,
+    "added": 5,
+    "changed": 23,
+    "removed": 0,
+    "unchanged": 38772
   }
 }
