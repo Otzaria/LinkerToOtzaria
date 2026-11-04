@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "description": "Compact immutable replay and independent QA evidence; detailed per-record audit payloads are external artifacts.",
+  "baseline": {
+    "commit": "4b913a3",
+    "source_sha256": "2844129586a4e7e522ad0b3ebfa24673bc741e85b7753dc52eaaf0a0db6ab307",
+    "published_source_manifest_sha256": "803e2c8414f83e8824e8cc2e736491f6dab3a7d45ca0dc5116b5d180eb3528fe"
+  },
+  "pins": {
+    "captured": "2026-11-02",
+    "host": "Windows runner, AMD ROCm",
+    "sefaria_commit": "59291d9f8754de0062711bc1cd49214b0e618fc5",
+    "sefaria_patch": "9417fd1aba7bf248",
+    "gpu_server_commit": "d9da16119e9c0de64224d7b187cd999b2ead4bad",
+    "he_ref_ner": "37ff5191562e8655",
+    "he_subref_ner": "4480a8acec08bae0",
+    "additional_capture": {
+      "captured": "2026-11-03",
+      "host": "Windows runner, AMD ROCm",
+      "source_rows": 78764,
+      "bundle_sha256": "08bf1fc838e084a5b6b4d00498614e9721bb44d8397072b94760433f6c828f97"
+    },
+    "expanded_capture": {
+      "captured": "2026-11-03",
+      "host": "Windows runner, AMD ROCm",
+      "source_rows": 16734,
+      "complete_books": 18,
+      "bundle_sha256": "08a0ad3c09545b596663891664740ff3b1838fc050701e046067292491312179"
+    },
+    "combined_recorded_ner_sha256": "59354c9fd70529ba9a661037fd9d4896feba807b164ed0a137803742697d65ba"
+  },
+  "scope": {
+    "items": 143,
+    "source_rows": 95498,
+    "complete_v36_books": 141,
+    "complete_v36_source_rows": 95488,
+    "targeted_source_rows": 10,
+    "complete_tosafot_books": 36,
+    "expanded_complete_books": 18,
+    "expanded_source_rows": 16734,
+    "source_item_counts": {
+      "Sefaria": 119,
+      "DictaToOtzaria": 11,
+      "MoreBooks": 5,
+      "OnYourWayToOtzaria": 1,
+      "KSK": 3,
+      "National-LibraryToOtzaria": 2,
+      "pninimToOtzaria": 1,
+      "Ben-YehudaToOtzaria": 1
+    }
+  },
+  "omission_outcomes": [
+    {
+      "title": "רשב״א על שבת",
+      "line": 456,
+      "anchor": "בפרק קמא דסוכה (יג, ב. יד, א",
+      "old_target": "Sukkah 20a",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong collapsed Sukkah20a is replaced by separately printed13b and14a."
+    },
+    {
+      "title": "תוספות על מנחות",
+      "line": 1128,
+      "anchor": "בפ' כל המנחות",
+      "old_target": "Menachot 2a:1-13a:6",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong chapter1 Menachot2a-13a contradicts attached55a; own55a and9a remain."
+    },
+    {
+      "title": "תוספות על עבודה זרה",
+      "line": 133,
+      "anchor": "שבת דף סה",
+      "old_target": "Shabbat 65",
+      "outcome": "ACCEPTED_ANCHOR_REPLACEMENT",
+      "reason": "Same citation survives with corrected anchor including printed dot and TosafotShabbat65a."
+    },
+    {
+      "title": "ר\"ן על נדרים",
+      "line": 1398,
+      "anchor": "בפ' ד' נדרים",
+      "old_target": "Nedarim 32b:10-45a:3",
+      "outcome": "ACCEPTED_MISREAD_ADDRESS_CORRECTION",
+      "reason": "Wrong ordinal chapter4 range32b-45a contradicts printed22a; RanNedarim22a remains."
+    }
+  ],
+  "key_controls": [
+    {
+      "title": "מאירי על יבמות",
+      "line": 534,
+      "target": "Meiri on Yevamot 13a",
+      "scope": "required in complete-book replay; isolated cold resolver may abstain"
+    },
+    {
+      "title": "מאירי על יבמות",
+      "line": 1130,
+      "target": "Meiri on Chagigah 4b",
+      "scope": "wrong upstream Chagigah2 corrected from the printed address"
+    },
+    {
+      "title": "תוספות על בכורות",
+      "line": 18,
+      "target": "Tosafot on Gittin 7b",
+      "scope": "validate base chapter before selecting commentary"
+    }
+  ],
+  "expanded_books": [
+    {
+      "title": "דור רביעי על חולין",
+      "source_rows": 3132,
+      "source_book_hash": "c3744531ddbcdb6f"
+    },
+    {
+      "title": "מאירי על יבמות",
+      "source_rows": 1948,
+      "source_book_hash": "33ec00b88fdd3a27"
+    },
+    {
+      "title": "פני יהושע על בבא מציעא",
+      "source_rows": 1006,
+      "source_book_hash": "21ca04ce92065b5e"
+    },
+    {
+      "title": "פני יהושע על בבא קמא",
+      "source_rows": 1605,
+      "source_book_hash": "83e062db9edd153d"
+    },
+    {
+      "title": "פני יהושע על ביצה",
+      "source_rows": 518,
+      "source_book_hash": "0cc31746a0b51938"
+    },
+    {
+      "title": "פני יהושע על ברכות",
+      "source_rows": 725,
+      "source_book_hash": "2b8414a76ab2f0cc"
+    },
+    {
+      "title": "פני יהושע על גיטין",
+      "source_rows": 1256,
+      "source_book_hash": "292b67635dcfb727"
+    },
+    {
+      "title": "פני יהושע על חולין",
+      "source_rows": 72,
+      "source_book_hash": "c6e2898aa8e71ef1"
+    },
+    {
+      "title": "פני יהושע על יומא",
+      "source_rows": 44,
+      "source_book_hash": "790805b3f6809c4d"
+    },
+    {
+      "title": "פני יהושע על כתובות",
+      "source_rows": 1915,
+      "source_book_hash": "c5113fe84acbd136"
+    },
+    {
+      "title": "פני יהושע על מגילה",
+      "source_rows": 197,
+      "source_book_hash": "9b786eac4eae9707"
+    },
+    {
+      "title": "פני יהושע על מכות",
+      "source_rows": 116,
+      "source_book_hash": "30570a3e0b918d83"
+    },
+    {
+      "title": "פני יהושע על סוכה",
+      "source_rows": 460,
+      "source_book_hash": "df1d67df707513f4"
+    },
+    {
+      "title": "פני יהושע על פסחים",
+      "source_rows": 718,
+      "source_book_hash": "1c56053a3934da77"
+    },
+    {
+      "title": "פני יהושע על קידושין",
+      "source_rows": 1373,
+      "source_book_hash": "add488388af777c1"
+    },
+    {
+      "title": "פני יהושע על ראש השנה",
+      "source_rows": 436,
+      "source_book_hash": "8cbabbd33c79f020"
+    },
+    {
+      "title": "פני יהושע על שבועות",
+      "source_rows": 100,
+      "source_book_hash": "d80a0cf7e09a57c7"
+    },
+    {
+      "title": "פני יהושע על שבת",
+      "source_rows": 1113,
+      "source_book_hash": "d81f29bcf343a98c"
+    }
+  ],
+  "release_policy": {
+    "output_affecting": true,
+    "full_relink_required": true,
+    "output_neutral_adoption_allowed": false,
+    "production_relink_run": false,
+    "merged": false
+  },
+  "candidate": {
+    "source_commit": "84075617664cdad85c817092de6516407392a127",
+    "source_sha256": "f5291e3c0b9c0a0e8833b06e11cbc3eef52f1aad702dedb834f79ddfcdd763ae",
+    "engine_src": "bbcf4ff94398e7e8"
+  },
+  "totals": {
+    "before": 38170,
+    "after": 38800,
+    "unchanged": 37856,
+    "added": 634,
+    "removed": 4,
+    "changed": 310
+  },
+  "complete_v36_totals": {
+    "before": 38157,
+    "after": 38787,
+    "unchanged": 37843,
+    "added": 634,
+    "removed": 4,
+    "changed": 310
+  },
+  "tests": {
+    "macos": {
+      "total": 636,
+      "passed": 623,
+      "skipped": 13,
+      "log_sha256": "20bf3c55bc2967327a9a8e0f9e1642bfd27ccef5893b8c6d72b03886ca1c8b5c"
+    },
+    "linux": {
+      "total": 636,
+      "passed": 635,
+      "skipped": 1,
+      "log_sha256": "b8a6f8b78c815555f3347a1321211f93d128a2cd4219ac0c09080345203c0876"
+    },
+    "independent_attribution": {
+      "total": 57,
+      "passed": 57,
+      "skipped": 0
+    },
+    "independent_scope_variants": {
+      "total": 1216,
+      "passed": 1216
+    },
+    "independent_postfix_variants": {
+      "total": 54,
+      "passed": 54
+    },
+    "standalone_real_resolver": {
+      "cases": 164,
+      "valid_links": 501,
+      "expected_anchors": 169,
+      "log_sha256": "cc72c6420e0e3dc435844282ebf89afc3eb0215620f8aacdc43da292015c1b51"
+    },
+    "saved_complete_book_records": {
+      "cases": 164,
+      "records": 504,
+      "expected_anchors": 170,
+      "full_replay_only_anchors": 1,
+      "forbidden_targets": 49,
+      "forbidden_anchor_target_pairs": 26,
+      "original_preservation_records_exact": 9,
+      "own_dh_rows_exact": 3
+    }
+  },
+  "independent_qa": {
+    "verdict": "APPROVED_NO_KNOWN_BLOCKERS",
+    "report_sha256": "ae6443c4d1c539ba94ea40c22c126962d68d0a21a66e0292694e8215ddd4ba6a",
+    "all_differences": 948,
+    "residual_omissions": 4,
+    "final_delta_records": 7,
+    "method": "All final differences classified across successive independent audits. All seven differences from the fully reviewed prior replay, all four residual omissions, every saved output record and all preservation controls checked on the final frozen source. Unchanged baseline links were not all semantically reread.",
+    "comparison_baseline": "review11",
+    "saved_records_before": 38802,
+    "saved_records_after": 38800,
+    "actual_record_deltas": 7,
+    "all_other_records_exactly_equal": true,
+    "surviving_target_only_changes": 5,
+    "new_wrong_owner_records_removed": 2,
+    "accepted_previous_deltas_preserved_exactly": 27,
+    "other_saved_records_exact_count": 38795
+  },
+  "general_rules": {
+    "source_book_or_row_exceptions_added": false,
+    "ownership": "Printed work/address and available direct commentary after base validation; writer scope independent of NER boundaries.",
+    "chapter_scope": "Positive marker and longest complete metadata phrase; current attached chapter retained across numeric-only NER; completed earlier citations separated only by an explicit coordinated location.",
+    "editorial_dh": "Same printed daf, explicit attached corrected amud and one actual opening heading; no neighbouring-page search.",
+    "missing_commentary": "Preserve independently proved existing Gemara address; do not manufacture a personal title alias."
+  },
+  "known_source_ambiguities": [
+    {
+      "title": "תוספות על בבא קמא",
+      "line": 1289,
+      "printed_daf": "Bava Kamma 20b",
+      "printed_chapter": "המניח",
+      "chapter_range": "Bava Kamma 27a:13-36a:8",
+      "result": "Bava Kamma 20b",
+      "interpretation": "Printed-address legacy fallback, not a semantic correction of the source numeral. The contradictory chapter cannot prove own20b and does not license guessing27b or a personal exception."
+    }
+  ],
+  "artifacts": {
+    "full_replay_report_archive": {
+      "name": "citation-review12-final-reports.tar.gz",
+      "sha256": "ba01441be98e334278d9b83f069de74d0947eb0e48604addb522f4ee158e7886"
+    },
+    "independent_qa_report": {
+      "name": "qa-citation-review12-final.json",
+      "sha256": "ae6443c4d1c539ba94ea40c22c126962d68d0a21a66e0292694e8215ddd4ba6a"
+    },
+    "fixture": {
+      "path": "tests/fixtures/citation_cases_v36.json.gz",
+      "compressed_bytes": 145004,
+      "compressed_sha256": "64506a4f357dd39ee3d52b70bcc4087459209910622e048d8965fe2474702017",
+      "json_sha256": "1029d54c4a65c83e57ec424e3335dc7a50bd348c587a86153860b2656c4218ef"
+    }
+  },
+  "limits": [
+    "141 complete books matching v36 and two targeted dictionary selections, not the entire production library.",
+    "Recorded production NER with pinned real production-patched resolver; no live NER request during replay.",
+    "501 links in isolated acceptance versus504 records in the same source paragraphs under full-book history; both control sets pass.",
+    "Chapter/daf contradictions in the printed source can retain the verified legacy printed base address; this is not a claim that the source numeral is correct.",
+    "Detailed per-record reports remain external audit artifacts, not shipped test fixtures."
+  ],
+  "delta_from_previous_pr_head": {
+    "commit": "2541da8",
+    "before": 38795,
+    "after": 38800,
+    "added": 5,
+    "changed": 23,
+    "removed": 0,
+    "unchanged": 38772
+  }
+}
