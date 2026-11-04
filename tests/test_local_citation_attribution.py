@@ -94,6 +94,57 @@ class LocalAttributionTest(unittest.TestCase):
                 source='Tosafot on Shevuot 19a:1:1')
             self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 14a'])
 
+    def test_a_printed_tractate_is_not_its_homonymous_first_chapter(self):
+        chapters = helpers.BOOKS + (('Shevuot', ('שבועות',), (
+            (Chapter('Shevuot', 3, 27), {'שבועות'}),)),)
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=chapters), \
+                mock.patch.object(lb, '_book_chapters', return_value=(
+                    (Chapter('Shevuot', 3, 27), {'שבועות'}),)):
+            lb._chapter_alias_works.cache_clear()
+            anchor = 'בשבועות (דף לה.'
+            rows = self.records('כבר כתבתי ' + anchor + ')', anchor,
+                [('NAMED', 'בשבועות'), ('NUMBERED', 'דף לה.')], refs=['Shevuot 35a'],
+                source='Tosafot on Shevuot 79a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 35a'])
+
+    def test_a_complete_number_led_chapter_title_precedes_its_shorter_ordinal(self):
+        chapters = ((Chapter('Shevuot', 3, 27), {'פרק שני אנשים'}),
+                    (Chapter('Shevuot', 27, 38), {'פרק שני'}))
+        with mock.patch.object(lb, '_bavli_chapter_books', return_value=(
+                ('Shevuot', ('שבועות',), chapters),)), \
+                mock.patch.object(lb, '_book_chapters', return_value=chapters):
+            lb._chapter_alias_works.cache_clear()
+            anchor = 'בפרק שני אנשים (דף ב.'
+            rows = self.records('כתבתי ' + anchor + ')', anchor,
+                [('NAMED', 'בפרק שני אנשים'), ('NUMBERED', 'דף ב.')], refs=['Shevuot 2a'],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'])
+
+    def test_a_postfix_self_predicate_does_not_inherit_an_earlier_citations_chapter(self):
+        anchor = 'בשבועות (דף ב.'
+        for tail in ('נרחיב בה', 'שם ביארתי'):
+            text = 'כתבתי בפרק שבועת העדות ו' + anchor + ') ' + tail
+            rows = self.records(text, anchor, [('NAMED', 'בשבועות'), ('NUMBERED', 'דף ב.')],
+                refs=['Shevuot 2a'], source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Tosafot on Shevuot 2a'], tail)
+        text = 'כתבתי בפ"ג (דף ב.) הארכתי שם'
+        for anchor in ('בפ"ג (דף ב.', 'דף ב.'):
+            parts = ([('NAMED', 'בפ"ג')] if anchor.startswith('בפ') else []) + [('NUMBERED', 'דף ב.')]
+            rows = self.records(text, anchor, parts, refs=['Shevuot 2a'],
+                source='Tosafot on Shevuot 19a:1:1')
+            self.assertEqual([r.target_ref for r in rows], ['Shevuot 2a'], anchor)
+
+    def test_native_quote_after_attached_ibid_or_coordinated_relative_has_no_prefix_owner(self):
+        for anchor, suffix in (('ולעיל בפ"ק (דף ב.', ') מייתי'),
+                               ('לעיל דף ב:', ' ושם) משמע')):
+            text = 'וכן פירש בקונטרס ' + ('' if anchor.startswith('ו') else 'וכן בפ"ק (') + anchor + suffix
+            at = text.index(anchor)
+            self.assertIsNone(lb.citation_prefix_commentary(text, at, at + len(anchor), target=Ref('Shevuot 2a')))
+        anchor = 'לעיל דף ב:'
+        text = 'כדפי\' בקונטרס וכן בפ"ק (' + anchor + ' ושם) משמע'
+        at = text.index(anchor)
+        self.assertIsNone(lb.citation_prefix_commentary(text, at, at + len(anchor), target=Ref('Shevuot 2b')))
+
     def test_editorial_amud_correction_requires_one_actual_opening_heading(self):
         anchor = 'לעיל (דף ג:'
         text = 'פי\' ' + anchor + ') [בד"ה הלכה ברורה שם ע"א]'

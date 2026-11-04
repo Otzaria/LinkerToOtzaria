@@ -3851,6 +3851,14 @@ def _attribution_tokens(text):
             _NIQQUD_RE.sub('', _plain_quotes(_QUOTE_HTML_TAG_RE.sub(' ', text))).split()]
 
 
+def postfix_self_writing(words):
+    """A writing predicate explicitly attached to this printed location."""
+    return bool(len(words) > 1 and (
+        _POSTFIX_SELF_WRITING_RE.fullmatch(words[0]) and words[1] in ('שם', 'התם')
+        or words[0] in ('נרחיב', 'ונרחיב') and words[1] == 'בה'
+        or words[0] in ('שם', 'ושם', 'התם') and _POSTFIX_SELF_WRITING_RE.fullmatch(words[1])))
+
+
 def citation_postfix_words(content, start, end):
     """Visible, immediately attached writer words shared by scope and upgrades."""
     tail = _QUOTE_HTML_TAG_RE.sub(' ', content[end:]).lstrip(' )]')
@@ -3921,12 +3929,13 @@ def citation_prefix_commentary(content, start, end, *, target=None):
         closed_location = re.search(r'\([^()]+\)', anchor)
         if closed_location:
             following = _attribution_tokens(anchor[closed_location.end():]) + following
+        if following[:1] in (['שם'], ['ושם']):
+            following = following[1:]  # an attached ibid is still inside the printed locator
         native_after = bool(following and (
             _NATIVE_CITATION_VERB_RE.fullmatch(following[0])
             or following[0] == 'נמי' and len(following) > 1
                and _NATIVE_CITATION_VERB_RE.fullmatch(following[1])))
-        if native_after and any(w.startswith('ו') and w not in ('ולעיל', 'ולקמן', 'ולהלן')
-                                for w in after + lead):
+        if native_after and any(w.startswith('ו') for w in after + lead):
             return None  # a new Gemara quotation also ends explicit writing scope
         if (len(before) - i > 8 or not self_locator_gap_is_clear(after + lead, target=target)
                 or any(_NATIVE_CITATION_VERB_RE.fullmatch(w) or w in _ATTRIBUTION_BREAKS
@@ -3964,10 +3973,7 @@ def citation_local_attribution(content, start, end, *, target=None):
             return 'other'
         if not after[0].startswith('ו') and _EXTERNAL_ATTRIBUTION_RE.fullmatch(after[0]):
             postfix_ambiguous = not negative_writer
-        if (len(after) > 1 and
-                (_POSTFIX_SELF_WRITING_RE.fullmatch(after[0]) and after[1] in ('שם', 'התם')
-                 or after[0] in ('נרחיב', 'ונרחיב') and after[1] == 'בה'
-                 or after[0] in ('שם', 'ושם', 'התם') and _POSTFIX_SELF_WRITING_RE.fullmatch(after[1]))):
+        if postfix_self_writing(after):
             return 'self'
 
     if citation_prefix_commentary(content, start, end, target=target) is not None:
@@ -4266,15 +4272,47 @@ def own_commentary_self_ref(rr, target, content, start, end, source_ref, ref_fac
     # A printed daf cannot acquire this author's commentary when the very
     # chapter governing it proves a different location. Check both sides of
     # the NER boundary; preserve the ordinary base fallback on failed ownership.
-    for i in range(len(locator)):
-        lead = ' '.join(locator[i:])
-        works = set().union(*(_chapter_alias_works(False).get(name, set())
-                              for name in chapter_lead_names(lead)))
-        if works and printed.index.title not in works:
-            return None
-        chapters = named_chapters(lead, printed)
-        if chapters and not any(chapter.overlaps(printed) for chapter in chapters):
-            return None
+    chapter_locator = locator
+    if postfix_self_writing(citation_postfix_words(content, start, end)[0]):
+        # A postfix writer owns the current location. A coordinated, explicitly
+        # named work/chapter starts that location, even outside the NER span;
+        # retain its attached chapter, but not a completed earlier citation's.
+        location_start = 0
+        work_aliases = next((aliases for book, aliases, _ in _bavli_chapter_books()
+                             if book == printed.index.title), ())
+        for i, word in enumerate(locator):
+            before_word = locator[i - 1] if i else ''
+            coordinated = word.startswith('ו') or before_word in ('ו', 'ובמסכת', 'ובמסכתא')
+            if not coordinated:
+                continue
+            names_work = any(re.fullmatch(
+                rf'ו?[במדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}',
+                ' '.join(locator[i:i + size]))
+                for alias in work_aliases for size in (1, 2, 3))
+            if _chapter_marker(word) or names_work:
+                location_start = i - 1 if before_word in ('ו', 'ובמסכת', 'ובמסכתא') else i
+        chapter_locator = locator[location_start:]
+    for i, word in enumerate(chapter_locator):
+        if not _chapter_marker(word):
+            continue
+        # A tractate's title may also name its first chapter. Only an explicit
+        # chapter locator may contradict ownership; bare title suffixes cannot.
+        located = []
+        for end_at in range(i + 1, len(chapter_locator) + 1):
+            lead = ' '.join(chapter_locator[i:end_at])
+            works = set().union(*(_chapter_alias_works(False).get(name, set())
+                                  for name in chapter_lead_names(lead)))
+            chapters = named_chapters(lead, printed)
+            if works or chapters:
+                located.append((works, chapters))
+        if located:
+            # A numbered word can start a chapter's name. Its complete title
+            # takes precedence over the shorter ordinal interpretation.
+            works, chapters = located[-1]
+            if works and printed.index.title not in works:
+                return None
+            if chapters and not any(chapter.overlaps(printed) for chapter in chapters):
+                return None
     if source_base != [printed.index.title]:
         explicit_work = any(
             re.fullmatch(rf'ו?[במדל]?(?:מסכת\s+)?{re.escape(_plain_quotes(alias))}',
