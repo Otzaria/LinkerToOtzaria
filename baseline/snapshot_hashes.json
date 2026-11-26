@@ -102,7 +102,7 @@
 },
 {
 "canonical_he_title": "יון מצולה",
-"hash": "545c56a69b1159a5",
+"hash": "d2e906c689ef40ac",
 "source_name": "Ben-YehudaToOtzaria"
 },
 {
@@ -192,7 +192,7 @@
 },
 {
 "canonical_he_title": "אבי הנחל",
-"hash": "86a1bb0c5a97f720",
+"hash": "27039dff5feb3645",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -322,12 +322,12 @@
 },
 {
 "canonical_he_title": "אבני נזר אבן העזר",
-"hash": "07ca63730a31e03f",
+"hash": "093377ce3545e550",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אבני נזר אורח חיים",
-"hash": "6bcc3bde0e0c26ac",
+"hash": "bc38ce0f85d661f2",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -337,7 +337,7 @@
 },
 {
 "canonical_he_title": "אבני נזר יורה דעה",
-"hash": "4fa0655e0c20ceea",
+"hash": "03414c7098783ea4",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -372,12 +372,12 @@
 },
 {
 "canonical_he_title": "אגודות אזוב מדברי",
-"hash": "c0b7b6b3f51e349e",
+"hash": "dc02a8d31447b930",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אגלי טל",
-"hash": "957223f6f3ab431b",
+"hash": "099a072533a85c1b",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -387,7 +387,12 @@
 },
 {
 "canonical_he_title": "אדיר במרום",
-"hash": "54f01650fa1f17f8",
+"hash": "d2fff308f05e4ad5",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "אדרת אליהו על נביאים כתובים",
+"hash": "ac7df75be605dd4d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -448,6 +453,11 @@
 {
 "canonical_he_title": "אוצרות יוסף יורה דעה",
 "hash": "f3f09e837a02094f",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "אור דוד על אסתר",
+"hash": "59c2fa1ded320f1a",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -512,17 +522,17 @@
 },
 {
 "canonical_he_title": "אור הישר על חולין",
-"hash": "bdbefb8e8a99aad9",
+"hash": "e8661f4ab007405c",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אור הישר על יבמות",
-"hash": "4d2faddac1ecddba",
+"hash": "f190c08066e61efc",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אור הישר על כתובות",
-"hash": "026c49b06ad61c44",
+"hash": "1fdbf6e700dbd46b",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -672,7 +682,7 @@
 },
 {
 "canonical_he_title": "אזני יהושע",
-"hash": "1cf4f7781b3a7815",
+"hash": "2f40322542279077",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -702,7 +712,7 @@
 },
 {
 "canonical_he_title": "איש אמונים",
-"hash": "8422f6a549c6fc16",
+"hash": "9e2ef5d0324c1a5e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -712,7 +722,7 @@
 },
 {
 "canonical_he_title": "אלימה רבתי",
-"hash": "3fad398b782430dd",
+"hash": "3fa1623f594c7939",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -728,6 +738,11 @@
 {
 "canonical_he_title": "אלפי מנשה חלק א",
 "hash": "ade3b94b417108ea",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "אלפי מנשה על התורה",
+"hash": "3f0ecf2e7af207ff",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -772,7 +787,7 @@
 },
 {
 "canonical_he_title": "אמרי בינה הוספות בסוף השו״ת",
-"hash": "f254f8f3356e023c",
+"hash": "2831fb95cc6d0d7f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -797,12 +812,12 @@
 },
 {
 "canonical_he_title": "אמרי הצבי ב",
-"hash": "10b95ed4a3858da2",
+"hash": "ca951b546f4bc619",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "אמרי הצבי ג",
-"hash": "b21c9c8088700ab3",
+"hash": "ee9e4ea1f12fa874",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -817,7 +832,7 @@
 },
 {
 "canonical_he_title": "אמרי נועם",
-"hash": "b51cc47119616b69",
+"hash": "e9b46827069409e1",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1017,7 +1032,7 @@
 },
 {
 "canonical_he_title": "ארץ צבי (פרומר) א",
-"hash": "afcc45ceeb5a0ca3",
+"hash": "7a15b81b76f5b5e8",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1037,7 +1052,7 @@
 },
 {
 "canonical_he_title": "אשר לשלמה",
-"hash": "305d0c0d68c08a95",
+"hash": "699ed25632af3c30",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1052,7 +1067,7 @@
 },
 {
 "canonical_he_title": "באר היטב (על התורה)",
-"hash": "8a058c98e4ed2255",
+"hash": "7657908eddec46b7",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1062,17 +1077,17 @@
 },
 {
 "canonical_he_title": "באר חיים מרדכי חלק ב",
-"hash": "225392e2a9f92b3d",
+"hash": "a95a52a0e9323270",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "באר חיים מרדכי חלק ג",
-"hash": "5c720a7c9e690b1a",
+"hash": "9b69843c0e8ed814",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "באר יצחק עה״ת",
-"hash": "fecc337724882b6d",
+"hash": "6a5c8e7729e580fb",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1082,12 +1097,12 @@
 },
 {
 "canonical_he_title": "באר מים חיים (נוסינזון)",
-"hash": "42a84202b459897e",
+"hash": "475bffd04d22f215",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "באר משה (דנשבסקי) א",
-"hash": "b218c8cb26f6036b",
+"hash": "e26b9aea9b666d9f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1157,7 +1172,7 @@
 },
 {
 "canonical_he_title": "בית אל חלק א",
-"hash": "261296d7719514fe",
+"hash": "82d4d162a71add86",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1167,7 +1182,7 @@
 },
 {
 "canonical_he_title": "בית אליקום",
-"hash": "a2943bb87fe6cdac",
+"hash": "a0aa8f2b0eb804d3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1177,7 +1192,7 @@
 },
 {
 "canonical_he_title": "בית אפרים אורח חיים",
-"hash": "04b1f2adca593161",
+"hash": "0216b831b1ab3257",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1262,7 +1277,7 @@
 },
 {
 "canonical_he_title": "בית יצחק אורח חיים",
-"hash": "8ee9105fef4ea15d",
+"hash": "d2373f470ba32031",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1467,7 +1482,7 @@
 },
 {
 "canonical_he_title": "בית פנחס על מכות",
-"hash": "4b19fca08b21924f",
+"hash": "905bef731f66e3a3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1487,7 +1502,7 @@
 },
 {
 "canonical_he_title": "בית שערים אורח חיים",
-"hash": "c2f7b1e6d084af69",
+"hash": "826f16fedee834d8",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1542,7 +1557,7 @@
 },
 {
 "canonical_he_title": "בנין דוד א",
-"hash": "876244b722d0114c",
+"hash": "8727fa0192103ad1",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1562,7 +1577,7 @@
 },
 {
 "canonical_he_title": "בנין שמואל",
-"hash": "9c0fc81124c339f7",
+"hash": "5a5e720516b3793c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1642,7 +1657,7 @@
 },
 {
 "canonical_he_title": "ברכת אהרן",
-"hash": "c47cc40a8db8a259",
+"hash": "c740155559c6b571",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1662,7 +1677,7 @@
 },
 {
 "canonical_he_title": "ברכת משה (שפירא)",
-"hash": "5331eccd6448a9bf",
+"hash": "1d4085cbf7679fca",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1682,7 +1697,7 @@
 },
 {
 "canonical_he_title": "גאון יעקב על עירובין",
-"hash": "0bd714c41836022a",
+"hash": "eb408b699ba34006",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -1732,7 +1747,7 @@
 },
 {
 "canonical_he_title": "גחלי אש",
-"hash": "59a9e3b7b760bcd3",
+"hash": "cf929b59dad99105",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2082,7 +2097,7 @@
 },
 {
 "canonical_he_title": "דברי חנוך",
-"hash": "6e3c7e7e5d5fcfc1",
+"hash": "4297d0d99a245420",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2107,7 +2122,7 @@
 },
 {
 "canonical_he_title": "דברי מהרי״א חלק ב",
-"hash": "b30eb3ee7e1eeefc",
+"hash": "50b42f6abcd70c8b",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2157,7 +2172,7 @@
 },
 {
 "canonical_he_title": "דברי שאול עה״ת ומגילות",
-"hash": "c16a6c3dbcc303b0",
+"hash": "0b3579204af82427",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2172,12 +2187,12 @@
 },
 {
 "canonical_he_title": "דבש תמר - ב (פירוש המשניות להרמב״ם)",
-"hash": "879869de0ef4a74a",
+"hash": "12dc400e8182a168",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "דבש תמר - ב (רא״ש)",
-"hash": "47c1ab2abf245865",
+"hash": "7726e33918f903d0",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2187,7 +2202,7 @@
 },
 {
 "canonical_he_title": "דעת מרדכי א",
-"hash": "299deb08062a03f1",
+"hash": "ec12997a71a8b2d0",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2197,7 +2212,7 @@
 },
 {
 "canonical_he_title": "דרוש וחידוש על הש״ס חלק שני",
-"hash": "c62a5f4cf3e8a139",
+"hash": "f936f380fbdb8c74",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2207,12 +2222,12 @@
 },
 {
 "canonical_he_title": "דרושי הצל״ח",
-"hash": "0bb376970c5d8796",
+"hash": "53720f582c779a0a",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "דרך החיים",
-"hash": "b3d110cda9bbd7aa",
+"hash": "2f07a42ad59c9847",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2242,7 +2257,7 @@
 },
 {
 "canonical_he_title": "דרכי תשובה - ב",
-"hash": "0c8a100455e3cdb8",
+"hash": "204de87a4a5f3de6",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2252,7 +2267,7 @@
 },
 {
 "canonical_he_title": "דרכי תשובה - ד",
-"hash": "169b818c6cbdc002",
+"hash": "99dcaedf26a1bc11",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2362,7 +2377,7 @@
 },
 {
 "canonical_he_title": "הרוקח",
-"hash": "53704db2eef8f754",
+"hash": "e2d0d445812e52ef",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2382,7 +2397,7 @@
 },
 {
 "canonical_he_title": "השיב משה יורה דעה",
-"hash": "2258b40adff2abbf",
+"hash": "78e8fee0d141a8c9",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2397,7 +2412,7 @@
 },
 {
 "canonical_he_title": "התעוררות תשובה חלק ג",
-"hash": "bf8c083200301222",
+"hash": "b1e4af2fdacfe36f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2412,7 +2427,7 @@
 },
 {
 "canonical_he_title": "ויאמר יצחק חלק א",
-"hash": "8f58cde5fe94e058",
+"hash": "ac304a86c14d1b43",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2428,6 +2443,11 @@
 {
 "canonical_he_title": "ויוסף שאול (אלישר)",
 "hash": "2bf53064fc6cc181",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "ויזרע יצחק",
+"hash": "2f8db1fd695192cc",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2532,7 +2552,7 @@
 },
 {
 "canonical_he_title": "זרע יעקב",
-"hash": "2818df26bce843f6",
+"hash": "0ef8de57e1df749b",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2572,7 +2592,7 @@
 },
 {
 "canonical_he_title": "חדושי רע״א על תלמוד בבלי",
-"hash": "50ef4a3c8b633f1c",
+"hash": "282f3488a2c5ed8f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2602,17 +2622,17 @@
 },
 {
 "canonical_he_title": "חופת חתנים",
-"hash": "c5a2df744cf8ebdf",
+"hash": "0fc9279413a3d52f",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "חושן אהרן חלק א",
-"hash": "7422c92d067420cb",
+"hash": "10fa331caff8bd5c",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "חושן אהרן חלק ב",
-"hash": "055f98cc8e44b2d3",
+"hash": "4f6cd243c16d0645",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2697,12 +2717,12 @@
 },
 {
 "canonical_he_title": "חידושי הר״ן על ראש השנה",
-"hash": "90233f4df2affd88",
+"hash": "374de6a124f76298",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "חידושי הר״ן על שבת [מיוחס להריטב״א]",
-"hash": "f38ce1426798a3dd",
+"hash": "663d312a32ebb6bb",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2757,7 +2777,7 @@
 },
 {
 "canonical_he_title": "חיי אריה חלק ב",
-"hash": "6e74a14f65d59cf6",
+"hash": "e4962a117a22a1ca",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2767,7 +2787,7 @@
 },
 {
 "canonical_he_title": "חיים שאל חלק א",
-"hash": "2e1a1a97ddbbb9d2",
+"hash": "52b6a3b5df867c9d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2777,7 +2797,7 @@
 },
 {
 "canonical_he_title": "חינוך בית יהודה",
-"hash": "eb83ee7b57d602b6",
+"hash": "779b1ef8c90b8848",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -2942,7 +2962,7 @@
 },
 {
 "canonical_he_title": "יד יצחק - ב",
-"hash": "adad53df8903a966",
+"hash": "70258fdca152c6c8",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3002,7 +3022,7 @@
 },
 {
 "canonical_he_title": "ילקוט דוד - באוהל דוד",
-"hash": "425865270edeeeb1",
+"hash": "71325e9ac1688945",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3017,7 +3037,7 @@
 },
 {
 "canonical_he_title": "ילקוט הגרשוני על הש״ס חלק א",
-"hash": "3ca8a228c6f3fd10",
+"hash": "5b03ec09d88d5b5f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3027,7 +3047,7 @@
 },
 {
 "canonical_he_title": "ים של שלמה על יבמות",
-"hash": "07ac8a0274706dfe",
+"hash": "4cb2f0c8c1852779",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3097,12 +3117,12 @@
 },
 {
 "canonical_he_title": "כסף נבחר חלק ב",
-"hash": "de4c363d55ac3654",
+"hash": "12d4f2214b4efff6",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "כסף נבחר חלק ג",
-"hash": "29246e38839a2795",
+"hash": "59334c3785b3b8d0",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3117,7 +3137,7 @@
 },
 {
 "canonical_he_title": "כפי אהרן חלק א",
-"hash": "82bf2786b5d98510",
+"hash": "7d0ebae101258729",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3232,7 +3252,7 @@
 },
 {
 "canonical_he_title": "כרם יהושע (וולרשטיין)",
-"hash": "c9172da39a2659ea",
+"hash": "90ad4f1f7efeacdc",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3317,7 +3337,7 @@
 },
 {
 "canonical_he_title": "לבוש מרדכי בבא קמא",
-"hash": "6df9259ab24f828c",
+"hash": "b02a1fdd8867b24c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3347,7 +3367,7 @@
 },
 {
 "canonical_he_title": "לבוש עיר שושן חושן משפט",
-"hash": "3d86f3308290fc98",
+"hash": "b0e3934aa48072c3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3422,12 +3442,27 @@
 },
 {
 "canonical_he_title": "לוח ארז חלק ב",
-"hash": "565f3a2222f350db",
+"hash": "b2eb6bab6b87fac0",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "לי לישועה (על התנ״ך)",
 "hash": "0891090d6c0aa4fe",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "לי לישועה על אורח חיים",
+"hash": "cdacc77e566bccb3",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "לי לישועה על חושן משפט",
+"hash": "a00a29801798c4e4",
+"source_name": "DictaToOtzaria"
+},
+{
+"canonical_he_title": "לי לישועה על יורה דעה",
+"hash": "9c2ed33ca8558b1f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3452,7 +3487,7 @@
 },
 {
 "canonical_he_title": "ליקוטי חבר בן חיים ה",
-"hash": "dd2dbea419c7ffcc",
+"hash": "f765d9faa15cdf6d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3527,7 +3562,7 @@
 },
 {
 "canonical_he_title": "לקח טוב",
-"hash": "d69b843252528f26",
+"hash": "73971d90cc073edb",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3542,27 +3577,27 @@
 },
 {
 "canonical_he_title": "מאורות נתן",
-"hash": "96d24bc50eebe748",
+"hash": "7dd7432c74459166",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מאורי אש",
-"hash": "6ff3f9fecd775e89",
+"hash": "74b96dc463be9567",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מבוא שערים",
-"hash": "4eda5687cd9386f8",
+"hash": "832c5f2429ca01ca",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מבי״ט חלק א",
-"hash": "ee8d2e6458b8809a",
+"hash": "f3c7c36233145a7f",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מבי״ט חלק ב",
-"hash": "e5258b5eff608784",
+"hash": "60263f063369cd3c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3587,7 +3622,7 @@
 },
 {
 "canonical_he_title": "מהרי״א הלוי חלק א",
-"hash": "42efdb4bb41b98b6",
+"hash": "4dbdf07f173fc24f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3607,7 +3642,7 @@
 },
 {
 "canonical_he_title": "מהר״ם חלאווה על פסחים",
-"hash": "6c05e806b6372b66",
+"hash": "039cdaa0095395fe",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3632,12 +3667,12 @@
 },
 {
 "canonical_he_title": "מהר״ם שיק יורה דעה",
-"hash": "cd3e4d7de181fe08",
+"hash": "f1c1fe372646fc96",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מהר״ם שיק על התורה",
-"hash": "cefd184a64fe0b2d",
+"hash": "3b00bcb1e7a0ad4c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3647,7 +3682,7 @@
 },
 {
 "canonical_he_title": "מהר״ם שיק תרי״ג מצות חלק ב",
-"hash": "26fb6c7af807f275",
+"hash": "c37c49154e8c55e8",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3677,17 +3712,17 @@
 },
 {
 "canonical_he_title": "מחזה לאברהם",
-"hash": "19a3fdef1f73328a",
+"hash": "e831d265e9632835",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מחנה אפרים חלק א - ב",
-"hash": "64c3801deb9add2c",
+"hash": "f2cb72d86505046a",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מחנה ישראל",
-"hash": "810fec4080f60a1a",
+"hash": "0258e84a3dab7a30",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3717,7 +3752,7 @@
 },
 {
 "canonical_he_title": "מלאכת חושב",
-"hash": "d917e01afe75ec4d",
+"hash": "86533cfd98b5970d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3782,7 +3817,7 @@
 },
 {
 "canonical_he_title": "מעיל צדקה",
-"hash": "862edcb470476663",
+"hash": "3910048935077f9f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3827,7 +3862,7 @@
 },
 {
 "canonical_he_title": "מצפה אריה תנינא חלק א",
-"hash": "c5c3552341a7e5c8",
+"hash": "0e1cfe34f6d85f23",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3847,7 +3882,7 @@
 },
 {
 "canonical_he_title": "מקדש דוד חלק ג",
-"hash": "09b276419265787f",
+"hash": "95901000fa79e3f3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3857,7 +3892,7 @@
 },
 {
 "canonical_he_title": "מקוה טהרה (קויפמן)",
-"hash": "da7a83e903f40368",
+"hash": "92f876e5bf6833f6",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3877,27 +3912,27 @@
 },
 {
 "canonical_he_title": "מקור חיים - ב (טור פטדה חלק א)",
-"hash": "0ac57754c92e8a63",
+"hash": "d36b5c692bd70391",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מקור חיים - ב (טור פטדה חלק ב)",
-"hash": "ba14e57cd16fa734",
+"hash": "5d434294526da6f8",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מקור חיים - ג (טור ברקת חלק א)",
-"hash": "bcc28d67f6b177a8",
+"hash": "5737c5698b8a1dcd",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מקור חיים - ג (טור ברקת חלק ב)",
-"hash": "f663a47332ba5515",
+"hash": "56ec61eaeb247b84",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "מקור חיים - ג (טור ברקת חלק ג)",
-"hash": "0fd5f3b57c60737c",
+"hash": "8c54c91147686bcd",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3922,7 +3957,7 @@
 },
 {
 "canonical_he_title": "משאת בנימין",
-"hash": "f6fde2b94d92ba72",
+"hash": "45d35cd08b986552",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3957,7 +3992,7 @@
 },
 {
 "canonical_he_title": "משכנות יעקב",
-"hash": "5b4832ac1fdbe1fc",
+"hash": "14dc9f3b57380327",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -3982,7 +4017,7 @@
 },
 {
 "canonical_he_title": "משמרת אלעזר",
-"hash": "6cf841c7bd7a80a3",
+"hash": "f7fd5a81cac703bf",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4017,12 +4052,12 @@
 },
 {
 "canonical_he_title": "מתא דירושלים",
-"hash": "29339250745195a6",
+"hash": "0bd512da2065a410",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "נאות דשא",
-"hash": "6fc4e0230d6ab043",
+"hash": "46c151e05c58cb15",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4112,7 +4147,7 @@
 },
 {
 "canonical_he_title": "נחלת דוד על בבא בתרא",
-"hash": "c08437d12df58c9c",
+"hash": "b2467e58488cdcad",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4132,12 +4167,12 @@
 },
 {
 "canonical_he_title": "נחלת שבעה מהדורא קמא חלק ב",
-"hash": "e8ed29fed43f18dd",
+"hash": "310a31b234e91cc3",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "נחלת שבעה מהדורה קמא",
-"hash": "077f01968bc037e5",
+"hash": "73d552d4ad87c0f0",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4182,7 +4217,7 @@
 },
 {
 "canonical_he_title": "סדר הלכה (חידושי הלכה)",
-"hash": "e9b915a2b10a0d10",
+"hash": "5f621ff55ecc023e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4207,7 +4242,7 @@
 },
 {
 "canonical_he_title": "ספר העיטור",
-"hash": "4d628f4ce4e9356f",
+"hash": "c56a77f5c5410db6",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4237,7 +4272,7 @@
 },
 {
 "canonical_he_title": "עבודת הגרשוני",
-"hash": "5a244af77769cf23",
+"hash": "c69d3d1e9cc93f44",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4257,7 +4292,7 @@
 },
 {
 "canonical_he_title": "עט סופר חלק א",
-"hash": "88fb581e82616a7e",
+"hash": "b4b48611fdf12514",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4317,7 +4352,7 @@
 },
 {
 "canonical_he_title": "עמק ברכה (פומרנציק)",
-"hash": "73592081ba189f2d",
+"hash": "415a6bd1abcad974",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4357,7 +4392,7 @@
 },
 {
 "canonical_he_title": "ערוגת הבושם על יוד - א",
-"hash": "fde4f79485babbc8",
+"hash": "adee52ef1831e8b3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4392,7 +4427,7 @@
 },
 {
 "canonical_he_title": "ערך שי אבן העזר חלק ב",
-"hash": "061ad6bf890d6a7f",
+"hash": "c5895422a18b3f6a",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4482,17 +4517,17 @@
 },
 {
 "canonical_he_title": "פנים מאירות חלק ב",
-"hash": "45ee9b5518ba8725",
+"hash": "0bb7709628bcaf35",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "פנים מאירות חלק ג",
-"hash": "e0f09ff59e53141f",
+"hash": "060692ea48f40a74",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "פעמוני זהב",
-"hash": "a2604e2694868d8e",
+"hash": "6ce735f7f702cb24",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4502,12 +4537,12 @@
 },
 {
 "canonical_he_title": "פרדס הגדול",
-"hash": "6496dbafe9a26a23",
+"hash": "2b886306a61e71fa",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "פרי השדה חלק ד",
-"hash": "e8faf342dfe1fc29",
+"hash": "d592bbdc20a0a10d",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4557,12 +4592,12 @@
 },
 {
 "canonical_he_title": "פתחי שערים",
-"hash": "7a0a4546f0f73291",
+"hash": "5141a214f254970e",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "צדקה ומשפט חלק א",
-"hash": "1af74254e69d7c4c",
+"hash": "53567db9dacc725c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4662,7 +4697,7 @@
 },
 {
 "canonical_he_title": "קהלת משה",
-"hash": "477498c44bab0945",
+"hash": "a514ba2887b0f227",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4712,7 +4747,7 @@
 },
 {
 "canonical_he_title": "קיצור מחברת הקודש",
-"hash": "4026ce668f631d64",
+"hash": "3fad32e160cf36a9",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4722,7 +4757,7 @@
 },
 {
 "canonical_he_title": "קרית חנה דוד חלק ב",
-"hash": "6011d03600b85515",
+"hash": "cc5747b0dde19556",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4787,7 +4822,7 @@
 },
 {
 "canonical_he_title": "קרן אורה על עירובין",
-"hash": "3e6201beed691908",
+"hash": "bed9d702886f6020",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4807,7 +4842,7 @@
 },
 {
 "canonical_he_title": "קרן לדוד על ביצה",
-"hash": "2c3a6ef0a2d08022",
+"hash": "b2b795a483179130",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4907,7 +4942,7 @@
 },
 {
 "canonical_he_title": "ראש יוסף על חולין",
-"hash": "9484348ef85a7909",
+"hash": "eb0ed130edf01f00",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -4962,7 +4997,7 @@
 },
 {
 "canonical_he_title": "רד״ך",
-"hash": "4f45018d2af5abd5",
+"hash": "0040c2c8127b540c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5087,12 +5122,12 @@
 },
 {
 "canonical_he_title": "שופריה דיעקב חלק א",
-"hash": "92e9f1f53de6bf71",
+"hash": "4f9b02d9cbc29d7b",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "שופריה דיעקב חלק ב",
-"hash": "a7a738bd7abb49d7",
+"hash": "7c1d228a74ce430e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5147,7 +5182,7 @@
 },
 {
 "canonical_he_title": "שו״ת באר מרדכי",
-"hash": "5040e0fcd0170845",
+"hash": "36230cdd11b520c7",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5162,7 +5197,7 @@
 },
 {
 "canonical_he_title": "שו״ת בית דוד",
-"hash": "cd924ab4692ecf7e",
+"hash": "1b3fb03575e40ef3",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5172,7 +5207,7 @@
 },
 {
 "canonical_he_title": "שו״ת בית יחזקאל",
-"hash": "7769796a9df07da8",
+"hash": "1a3d53310f7bf124",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5297,12 +5332,12 @@
 },
 {
 "canonical_he_title": "שו״ת זכרון יהודה",
-"hash": "13437ea9851f6dca",
+"hash": "9204eb060b131ede",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "שו״ת זקן אהרן",
-"hash": "e0849ad27cda7c96",
+"hash": "fa707db5c27a2b27",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5462,17 +5497,17 @@
 },
 {
 "canonical_he_title": "שו״ת עבודת לוי",
-"hash": "ac7b8695ead37b02",
+"hash": "a56ceeddc18e112e",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "שו״ת עונג יום טוב",
-"hash": "683ade843463668f",
+"hash": "545ebd5864a8828e",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "שו״ת עטרת חכמים חלק א",
-"hash": "34f0513960b21a8f",
+"hash": "f3c7413d6dc6bb4a",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5502,7 +5537,7 @@
 },
 {
 "canonical_he_title": "שו״ת פאר הדור",
-"hash": "430da8d9ad0f5f11",
+"hash": "105eada5a136f951",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5522,7 +5557,7 @@
 },
 {
 "canonical_he_title": "שו״ת פרי עץ חיים",
-"hash": "2ef224d4be765f30",
+"hash": "46ee2a5774ff0261",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5582,12 +5617,12 @@
 },
 {
 "canonical_he_title": "שו״ת שבט סופר חלק ב",
-"hash": "903707d47991d8d8",
+"hash": "6903c3f14fc775d7",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "שו״ת שואל ונשאל חלק א",
-"hash": "e6e833142480d51d",
+"hash": "4dfb4399863d8df2",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5607,7 +5642,7 @@
 },
 {
 "canonical_he_title": "שו״ת תירוש ויצהר",
-"hash": "84626f6dced8f7f6",
+"hash": "da44ccf8edbcf315",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5627,7 +5662,7 @@
 },
 {
 "canonical_he_title": "שו״ת תעלומות לב חלק ד",
-"hash": "903bc312d527303f",
+"hash": "bc87195c381f2294",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5687,7 +5722,7 @@
 },
 {
 "canonical_he_title": "שערי תורה חלק א",
-"hash": "9466eb05e1d914c5",
+"hash": "a16573ebf6f0c45c",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5762,7 +5797,7 @@
 },
 {
 "canonical_he_title": "שקל הקדש על ירושלמי שקלים",
-"hash": "823b0ad1359ecb04",
+"hash": "6bf0049bea622b3f",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5817,7 +5852,7 @@
 },
 {
 "canonical_he_title": "תורת חיים על בבא בתרא",
-"hash": "0c3cbfe337f6c6fe",
+"hash": "b3597a63688b52b4",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5832,7 +5867,7 @@
 },
 {
 "canonical_he_title": "תורת חיים על חולין",
-"hash": "b19103893e005df9",
+"hash": "15c920e9991c8f6e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5842,12 +5877,12 @@
 },
 {
 "canonical_he_title": "תורת חיים על עבודה זרה",
-"hash": "ec26ea8fefe8b6b5",
+"hash": "144480511943e4ac",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "תורת חיים על עירובין",
-"hash": "35c52d3d3832a74d",
+"hash": "d95a162deed652e8",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5871,8 +5906,13 @@
 "source_name": "DictaToOtzaria"
 },
 {
+"canonical_he_title": "תפארת בנים",
+"hash": "7c20f761cac6d915",
+"source_name": "DictaToOtzaria"
+},
+{
 "canonical_he_title": "תפארת יעקב אבן העזר גיטין",
-"hash": "53fa3069df98b73d",
+"hash": "83008a9575dc0613",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5892,7 +5932,7 @@
 },
 {
 "canonical_he_title": "תפארת יעקב יורה דעה שחיטה וטריפות",
-"hash": "39a316e622e63ad0",
+"hash": "fca44c7ebf728095",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5972,7 +6012,7 @@
 },
 {
 "canonical_he_title": "תשובות הגאונים – מוסאפיה",
-"hash": "455b4be177f374a7",
+"hash": "12253012356467a5",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -5992,7 +6032,7 @@
 },
 {
 "canonical_he_title": "תשובת הגאונים (מהר״ל, והרב יעקב בן הרב יצחק הלוי פולק)",
-"hash": "59d0576b30f3f5ff",
+"hash": "bd07ea5420256c5e",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -6007,12 +6047,12 @@
 },
 {
 "canonical_he_title": "תשורת ש״י מהדורא קמא",
-"hash": "15602de49adc0e35",
+"hash": "e30601a97c67b6cc",
 "source_name": "DictaToOtzaria"
 },
 {
 "canonical_he_title": "תשורת ש״י מהדורא תנינא",
-"hash": "6388f1b4d78a1b5c",
+"hash": "123cdf01b76763f9",
 "source_name": "DictaToOtzaria"
 },
 {
@@ -6057,7 +6097,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על ביצה",
-"hash": "ea58ee7cce66c59a",
+"hash": "6247336e7bd5e7ea",
 "source_name": "KSK"
 },
 {
@@ -6067,7 +6107,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על ברכות",
-"hash": "ca27b896669ed6b8",
+"hash": "4e3b11712d73e2f4",
 "source_name": "KSK"
 },
 {
@@ -6087,7 +6127,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על חולין",
-"hash": "45466e90d57c6acd",
+"hash": "004a780421293b34",
 "source_name": "KSK"
 },
 {
@@ -6097,7 +6137,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על יומא",
-"hash": "3b38d4204b150f4f",
+"hash": "c71a68c1c4fc20d2",
 "source_name": "KSK"
 },
 {
@@ -6147,7 +6187,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על נדרים",
-"hash": "acacaf4ea8ca4bc4",
+"hash": "e7d0cfe20fef239b",
 "source_name": "KSK"
 },
 {
@@ -6187,7 +6227,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על פסחים",
-"hash": "240efb57ad820bbd",
+"hash": "5b2bdff17361471d",
 "source_name": "KSK"
 },
 {
@@ -6212,7 +6252,7 @@
 },
 {
 "canonical_he_title": "קובץ שיטות קמאי על שבת",
-"hash": "25e33d2a7a423229",
+"hash": "bdce92989923cad8",
 "source_name": "KSK"
 },
 {
@@ -6442,7 +6482,7 @@
 },
 {
 "canonical_he_title": "אלפי מנשה",
-"hash": "67ee74e2119427e6",
+"hash": "c908a1ceb8f99b6d",
 "source_name": "MoreBooks"
 },
 {
@@ -6462,12 +6502,12 @@
 },
 {
 "canonical_he_title": "אספקלריה אותיות א - מ",
-"hash": "bbb714fae04c9e7f",
+"hash": "b0e65deed2c780b9",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "אספקלריה אותיות נ - ת",
-"hash": "2f907bf4fe7b3440",
+"hash": "ca4bb01ea3446462",
 "source_name": "MoreBooks"
 },
 {
@@ -6477,7 +6517,7 @@
 },
 {
 "canonical_he_title": "אריה דבי עילאי",
-"hash": "05fc5f839e48b189",
+"hash": "375bb53ea0d45bc0",
 "source_name": "MoreBooks"
 },
 {
@@ -6517,12 +6557,12 @@
 },
 {
 "canonical_he_title": "ביאור הגר״א על תקוני הזהר",
-"hash": "0170143500a2c0ec",
+"hash": "55da9fc101957996",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "בית אהרן על בראשית ושמות",
-"hash": "9973e8fd078aff95",
+"hash": "f0390e9f1467b9b1",
 "source_name": "MoreBooks"
 },
 {
@@ -6597,7 +6637,7 @@
 },
 {
 "canonical_he_title": "דור המלקטים - עניינים כלליים",
-"hash": "9e9994e84c8cb466",
+"hash": "999ccc37f57bcc4a",
 "source_name": "MoreBooks"
 },
 {
@@ -6612,7 +6652,7 @@
 },
 {
 "canonical_he_title": "דור המלקטים על אורח חיים",
-"hash": "720ee7b1f51d38b4",
+"hash": "5709e059d8be419c",
 "source_name": "MoreBooks"
 },
 {
@@ -6622,7 +6662,7 @@
 },
 {
 "canonical_he_title": "דור המלקטים על יורה דעה",
-"hash": "6f0773bcc8516674",
+"hash": "0c5dbce2d6dbc828",
 "source_name": "MoreBooks"
 },
 {
@@ -6662,7 +6702,7 @@
 },
 {
 "canonical_he_title": "דרשות שבט הלוי חלק א",
-"hash": "1273b61e92d5092d",
+"hash": "3d8ad3a3856e4104",
 "source_name": "MoreBooks"
 },
 {
@@ -6782,12 +6822,12 @@
 },
 {
 "canonical_he_title": "וזה לשונו - זמני התשובה",
-"hash": "a5004f981b375be9",
+"hash": "d9eec09bc81b4913",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "וזה לשונו - מוקצה",
-"hash": "fc0981519f27e55a",
+"hash": "88d87f6335931f45",
 "source_name": "MoreBooks"
 },
 {
@@ -6797,7 +6837,7 @@
 },
 {
 "canonical_he_title": "וזה לשונו - סוכה וארבע מינים [הלכה]",
-"hash": "faa4a15f3b79da6d",
+"hash": "db2ec61db8a7c206",
 "source_name": "MoreBooks"
 },
 {
@@ -6822,12 +6862,12 @@
 },
 {
 "canonical_he_title": "וזה לשונו - רוב וחזקה",
-"hash": "a59d605b0829ff69",
+"hash": "80e773b0785b1578",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "וזה לשונו - שהיה",
-"hash": "e1cdf7bc06c2622d",
+"hash": "c8e4e58f8c2dd807",
 "source_name": "MoreBooks"
 },
 {
@@ -6847,7 +6887,7 @@
 },
 {
 "canonical_he_title": "חוות דעת ביאורים",
-"hash": "847a99bf7ca32958",
+"hash": "1f383c76d98017ce",
 "source_name": "MoreBooks"
 },
 {
@@ -6867,22 +6907,22 @@
 },
 {
 "canonical_he_title": "חזון איש, אורח חיים מועד",
-"hash": "05bebb621d572d46",
+"hash": "72a334b34614b2bb",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "חזון איש, אמונה ובטחון",
-"hash": "6c29a20eb600e97d",
+"hash": "4aa85d6caf8b9194",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "חזון איש, זרעים",
-"hash": "f01541699cd04a60",
+"hash": "d43e50819da7db0f",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "חזון איש, טהרות",
-"hash": "128c904dcb80110d",
+"hash": "5cf5700f7530607a",
 "source_name": "MoreBooks"
 },
 {
@@ -7002,7 +7042,7 @@
 },
 {
 "canonical_he_title": "חידושי אגדות למהר״ל שבת",
-"hash": "fa1ba4d60936f0d9",
+"hash": "0467edd5dd84ab2c",
 "source_name": "MoreBooks"
 },
 {
@@ -7097,7 +7137,7 @@
 },
 {
 "canonical_he_title": "חידושי הריטב״א סוכה מכתב יד",
-"hash": "1dbb03b8e49b8cbe",
+"hash": "6e57de30be743799",
 "source_name": "MoreBooks"
 },
 {
@@ -7142,7 +7182,7 @@
 },
 {
 "canonical_he_title": "חידושי רמב״ן על כתובות",
-"hash": "6f111450617aaca9",
+"hash": "db40bc6dea5e06fd",
 "source_name": "MoreBooks"
 },
 {
@@ -7172,7 +7212,7 @@
 },
 {
 "canonical_he_title": "חפץ נחמד וגנת ורדים",
-"hash": "c26ba0b858d7f4b8",
+"hash": "1a3dd00782a11de4",
 "source_name": "MoreBooks"
 },
 {
@@ -7197,7 +7237,7 @@
 },
 {
 "canonical_he_title": "טעמא דקרא",
-"hash": "5357b41e52a4c730",
+"hash": "7036f9ce44a48e1d",
 "source_name": "MoreBooks"
 },
 {
@@ -7372,7 +7412,7 @@
 },
 {
 "canonical_he_title": "כללי המצוות",
-"hash": "ae56d516f8ec2486",
+"hash": "9136eeedd34ef62e",
 "source_name": "MoreBooks"
 },
 {
@@ -7382,7 +7422,7 @@
 },
 {
 "canonical_he_title": "כפת המנעול על פרקי אבות",
-"hash": "683fee6fb37d029e",
+"hash": "3860fd64af00ea2a",
 "source_name": "MoreBooks"
 },
 {
@@ -7462,7 +7502,7 @@
 },
 {
 "canonical_he_title": "מאירי על משנה מקואות",
-"hash": "898f522617d24b90",
+"hash": "6913251d28cc9c8e",
 "source_name": "MoreBooks"
 },
 {
@@ -7487,7 +7527,7 @@
 },
 {
 "canonical_he_title": "מאמרי הרב וולבה - חתנים",
-"hash": "7f09f943947940f6",
+"hash": "7813386a42c9c19a",
 "source_name": "MoreBooks"
 },
 {
@@ -7547,7 +7587,7 @@
 },
 {
 "canonical_he_title": "מדרש כונן (ילקוט מדרשים)",
-"hash": "cb087ae6c736ba9e",
+"hash": "918f602c3d71058c",
 "source_name": "MoreBooks"
 },
 {
@@ -7592,7 +7632,7 @@
 },
 {
 "canonical_he_title": "מדרשי מגילת אסתר",
-"hash": "77e762b1909f3b87",
+"hash": "b9792cd000ab0e75",
 "source_name": "MoreBooks"
 },
 {
@@ -7602,27 +7642,27 @@
 },
 {
 "canonical_he_title": "מועדים וזמנים כרך א",
-"hash": "beec20dc1a45acd1",
+"hash": "b4b7d8fd558f4dc8",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "מועדים וזמנים כרך ב",
-"hash": "956370820bd47f33",
+"hash": "e311658556e3f46e",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "מועדים וזמנים כרך ג",
-"hash": "03af5c3e21beadd8",
+"hash": "0d21e0013e547a8b",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "מועדים וזמנים כרך ד",
-"hash": "9d542ca74ac3e1fd",
+"hash": "0e6ed0bc47515acf",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "מועדים וזמנים כרך ה",
-"hash": "8ed493fde30a391b",
+"hash": "cec9f0311932ebba",
 "source_name": "MoreBooks"
 },
 {
@@ -7653,6 +7693,11 @@
 {
 "canonical_he_title": "מנחת אהרן",
 "hash": "a92c9d842deccd5a",
+"source_name": "MoreBooks"
+},
+{
+"canonical_he_title": "מנחת כהן",
+"hash": "615217f6c72e095e",
 "source_name": "MoreBooks"
 },
 {
@@ -7692,7 +7737,7 @@
 },
 {
 "canonical_he_title": "מסעי היר״ח ומאמריו",
-"hash": "be1121a5d364df3e",
+"hash": "2e2bde11929c8e24",
 "source_name": "MoreBooks"
 },
 {
@@ -7822,7 +7867,7 @@
 },
 {
 "canonical_he_title": "משנתם בלשונם - ביצה מלאכות יום טוב",
-"hash": "abc2fc103f614ba0",
+"hash": "871bfed7d7a73adf",
 "source_name": "MoreBooks"
 },
 {
@@ -7862,12 +7907,12 @@
 },
 {
 "canonical_he_title": "משנתם בלשונם - שבת מוקצה בפרק כירה",
-"hash": "c3a38b78ab48a658",
+"hash": "b4d30a2cc0267db7",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "משנתם בלשונם - שבת מלאכות",
-"hash": "630d60be872db5a5",
+"hash": "a2a9c3290ffe94bb",
 "source_name": "MoreBooks"
 },
 {
@@ -7882,7 +7927,7 @@
 },
 {
 "canonical_he_title": "משנתם סדורה - בבא בתרא פרק לא יחפור",
-"hash": "ad11a99711515ed6",
+"hash": "238f7ab253a62062",
 "source_name": "MoreBooks"
 },
 {
@@ -8027,7 +8072,7 @@
 },
 {
 "canonical_he_title": "נתינת הדורות על סדר הדורות",
-"hash": "0f14faacc8dade5f",
+"hash": "7fec1c3b6aaa45d5",
 "source_name": "MoreBooks"
 },
 {
@@ -8122,7 +8167,7 @@
 },
 {
 "canonical_he_title": "ספר השרשים לרד״ק",
-"hash": "55d0c28f299554c9",
+"hash": "acdce23402b95407",
 "source_name": "MoreBooks"
 },
 {
@@ -8142,7 +8187,7 @@
 },
 {
 "canonical_he_title": "ספר כריתות",
-"hash": "094f668b2aa9cf8f",
+"hash": "cefd1871dae2a3ba",
 "source_name": "MoreBooks"
 },
 {
@@ -8257,7 +8302,7 @@
 },
 {
 "canonical_he_title": "פירוש הגר״א על משלי",
-"hash": "3ad5560935799b41",
+"hash": "76a8f1a48f888da0",
 "source_name": "MoreBooks"
 },
 {
@@ -8292,7 +8337,7 @@
 },
 {
 "canonical_he_title": "פירוש רבי יעקב אלאמאשטי על משנה תורה - הלכות שבת ועירובין",
-"hash": "4ff160a808399656",
+"hash": "afeb5bec3961135f",
 "source_name": "MoreBooks"
 },
 {
@@ -8312,12 +8357,12 @@
 },
 {
 "canonical_he_title": "פסקי הריבבן",
-"hash": "ff884d70d298144e",
+"hash": "46a465a58ae186c1",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "פסקי רבינו מענדל קלויזנער על מסכת חולין",
-"hash": "595a785c48f40fdf",
+"hash": "96601d28f29e770a",
 "source_name": "MoreBooks"
 },
 {
@@ -8427,27 +8472,27 @@
 },
 {
 "canonical_he_title": "צורת בית המקדש השני להתוספות יום טוב",
-"hash": "79b1c606da48d1d2",
+"hash": "bc8e42aedb49fd3c",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "צורת בית המקדש להתפארת ישראל",
-"hash": "e69410069a72da64",
+"hash": "a0df7c93384bc193",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "צורת בית שני",
-"hash": "88d3194ce04d5cd3",
+"hash": "8d4ff2622b74aa06",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "ציוני על התורה",
-"hash": "ce3cfccbe915630b",
+"hash": "6f35b09646c86cd8",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "ציצים ופרחים",
-"hash": "8caf6847d45ef4d6",
+"hash": "9946084a3955d6b1",
 "source_name": "MoreBooks"
 },
 {
@@ -8482,7 +8527,7 @@
 },
 {
 "canonical_he_title": "קול נגידים על משנה תורה - הלכות שבת ועירובין",
-"hash": "afbb03b849ad6561",
+"hash": "1b14ea520373ff4f",
 "source_name": "MoreBooks"
 },
 {
@@ -8567,7 +8612,7 @@
 },
 {
 "canonical_he_title": "שושני יעקב חלק א",
-"hash": "11ea787791c5e094",
+"hash": "5329d5ae62044d8b",
 "source_name": "MoreBooks"
 },
 {
@@ -8602,7 +8647,7 @@
 },
 {
 "canonical_he_title": "שו״ת מהר״י ברונא",
-"hash": "88f6bf47e2902e14",
+"hash": "68ec66408863ea28",
 "source_name": "MoreBooks"
 },
 {
@@ -8617,7 +8662,7 @@
 },
 {
 "canonical_he_title": "שו״ת משנה הלכות חלק ב",
-"hash": "63689157a06ce88a",
+"hash": "557423a7b293fc4c",
 "source_name": "MoreBooks"
 },
 {
@@ -8657,12 +8702,12 @@
 },
 {
 "canonical_he_title": "שו״ת משנה הלכות חלק טו",
-"hash": "989975d571339ec2",
+"hash": "232b7f6103a62368",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "שו״ת משנה הלכות חלק טז",
-"hash": "8ff7d15cc5b7bb01",
+"hash": "1f8d10f20d97dc70",
 "source_name": "MoreBooks"
 },
 {
@@ -8672,12 +8717,12 @@
 },
 {
 "canonical_he_title": "שו״ת משנה הלכות חלק יא",
-"hash": "72c354bcdf7b1d82",
+"hash": "ee0b8c0714d237c1",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "שו״ת משנה הלכות חלק יב",
-"hash": "bfb83ac4707dd8ea",
+"hash": "a71b719b30b84289",
 "source_name": "MoreBooks"
 },
 {
@@ -8697,7 +8742,7 @@
 },
 {
 "canonical_he_title": "שו״ת ר' דוד עראמה",
-"hash": "e43e2cdfaae097b0",
+"hash": "cedda712046fb0e5",
 "source_name": "MoreBooks"
 },
 {
@@ -8707,12 +8752,12 @@
 },
 {
 "canonical_he_title": "שו״ת רידב״ז",
-"hash": "274c82e11b4ccf91",
+"hash": "5d3afc61aa350eea",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "שו״ת שבט הלוי חלק א",
-"hash": "7e268407d11206b2",
+"hash": "3cf1c3546cc019d3",
 "source_name": "MoreBooks"
 },
 {
@@ -8797,7 +8842,7 @@
 },
 {
 "canonical_he_title": "שיעורי רבי דוד פוברסקי על בבא בתרא",
-"hash": "1a5e914b634e4d56",
+"hash": "8070707dd0692541",
 "source_name": "MoreBooks"
 },
 {
@@ -8807,7 +8852,7 @@
 },
 {
 "canonical_he_title": "שיעורי רבי דוד פוברסקי על בבא קמא",
-"hash": "e21932655a6ebdb5",
+"hash": "4226aa97dd2062d3",
 "source_name": "MoreBooks"
 },
 {
@@ -8877,7 +8922,7 @@
 },
 {
 "canonical_he_title": "שלמי כהן בכורות",
-"hash": "cba08aa08eac7114",
+"hash": "ef17463d6a3d8fda",
 "source_name": "MoreBooks"
 },
 {
@@ -8937,12 +8982,22 @@
 },
 {
 "canonical_he_title": "שמירת שבת כהלכתה - א",
-"hash": "ec011917958add9b",
+"hash": "af15e5408e53439e",
 "source_name": "MoreBooks"
 },
 {
 "canonical_he_title": "שמירת שבת כהלכתה - מפתחות",
 "hash": "b1c24b2b40d3eb9e",
+"source_name": "MoreBooks"
+},
+{
+"canonical_he_title": "שמן רוקח על מסכת ביצה",
+"hash": "ec3d25807bb9dc22",
+"source_name": "MoreBooks"
+},
+{
+"canonical_he_title": "שמן רוקח על מסכת ברכות",
+"hash": "0955e37cb7c2fa0d",
 "source_name": "MoreBooks"
 },
 {
@@ -8987,7 +9042,7 @@
 },
 {
 "canonical_he_title": "תוספות רי״ד על עירובין מהדורא תליתאה רביעאה",
-"hash": "20fc538e3660ad96",
+"hash": "be6a3283bb41a1f0",
 "source_name": "MoreBooks"
 },
 {
@@ -9022,7 +9077,7 @@
 },
 {
 "canonical_he_title": "תיקון עירובין",
-"hash": "86e27e319a3c2b1f",
+"hash": "fb0e101c1df1ea16",
 "source_name": "MoreBooks"
 },
 {
@@ -9032,7 +9087,7 @@
 },
 {
 "canonical_he_title": "תכלאל - שחרית מנחה וערבית",
-"hash": "55854b716d07c5e4",
+"hash": "ad6a97855f823f63",
 "source_name": "MoreBooks"
 },
 {
@@ -9052,7 +9107,7 @@
 },
 {
 "canonical_he_title": "תקוני הזהר מסודר על פי הגר״א",
-"hash": "b824772b1b407cd4",
+"hash": "82752bc101f54094",
 "source_name": "MoreBooks"
 },
 {
@@ -9102,7 +9157,7 @@
 },
 {
 "canonical_he_title": "אבן ישראל",
-"hash": "d8444e4da1c7d189",
+"hash": "a0498ea04f60c670",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -9532,7 +9587,7 @@
 },
 {
 "canonical_he_title": "הלכה למשה",
-"hash": "1667f78fd0d88f74",
+"hash": "0767c8667a82bdf6",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -9652,7 +9707,7 @@
 },
 {
 "canonical_he_title": "חלקו של יוסף",
-"hash": "ffcd8ddb1ccc37a3",
+"hash": "a64aa6896ca723d5",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -9897,7 +9952,7 @@
 },
 {
 "canonical_he_title": "מזל שעה",
-"hash": "ac82bcae492a9836",
+"hash": "977fc680421576a4",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -10062,7 +10117,7 @@
 },
 {
 "canonical_he_title": "נתיב מאיר",
-"hash": "ae5ecbdf1a9ad477",
+"hash": "38e35f65dcddab91",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -10227,12 +10282,12 @@
 },
 {
 "canonical_he_title": "צרור החיים",
-"hash": "1982f4550c795e41",
+"hash": "191c2fcf8cd9accb",
 "source_name": "National-LibraryToOtzaria"
 },
 {
 "canonical_he_title": "קדושת יו״ט",
-"hash": "967efa0ae13bb553",
+"hash": "fe425fbb59c0a2e4",
 "source_name": "National-LibraryToOtzaria"
 },
 {
@@ -10542,7 +10597,7 @@
 },
 {
 "canonical_he_title": "זמרת הארץ",
-"hash": "52f9d05f04376358",
+"hash": "6f066f861fd1db02",
 "source_name": "OnYourWayToOtzaria"
 },
 {
@@ -10577,7 +10632,7 @@
 },
 {
 "canonical_he_title": "כתבי הרמב״ם",
-"hash": "27a144753aefaa31",
+"hash": "872ecb8c211cd4f3",
 "source_name": "OnYourWayToOtzaria"
 },
 {
@@ -10917,7 +10972,7 @@
 },
 {
 "canonical_he_title": "ספר נהר שלום",
-"hash": "c12f29560652b571",
+"hash": "c9dfb50489ae1fd4",
 "source_name": "OnYourWayToOtzaria"
 },
 {
@@ -10937,7 +10992,7 @@
 },
 {
 "canonical_he_title": "ספר שושן סודות",
-"hash": "e71ab51e94fc5b99",
+"hash": "8742abe3bbc7ed65",
 "source_name": "OnYourWayToOtzaria"
 },
 {
@@ -11092,7 +11147,7 @@
 },
 {
 "canonical_he_title": "הזהר המתורגם - הקדמה",
-"hash": "eb544bc93fe0043f",
+"hash": "b1b25fc0d2ec7f36",
 "source_name": "OraytaToOtzaria"
 },
 {
@@ -11107,7 +11162,7 @@
 },
 {
 "canonical_he_title": "הזהר המתורגם - שמות",
-"hash": "2b39a4692fd01ab2",
+"hash": "fdae2a2b9e878e29",
 "source_name": "OraytaToOtzaria"
 },
 {
@@ -11117,27 +11172,27 @@
 },
 {
 "canonical_he_title": "חק לישראל - במדבר",
-"hash": "0efc7811c1634e8a",
+"hash": "a1ca0cda09139494",
 "source_name": "OraytaToOtzaria"
 },
 {
 "canonical_he_title": "חק לישראל - בראשית",
-"hash": "2c0c3417f0c8a524",
+"hash": "05e3f062d9215b39",
 "source_name": "OraytaToOtzaria"
 },
 {
 "canonical_he_title": "חק לישראל - דברים",
-"hash": "7c86a0518a256c5b",
+"hash": "38526299cb478419",
 "source_name": "OraytaToOtzaria"
 },
 {
 "canonical_he_title": "חק לישראל - ויקרא",
-"hash": "848cd81c2e4db201",
+"hash": "58de348b9633787a",
 "source_name": "OraytaToOtzaria"
 },
 {
 "canonical_he_title": "חק לישראל - שמות",
-"hash": "dd1c1b478c055a21",
+"hash": "773afc9c999a8821",
 "source_name": "OraytaToOtzaria"
 },
 {
@@ -11182,7 +11237,7 @@
 },
 {
 "canonical_he_title": "קיצור ש״ע ילקוט יוסף החדש - יורה דעה",
-"hash": "8779e67b3ca0eeb6",
+"hash": "219d3d30787f4f48",
 "source_name": "OraytaToOtzaria"
 },
 {
@@ -11547,7 +11602,7 @@
 },
 {
 "canonical_he_title": "אבן עזרא על בראשית",
-"hash": "b1b4f3a6d1966524",
+"hash": "e5756c61101b21b3",
 "source_name": "Sefaria"
 },
 {
@@ -11867,7 +11922,7 @@
 },
 {
 "canonical_he_title": "אדרת אליהו (ר' יוסף חיים)",
-"hash": "19414aec66cea134",
+"hash": "9355955055d38ea5",
 "source_name": "Sefaria"
 },
 {
@@ -12557,7 +12612,7 @@
 },
 {
 "canonical_he_title": "אמרי דעת על משלי",
-"hash": "312283c69fa5c317",
+"hash": "6cc8c5d75a67fa1d",
 "source_name": "Sefaria"
 },
 {
@@ -12612,7 +12667,7 @@
 },
 {
 "canonical_he_title": "ב\"ח",
-"hash": "f6e93ddee07e2d4f",
+"hash": "122a4eaa8c8475e6",
 "source_name": "Sefaria"
 },
 {
@@ -12702,7 +12757,7 @@
 },
 {
 "canonical_he_title": "באר שבע על הוריות",
-"hash": "1b1963a887eeb2ad",
+"hash": "eeb869cb957d6490",
 "source_name": "Sefaria"
 },
 {
@@ -13167,7 +13222,7 @@
 },
 {
 "canonical_he_title": "בית אלהים",
-"hash": "8f4a50f5134cce5a",
+"hash": "c5b89f2036b8030c",
 "source_name": "Sefaria"
 },
 {
@@ -13177,7 +13232,7 @@
 },
 {
 "canonical_he_title": "בית יוסף",
-"hash": "c944f63d0f4d3c1b",
+"hash": "5b0cd59fa3991e94",
 "source_name": "Sefaria"
 },
 {
@@ -14642,7 +14697,7 @@
 },
 {
 "canonical_he_title": "גליון הש\"ס על מגילה",
-"hash": "04a46d9c7345b97f",
+"hash": "e2ca178607fc628e",
 "source_name": "Sefaria"
 },
 {
@@ -16207,7 +16262,7 @@
 },
 {
 "canonical_he_title": "הדר זקנים על התורה",
-"hash": "f082541932f4b6b3",
+"hash": "2ccf7bd51123a486",
 "source_name": "Sefaria"
 },
 {
@@ -17957,7 +18012,7 @@
 },
 {
 "canonical_he_title": "חידושי אגדות על ראש השנה",
-"hash": "37b8363047491dae",
+"hash": "192f8443ad8f4229",
 "source_name": "Sefaria"
 },
 {
@@ -18962,7 +19017,7 @@
 },
 {
 "canonical_he_title": "חידושי רמב\"ן על בבא מציעא",
-"hash": "038c2cb80961f71e",
+"hash": "9f277a0ac2c7bbe7",
 "source_name": "Sefaria"
 },
 {
@@ -19052,7 +19107,7 @@
 },
 {
 "canonical_he_title": "חידושי רמב\"ן על פסחים",
-"hash": "4dde30ee5ab2b554",
+"hash": "74f3b9ba0b352983",
 "source_name": "Sefaria"
 },
 {
@@ -21687,7 +21742,7 @@
 },
 {
 "canonical_he_title": "כד הקמח",
-"hash": "81d9f280f6a26a39",
+"hash": "1b83b4f54607db18",
 "source_name": "Sefaria"
 },
 {
@@ -26012,7 +26067,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על הושע",
-"hash": "de3935da6fb213fd",
+"hash": "ab69d3e75b72be49",
 "source_name": "Sefaria"
 },
 {
@@ -26037,7 +26092,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על יואל",
-"hash": "2e1e43d8d1bf7739",
+"hash": "b2933ffb938cb64e",
 "source_name": "Sefaria"
 },
 {
@@ -26047,7 +26102,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על יחזקאל",
-"hash": "ad6bf331535c5967",
+"hash": "420f644b34b450e4",
 "source_name": "Sefaria"
 },
 {
@@ -26107,7 +26162,7 @@
 },
 {
 "canonical_he_title": "מצודת דוד על עמוס",
-"hash": "e46f1ad5820c771e",
+"hash": "2a617f29e4f13d99",
 "source_name": "Sefaria"
 },
 {
@@ -26167,7 +26222,7 @@
 },
 {
 "canonical_he_title": "מצודת ציון על הושע",
-"hash": "828a8e8eca088039",
+"hash": "5589b23667356b10",
 "source_name": "Sefaria"
 },
 {
@@ -26192,7 +26247,7 @@
 },
 {
 "canonical_he_title": "מצודת ציון על יואל",
-"hash": "01ff647f4df18322",
+"hash": "80ecc17f9f26b73b",
 "source_name": "Sefaria"
 },
 {
@@ -26202,7 +26257,7 @@
 },
 {
 "canonical_he_title": "מצודת ציון על יחזקאל",
-"hash": "a4b414d19cb78745",
+"hash": "63453ddeec0f4c3a",
 "source_name": "Sefaria"
 },
 {
@@ -26262,7 +26317,7 @@
 },
 {
 "canonical_he_title": "מצודת ציון על עמוס",
-"hash": "0bc8f556b5859c63",
+"hash": "b08704dc8d8ad3ba",
 "source_name": "Sefaria"
 },
 {
@@ -27272,7 +27327,7 @@
 },
 {
 "canonical_he_title": "משנה יומא",
-"hash": "f7fdbfd221076828",
+"hash": "1ca6f343996d64a3",
 "source_name": "Sefaria"
 },
 {
@@ -27422,7 +27477,7 @@
 },
 {
 "canonical_he_title": "משנה למלך על משנה תורה, הלכות כלי המקדש והעובדין בו",
-"hash": "697381ace711eb9d",
+"hash": "1691083a17e44b97",
 "source_name": "Sefaria"
 },
 {
@@ -28092,7 +28147,7 @@
 },
 {
 "canonical_he_title": "משנה תורה, הלכות נחלות",
-"hash": "f8391c82842193a6",
+"hash": "1928f02a6c8b7d79",
 "source_name": "Sefaria"
 },
 {
@@ -28112,7 +28167,7 @@
 },
 {
 "canonical_he_title": "משנה תורה, הלכות עבדים",
-"hash": "e7b51514342d23d2",
+"hash": "df19e9a890b349fd",
 "source_name": "Sefaria"
 },
 {
@@ -28182,7 +28237,7 @@
 },
 {
 "canonical_he_title": "משנה תורה, הלכות שאר אבות הטומאות",
-"hash": "de724e5e86dea946",
+"hash": "d7882bdbab26edc8",
 "source_name": "Sefaria"
 },
 {
@@ -29267,7 +29322,7 @@
 },
 {
 "canonical_he_title": "ספר הזהר",
-"hash": "7621f0cd1dc95413",
+"hash": "ef4aae13c535ab8e",
 "source_name": "Sefaria"
 },
 {
@@ -29377,7 +29432,7 @@
 },
 {
 "canonical_he_title": "ספר הערוך",
-"hash": "1a32cdbc4d5065d2",
+"hash": "b726a93d38edfb4d",
 "source_name": "Sefaria"
 },
 {
@@ -30497,7 +30552,7 @@
 },
 {
 "canonical_he_title": "פלפולא חריפתא על שבועות",
-"hash": "3d4a2f5261e873cd",
+"hash": "ca32dce4b129df59",
 "source_name": "Sefaria"
 },
 {
@@ -30832,7 +30887,7 @@
 },
 {
 "canonical_he_title": "פסקי הרא\"ש על ברכות",
-"hash": "c9bdae71156b6596",
+"hash": "bdb7c004a5349844",
 "source_name": "Sefaria"
 },
 {
@@ -31217,7 +31272,7 @@
 },
 {
 "canonical_he_title": "פרק שירה",
-"hash": "f659b7f2998c07a7",
+"hash": "0eabbc2054f76190",
 "source_name": "Sefaria"
 },
 {
@@ -34067,7 +34122,7 @@
 },
 {
 "canonical_he_title": "רד\"ק על תהילים",
-"hash": "ec78b53df3fe743a",
+"hash": "e77740e0379033d8",
 "source_name": "Sefaria"
 },
 {
@@ -34277,7 +34332,7 @@
 },
 {
 "canonical_he_title": "ריטב\"א על עירובין",
-"hash": "8379b4112e860125",
+"hash": "c2adcd88b4adf13b",
 "source_name": "Sefaria"
 },
 {
@@ -34797,7 +34852,7 @@
 },
 {
 "canonical_he_title": "רש\"י על בבא קמא",
-"hash": "72863a9d46f8df3b",
+"hash": "cace5590d3fbb513",
 "source_name": "Sefaria"
 },
 {
@@ -34862,7 +34917,7 @@
 },
 {
 "canonical_he_title": "רש\"י על הושע",
-"hash": "741d2c8fe0838192",
+"hash": "fd7a32a67ec5acd4",
 "source_name": "Sefaria"
 },
 {
@@ -34912,7 +34967,7 @@
 },
 {
 "canonical_he_title": "רש\"י על יואל",
-"hash": "8b0ea489c688b035",
+"hash": "2a8d4ec08f7d93a5",
 "source_name": "Sefaria"
 },
 {
@@ -34927,7 +34982,7 @@
 },
 {
 "canonical_he_title": "רש\"י על יחזקאל",
-"hash": "1b13ff25ad35b8ca",
+"hash": "436e771dba2d5ede",
 "source_name": "Sefaria"
 },
 {
@@ -35067,7 +35122,7 @@
 },
 {
 "canonical_he_title": "רש\"י על עמוס",
-"hash": "b1b98eff2f8da4c5",
+"hash": "37d22ce919f813dd",
 "source_name": "Sefaria"
 },
 {
@@ -35412,7 +35467,7 @@
 },
 {
 "canonical_he_title": "רשב״א על חולין",
-"hash": "4329e3f32969eb00",
+"hash": "5beffc6e50702272",
 "source_name": "Sefaria"
 },
 {
@@ -36477,7 +36532,7 @@
 },
 {
 "canonical_he_title": "שיטה מקובצת על בבא קמא",
-"hash": "ce419362f879d4aa",
+"hash": "a1af7df9d1f9fef2",
 "source_name": "Sefaria"
 },
 {
@@ -37297,7 +37352,7 @@
 },
 {
 "canonical_he_title": "שערי תורת ארץ ישראל על תלמוד ירושלמי הוריות",
-"hash": "37f12a3952fa8832",
+"hash": "9663298c07c8d5c3",
 "source_name": "Sefaria"
 },
 {
@@ -38177,7 +38232,7 @@
 },
 {
 "canonical_he_title": "תוספות יום טוב על משנה יבמות",
-"hash": "4ecb604888a556c9",
+"hash": "8993ed838edae8d1",
 "source_name": "Sefaria"
 },
 {
@@ -38422,7 +38477,7 @@
 },
 {
 "canonical_he_title": "תוספות על בבא קמא",
-"hash": "2fb3b784b93597ae",
+"hash": "ec65df1e4018b149",
 "source_name": "Sefaria"
 },
 {
@@ -38557,7 +38612,7 @@
 },
 {
 "canonical_he_title": "תוספות על פסחים",
-"hash": "3afb7bdcef211db8",
+"hash": "73957dbd6bea401f",
 "source_name": "Sefaria"
 },
 {
@@ -39022,7 +39077,7 @@
 },
 {
 "canonical_he_title": "תוספות רי\"ד על תענית",
-"hash": "d05a919bcd23b4f7",
+"hash": "d282ac219eff87aa",
 "source_name": "Sefaria"
 },
 {
@@ -39852,7 +39907,7 @@
 },
 {
 "canonical_he_title": "תפארת שלמה",
-"hash": "17bb82a48e0c4e80",
+"hash": "98df9c13b975c0c6",
 "source_name": "Sefaria"
 },
 {
@@ -40317,7 +40372,7 @@
 },
 {
 "canonical_he_title": "בעניין מספר הפסוקים התיבות והאותיות בתורה",
-"hash": "6aba4c3c65828799",
+"hash": "4bb89009991e52dc",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -40327,7 +40382,7 @@
 },
 {
 "canonical_he_title": "וביום השבת",
-"hash": "e1ee3abcdff1e490",
+"hash": "fba738c7deb633d7",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -40432,7 +40487,7 @@
 },
 {
 "canonical_he_title": "חברותא על נדה",
-"hash": "f38a03534e09b121",
+"hash": "411503d951be0327",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -40497,7 +40552,7 @@
 },
 {
 "canonical_he_title": "חברותא על שבת",
-"hash": "5c1eb5e715c35a83",
+"hash": "f6fc186a7d3bc88a",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -40522,27 +40577,27 @@
 },
 {
 "canonical_he_title": "חמדת ימים א",
-"hash": "b2b02fa725ace209",
+"hash": "46917be338cc2cbb",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חמדת ימים ב",
-"hash": "15fd0a4672060655",
+"hash": "21cf92391e787f72",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "חמדת ימים ג",
-"hash": "1a68c066550e1cc6",
+"hash": "b3ce2b84d8e17b1d",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "מבוא שערי חמדה",
-"hash": "d6bf8a89bef07c11",
+"hash": "ef86149a4952279e",
 "source_name": "ToratEmetToOtzaria"
 },
 {
 "canonical_he_title": "מנורת המאור (אבוהב)",
-"hash": "bcc621df64b5e72d",
+"hash": "acb072fdb35ec7af",
 "source_name": "ToratEmetToOtzaria"
 },
 {
@@ -40587,7 +40642,7 @@
 },
 {
 "canonical_he_title": "ארץ יהודה על ארצות החיים",
-"hash": "4112bf92fa9d7c75",
+"hash": "581f322ce0963db5",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40602,7 +40657,7 @@
 },
 {
 "canonical_he_title": "בירת מגדל עוז",
-"hash": "1b822dff5619015d",
+"hash": "504f613a105afbc8",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40617,7 +40672,7 @@
 },
 {
 "canonical_he_title": "ברכת הזבח על זבחים",
-"hash": "afa1f0561583402e",
+"hash": "6fa93a10c74b8732",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40637,7 +40692,7 @@
 },
 {
 "canonical_he_title": "ברכת הזבח על ערכין",
-"hash": "aafaca71ca83220a",
+"hash": "811a9d76ead76da3",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40667,7 +40722,7 @@
 },
 {
 "canonical_he_title": "חידושי הרשב״א על מנחות",
-"hash": "fa8198d1f766520b",
+"hash": "6d087c1eb3aaf74b",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40722,7 +40777,7 @@
 },
 {
 "canonical_he_title": "יד דוד על עירובין",
-"hash": "ebe1478c566bcb8b",
+"hash": "dafee8d8d39dad73",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40732,7 +40787,7 @@
 },
 {
 "canonical_he_title": "יד דוד על ראש השנה",
-"hash": "d2814257e3b6b6a0",
+"hash": "362270902258f369",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40747,7 +40802,7 @@
 },
 {
 "canonical_he_title": "כלי יקר על נביאים",
-"hash": "ea4614093d088439",
+"hash": "e20788bbe5a14b44",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40757,7 +40812,7 @@
 },
 {
 "canonical_he_title": "מגילת ספר",
-"hash": "ca4541d0724559ef",
+"hash": "5300ac7b481f0a32",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40777,12 +40832,12 @@
 },
 {
 "canonical_he_title": "משיבת נפש חלק ב",
-"hash": "20f39b05d5db63c2",
+"hash": "48110a2eb14dc6d9",
 "source_name": "pninimToOtzaria"
 },
 {
 "canonical_he_title": "עזרה להבין",
-"hash": "6d560784f449a8af",
+"hash": "5b0f695d8b6462fc",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40802,7 +40857,7 @@
 },
 {
 "canonical_he_title": "פנים מאירות על זבחים",
-"hash": "00ea42f75b836346",
+"hash": "c902d09df5ae5b64",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40812,12 +40867,12 @@
 },
 {
 "canonical_he_title": "צאן קדשים על זבחים",
-"hash": "01769371897d9a50",
+"hash": "de6b24c7ca378b06",
 "source_name": "pninimToOtzaria"
 },
 {
 "canonical_he_title": "צאן קדשים על מנחות",
-"hash": "d13f1f3647727d42",
+"hash": "b883b5960b3cd46f",
 "source_name": "pninimToOtzaria"
 },
 {
@@ -40857,12 +40912,12 @@
 },
 {
 "canonical_he_title": "דברי יואל על המועדים",
-"hash": "9b9a12c9073acbf3",
+"hash": "2685e1dfdb1f3bcf",
 "source_name": "tashmaToOtzaria"
 },
 {
 "canonical_he_title": "דברי יואל על התורה",
-"hash": "114e1a81f0905653",
+"hash": "4e9b339d362d2b15",
 "source_name": "tashmaToOtzaria"
 },
 {
@@ -40877,7 +40932,7 @@
 },
 {
 "canonical_he_title": "דבר אברהם",
-"hash": "7a719b72928304d8",
+"hash": "30acfa941e32ce1f",
 "source_name": "wikiJewishBooksToOtzaria"
 },
 {
@@ -40892,7 +40947,7 @@
 },
 {
 "canonical_he_title": "טורי אבן",
-"hash": "ffc3a1ab8fb177d0",
+"hash": "abc9fe01a38419b4",
 "source_name": "wikiJewishBooksToOtzaria"
 },
 {
@@ -40907,7 +40962,7 @@
 },
 {
 "canonical_he_title": "מנחה חריבה",
-"hash": "de57ffaa7b538fba",
+"hash": "741c21c2104b9fc8",
 "source_name": "wikiJewishBooksToOtzaria"
 },
 {
@@ -41007,7 +41062,7 @@
 },
 {
 "canonical_he_title": "ובחרת בחיים",
-"hash": "a1c4cd19a89ff462",
+"hash": "2143d13f043e0500",
 "source_name": "wikisourceToOtzaria"
 },
 {
@@ -41112,7 +41167,7 @@
 },
 {
 "canonical_he_title": "פירוש הרא״ש על מדות",
-"hash": "283fc6c6e00d2ceb",
+"hash": "61c2d96b77621f52",
 "source_name": "wikisourceToOtzaria"
 },
 {
@@ -41137,7 +41192,7 @@
 },
 {
 "canonical_he_title": "ראה מעשה",
-"hash": "b69edd265d03626d",
+"hash": "01dc3abc50bfaa80",
 "source_name": "wikisourceToOtzaria"
 },
 {
@@ -41157,12 +41212,12 @@
 },
 {
 "canonical_he_title": "תולדות תנאים ואמוראים",
-"hash": "ccde7b629ebb47ea",
+"hash": "f276c7256d3dc917",
 "source_name": "wikisourceToOtzaria"
 },
 {
 "canonical_he_title": "דברי אמת (דרשות)",
-"hash": "5f5e92d18c8fb070",
+"hash": "a4548eea5f1c7643",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
@@ -41182,7 +41237,7 @@
 },
 {
 "canonical_he_title": "חזון איש, חושן משפט נזיקין",
-"hash": "9602d382f6a2edb9",
+"hash": "b5f2e51e23e145ac",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
@@ -41192,37 +41247,37 @@
 },
 {
 "canonical_he_title": "ילקוט מעם לועז - במדבר",
-"hash": "e06077cd03ea3b64",
+"hash": "9fca8936ccfc4ff9",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "ילקוט מעם לועז - בראשית",
-"hash": "cef0e20e02bf4a66",
+"hash": "d268d0940d4f2ed4",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "ילקוט מעם לועז - ויקרא",
-"hash": "5d69239e3bdd2457",
+"hash": "7698c23050ce3847",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "ילקוט מעם לועז - שמות",
-"hash": "5568a87aa5e9a4c7",
+"hash": "5ffc30e55e6764e8",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "מנחת ברוך אורח חיים",
-"hash": "95457645f0ba9e53",
+"hash": "6446dd16eca77b13",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "ספר המנהיג",
-"hash": "20a70a50f1699100",
+"hash": "c4ea79751c3df8c7",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
 "canonical_he_title": "פחד יצחק חלק ט",
-"hash": "db3d570e00335642",
+"hash": "78c9ad288d45bec2",
 "source_name": "yam-HaHachmaToOtzaria"
 },
 {
@@ -41292,7 +41347,7 @@
 },
 {
 "canonical_he_title": "שו״ת ושב הכהן",
-"hash": "46edb95af877fcc5",
+"hash": "d6846fc3101c5756",
 "source_name": "yam-HaHachmaToOtzaria"
 }
 ],
